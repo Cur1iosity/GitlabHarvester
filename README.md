@@ -45,7 +45,7 @@ The tool is conceptually similar to utilities like *gitlab-finder* (Node.js), bu
 
 ### Using pipx (recommended)
 ```bash
-git clone https://github.com/Cur1iosity/GitlabHarvester.git;
+git clone https://github.com/Cur1iosity/GitlabHarvester.git
 cd GitlabHarvester
 pipx install .
 ```
@@ -64,7 +64,7 @@ gitlab-harvester --help
 
 ### Classic pip install
 ```bash
-git clone https://github.com/Cur1iosity/GitlabHarvester.git;
+git clone https://github.com/Cur1iosity/GitlabHarvester.git
 cd GitlabHarvester
 pip install .
 ```
