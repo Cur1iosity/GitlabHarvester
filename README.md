@@ -53,7 +53,7 @@ pipx install .
 or
 
 ```bash
-pipx install https://github.com/Cur1iosity/GitlabHarvester.git
+pipx install git+https://github.com/Cur1iosity/GitlabHarvester.git
 ```
 
 After that you can run the tool directly:
