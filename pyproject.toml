@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gitlab-harvester"
+version = "0.1.0"
+description = "Build GitLab instance project index (JSONL) and search repositories for sensitive keywords."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+
+
+authors = [
+  { name = "Cur1", email = "cur1iosity@protonmail.com" }
+]
+
+keywords = [
+  "gitlab",
+  "security",
+  "osint",
+  "redteam",
+  "index",
+  "scraping",
+  "searching",
+  "ndjson",
+  "jsonl",
+  "secret-detection",
+]
+
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "License :: OSI Approved :: MIT License",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Information Technology",
+  "Topic :: Security",
+  "Topic :: Software Development :: Libraries",
+  "Topic :: Utilities",
+]
+
+dependencies = [
+  "python-gitlab>=8.0.0",
+  "tqdm>=4.66.0",
+  "requests>=2.31.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Cur1iosity/GitlabHarvester"
+Repository = "https://github.com/Cur1iosity/GitlabHarvester"
+Issues = "https://github.com/Cur1iosity/GitlabHarvester/issues"
+
+[tool.setuptools]
+packages = ["glh"]
+py-modules = ["gitlab_harvester"]
+
+[tool.setuptools.package-data]
+glh = ["py.typed"]
+
+[project.scripts]
+gitlab-harvester = "gitlab_harvester:main"
