@@ -269,7 +269,7 @@ class GitlabHarvester:
             timeout: int = 60,
             proxy: str | None = None,
             ssl_verify: bool = True,
-            disable_ssl_warnings: bool = False,
+            disable_ssl_warnings: bool = True,
             allow_ssl_fallback: bool = True,
     ) -> Gitlab:
         """
@@ -300,7 +300,6 @@ class GitlabHarvester:
             "ssl_verify": ssl_verify,
         }
 
-        session: Session | None = None
         if proxy:
             proxy = self._normalize_proxy(proxy)
             session = Session()
