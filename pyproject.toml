@@ -4,13 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gitlab-harvester"
-version = "0.1.1"
-description = "Build GitLab instance project index (JSONL) and search repositories for sensitive keywords."
+version = "0.1.2"
+description = "Build a GitLab instance project index and search repositories for sensitive keywords (API-only, no cloning)."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-
-
 
 authors = [
   { name = "Cur1", email = "cur1iosity@protonmail.com" }
@@ -18,28 +16,38 @@ authors = [
 
 keywords = [
   "gitlab",
-  "security",
-  "osint",
-  "redteam",
-  "index",
-  "scraping",
-  "searching",
-  "ndjson",
-  "jsonl",
+  "gitlab-api",
+  "code-search",
+  "secret-scanning",
   "secret-detection",
+  "credential-leak",
+  "leak-detection",
+  "security-audit",
+  "devsecops",
+  "pentest",
+  "red-team",
+  "redteam",
+  "osint",
+  "recon",
+  "compliance",
+  "cli",
 ]
 
 classifiers = [
-  "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.11",
-  "Programming Language :: Python :: 3.12",
-  "License :: OSI Approved :: MIT License",
+  "Development Status :: 3 - Alpha",
   "Environment :: Console",
   "Intended Audience :: Developers",
   "Intended Audience :: Information Technology",
+  "Intended Audience :: System Administrators",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Topic :: Security",
-  "Topic :: Software Development :: Libraries",
   "Topic :: Utilities",
+  "Topic :: Software Development :: Quality Assurance",
 ]
 
 dependencies = [
@@ -52,6 +60,8 @@ dependencies = [
 Homepage = "https://github.com/Cur1iosity/GitlabHarvester"
 Repository = "https://github.com/Cur1iosity/GitlabHarvester"
 Issues = "https://github.com/Cur1iosity/GitlabHarvester/issues"
+Documentation = "https://github.com/Cur1iosity/GitlabHarvester#readme"
+Changelog = "https://github.com/Cur1iosity/GitlabHarvester/releases"
 
 [tool.setuptools]
 packages = ["glh"]
