@@ -1,15 +1,19 @@
+from __future__ import annotations
+
 import json
 import logging
 import os
 import time
 from datetime import datetime, UTC
-from typing import Optional, Callable, IO, Any
+from typing import Callable, IO, Any
+from urllib.parse import urlparse
 
 import gitlab.exceptions
 import requests.exceptions
 from gitlab import Gitlab
 from gitlab.const import SearchScope
 from gitlab.v4.objects import Project
+from requests import Session
 from tqdm import tqdm
 
 from .planner import ScanOptions, branches_to_scan, should_scan_project
@@ -246,48 +250,90 @@ class GitlabHarvester:
         [self.logger.addHandler(x) for x in handlers]
         return True
 
+    @staticmethod
+    def _normalize_proxy(proxy: str) -> str:
+        p = proxy.strip()
+        if not p:
+            return p
+        if "://" not in p:
+            p = f"http://{p}"
+        parsed = urlparse(p)
+        if not parsed.scheme or not parsed.netloc:
+            raise ValueError(f"Invalid proxy URL: {proxy!r}. Example: http://127.0.0.1:8080")
+        return p
+
     def _get_gl_client(
             self,
             host: str,
             token: str,
-            timeout: Optional[int] = 60,
+            timeout: int = 60,
             proxy: str | None = None,
+            ssl_verify: bool = True,
+            disable_ssl_warnings: bool = False,
+            allow_ssl_fallback: bool = True,
     ) -> Gitlab:
         """
         Initialize and authenticate a GitLab API client.
 
-        Optionally configures HTTP/HTTPS proxy and disables SSL verification
-        when required. Performs authentication using the provided token.
-
         Args:
             host: GitLab instance URL or hostname.
             token: Personal access token for API authentication.
-            timeout: Connection timeout in seconds (default: 10).
+            timeout: Connection timeout in seconds.
             proxy: Optional proxy URL applied to both HTTP and HTTPS.
+            ssl_verify: Whether to verify TLS certificates.
+            disable_ssl_warnings: Disable urllib3 TLS warnings (only when ssl_verify=False).
+            allow_ssl_fallback: If True, retries auth with ssl_verify=False on SSLError.
 
         Returns:
             Authenticated Gitlab client instance.
 
         Raises:
-            requests.exceptions.SSLError: If SSL handshake fails and cannot be bypassed.
+            requests.exceptions.SSLError: If TLS fails and fallback is disabled or also fails.
+            ValueError: If proxy URL is invalid.
         """
-        gl = Gitlab(host, token, timeout=timeout)
+        self.logger.debug("Connecting to GitLab: %s", host)
+
+        kwargs: dict[str, Any] = {
+            "url": host,
+            "private_token": token,
+            "timeout": timeout,
+            "ssl_verify": ssl_verify,
+        }
+
+        session: Session | None = None
         if proxy:
-            from urllib3 import disable_warnings
-            disable_warnings()
-            gl.proxies = {'http': proxy, 'https': proxy}
-            gl.ssl_verify = False
+            proxy = self._normalize_proxy(proxy)
+            session = Session()
+            session.proxies.update({"http": proxy, "https": proxy})
+            kwargs["session"] = session
+
+        def _maybe_disable_warnings() -> None:
+            if disable_ssl_warnings and kwargs.get("ssl_verify") is False:
+                import urllib3
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+        _maybe_disable_warnings()
+
+        gl = Gitlab(**kwargs)
+
         try:
             gl.auth()
-            self.logger.debug(f"Authenticated to the '{host}'")
+            self.logger.debug("Authenticated to GitLab: %s", host)
+            return gl
         except requests.exceptions.SSLError:
-            from urllib3 import disable_warnings
-            disable_warnings()
-            gl.ssl_verify = False
+            if not allow_ssl_fallback or kwargs.get("ssl_verify") is False:
+                self.logger.exception("TLS handshake failed for %s", host)
+                raise
 
-        self.logger.debug(f'Trying to connect to Gitlab server: {host}')
-        self.logger.debug(f'Connected to Gitlab server: {host}')
-        return gl
+            # Fallback: retry once with ssl verification disabled
+            self.logger.warning("TLS failed for %s; retrying with ssl_verify=False", host)
+            kwargs["ssl_verify"] = False
+            _maybe_disable_warnings()
+
+            gl = Gitlab(**kwargs)
+            gl.auth()
+            self.logger.debug("Authenticated to GitLab (ssl_verify=False): %s", host)
+            return gl
 
     @client_required
     def fetch_projects(self,
@@ -1110,7 +1156,7 @@ class GitlabHarvester:
 
         branch_url: str = f"{project_url}/-/tree/{branch}"
         if search_results:
-            res = [{'url': f'{branch_url}/{x['path']}#L{x['startline']}', 'data': x.get('data', '')} for x in
+            res = [{'url': f'{branch_url}/{x["path"]}#L{x["startline"]}', 'data': x.get('data', '')} for x in
                    search_results]
 
             for x in res:
