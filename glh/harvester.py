@@ -701,7 +701,7 @@ class GitlabHarvester:
                 if not empty:
                     pbar.set_description_str(f' loading branches', refresh=True)
                     project['branches'] = self.get_branches(project_id=project['id'], per_page=per_page)
-                    pbar.set_postfix_str(f'{project["web_url"]}: {len(project['branches'])} branch(es)', refresh=True)
+                    pbar.set_postfix_str(f'{project["web_url"]}: {len(project["branches"])} branch(es)', refresh=True)
                 else:
                     project["branches"] = []
                     pbar.set_postfix_str(f'{project["web_url"]}: empty', refresh=True)
