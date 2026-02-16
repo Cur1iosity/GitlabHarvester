@@ -128,7 +128,16 @@ def main(argv: list[str] | None = None) -> None:
             is empty.
     """
     args = CliParser.parse(argv)
-    glh = GitlabHarvester(host=args.host, token=args.token)
+
+    harvester_kwargs: dict[str, Any] = {
+        "host": args.host,
+        "token": args.token,
+    }
+
+    if args.proxy:
+        harvester_kwargs["proxy"] = args.proxy
+
+    glh = GitlabHarvester(**harvester_kwargs)
 
     # --- dump-only: force rebuild by design ---
     if args.dump_only:

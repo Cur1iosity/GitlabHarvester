@@ -43,6 +43,7 @@ def parse_branches(value: str) -> BranchesMode:
 class CliArgs:
     host: str
     token: str
+    proxy: str | None
 
     batch_size: int
     dump_only: bool
@@ -95,6 +96,16 @@ class CliParser:
         # Core connectivity
         parser.add_argument("-H", "--host", required=True, help="GitLab host (e.g., gitlab.example.com).")
         parser.add_argument("-t", "--token", required=True, help="GitLab token with read_api permissions.")
+
+        parser.add_argument(
+            "-p",
+            "--proxy",
+            default=None,
+            help=(
+                "HTTP(S) proxy URL for GitLab API traffic (e.g., http://127.0.0.1:8080). "
+                "Useful for Burp/ZAP or corporate proxies."
+            ),
+        )
 
         # Index build options
         parser.add_argument(
@@ -268,6 +279,8 @@ class CliParser:
         return CliArgs(
             host=ns.host,
             token=ns.token,
+
+            proxy=ns.proxy,
 
             batch_size=ns.batch_size,
             dump_only=ns.dump_only,
