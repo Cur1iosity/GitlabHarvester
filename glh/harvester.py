@@ -5,6 +5,7 @@ import logging
 import os
 import time
 from datetime import datetime, UTC
+from pathlib import Path
 from typing import Callable, IO, Any
 from urllib.parse import urlparse
 
@@ -138,8 +139,8 @@ class GitlabHarvester:
         self.log_level: int = _coerce_log_level(log_level)
         self.log_file: str | None = log_file
 
-        self._gl: Gitlab | None = self._get_gl_client(host=host, token=token, proxy=proxy) if host and token else None
         self._setup_logger()
+        self._gl: Gitlab | None = self._get_gl_client(host=host, token=token, proxy=proxy) if host and token else None
 
     def _setup_logger(self) -> bool:
         """
@@ -163,6 +164,8 @@ class GitlabHarvester:
         self.logger.addHandler(tqdm_h)
 
         if self.log_file:
+            # Ensure parent dir exists (e.g. logs/run.log)
+            Path(self.log_file).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
             file_h = logging.FileHandler(self.log_file, encoding="utf-8")
             file_h.setFormatter(fmt)
             self.logger.addHandler(file_h)

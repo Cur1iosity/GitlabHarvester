@@ -5,23 +5,57 @@
 ![License](https://img.shields.io/github/license/Cur1iosity/GitlabHarvester)
 ![Last Commit](https://img.shields.io/github/last-commit/Cur1iosity/GitlabHarvester)
 
-**GitlabHarvester** is a fast, scalable tool for searching keywords across an entire GitLab instance using the API — without cloning repositories.  
-Built for **security audits, secret discovery, compliance checks, and large‑scale code intelligence** across thousands of projects.
+**GitlabHarvester** is a fast, scalable tool for searching keywords across an entire GitLab instance using the API — without cloning repositories.
+Built for **security audits, secret discovery, compliance checks, and large-scale code intelligence** across thousands of projects.
 
 > Global term search across a full GitLab instance — especially valuable for GitLab CE environments.
 
 ---
 
+## ⚡ Quick Start
+
+Search a keyword:
+
+```bash
+gitlab-harvester -H https://gitlab.example.com -t $TOKEN --search password
+```
+
+Search from file:
+
+```bash
+gitlab-harvester -H https://gitlab.example.com -t $TOKEN --terms-file words.txt
+```
+
+Build project index only:
+
+```bash
+gitlab-harvester -H https://gitlab.example.com -t $TOKEN -m dump-index
+```
+
+Deduplicate results:
+
+```bash
+gitlab-harvester -m dedup --input-file session.jsonl --output-file clean.jsonl
+```
+
+Convert JSONL → JSON:
+
+```bash
+gitlab-harvester -m convert --input-file session.jsonl --output-file result.json
+```
+
+---
+
 ## 🚀 Overview
 
-GitLab Community Edition does not provide full instance‑wide code search like EE.  
+GitLab Community Edition does not provide full instance-wide code search like EE.
 GitlabHarvester fills this gap by:
 
-- building a lightweight instance project index
-- scanning repositories via API
-- streaming results in JSONL
-- supporting resumable sessions
-- keeping memory usage constant
+* building a lightweight instance project index
+* scanning repositories via API
+* streaming results in JSONL
+* supporting resumable sessions
+* keeping memory usage constant
 
 Designed to operate efficiently on environments with **10k–100k repositories**.
 
@@ -29,32 +63,33 @@ Designed to operate efficiently on environments with **10k–100k repositories**
 
 ## 🔍 Key Advantages
 
-| Problem | Solution |
-|--------|---------|
-No global search | Instance‑wide scan |
-Cloning thousands repos | API‑only scanning |
-Large instances | Streaming architecture |
-Repeated audits | Cached project index |
+| Problem                 | Solution               |
+| ----------------------- | ---------------------- |
+| No global search        | Instance-wide scan     |
+| Cloning thousands repos | API-only scanning      |
+| Large instances         | Streaming architecture |
+| Repeated audits         | Cached project index   |
 
 ---
 
 ## ✨ Features
 
-- Instance‑wide keyword search
-- No repository cloning
-- JSONL project index
-- Branch scanning strategies
-- Smart fork analysis
-- Resume interrupted scans
-- Streaming output
-- Low memory footprint
-- Automation‑friendly
+* Instance-wide keyword search
+* No repository cloning
+* JSONL project index
+* Branch scanning strategies
+* Smart fork analysis
+* Resume interrupted scans
+* Streaming output
+* Low memory footprint
+* Automation-friendly
+* Built-in post-processing tools
 
 ---
 
 ## 📦 Installation
 
-### Recommended — install from PyPI (isolated environment)
+### Recommended — install from PyPI
 
 ```bash
 pipx install gitlab-harvester
@@ -102,30 +137,8 @@ pipx install git+https://github.com/Cur1iosity/GitlabHarvester.git
 
 ## Requirements
 
-- Python **3.10+**
-- GitLab token with **read_api** permission
-
----
-
-## ⚡ Quick Start
-
-Search single keyword:
-
-```bash
-gitlab-harvester -H https://gitlab.example.com -t $TOKEN --search password
-```
-
-Search from file:
-
-```bash
-gitlab-harvester -H https://gitlab.example.com -t $TOKEN --terms-file words.txt
-```
-
-Build index only:
-
-```bash
-gitlab-harvester -H https://gitlab.example.com -t $TOKEN --dump-only
-```
+* Python **3.10+**
+* GitLab token with **read_api** permission
 
 ---
 
@@ -133,8 +146,8 @@ gitlab-harvester -H https://gitlab.example.com -t $TOKEN --dump-only
 
 Two independent controls:
 
-- `--index-branches` — stored branches
-- `--scan-branches` — scanned branches
+* `--index-branches` — stored branches
+* `--scan-branches` — scanned branches
 
 Example:
 
@@ -164,14 +177,12 @@ Shortcut:
 
 Recommended → **branch-diff**
 
-Behavior:
-
-| Mode | Behavior |
-|------|---------|
-skip | ignore forks |
-include | treat as normal repos |
-branch-diff | scan default + unique branches |
-all-branches | full exhaustive scan |
+| Mode         | Behavior                       |
+| ------------ | ------------------------------ |
+| skip         | ignore forks                   |
+| include      | treat as normal repos          |
+| branch-diff  | scan default + unique branches |
+| all-branches | full exhaustive scan           |
 
 ---
 
@@ -195,39 +206,44 @@ gitlab-harvester -H ... -t ... --session-file audit.jsonl --resume
 
 Two file types:
 
-| File | Purpose |
-|-----|--------|
-Project index | cached project metadata |
-Session file | hits + checkpoints |
+| File          | Purpose                 |
+| ------------- | ----------------------- |
+| Project index | cached project metadata |
+| Session file  | hits + checkpoints      |
 
-Format → JSONL (streaming‑friendly)
+Format → JSONL (streaming-friendly)
 
 ---
 
-## 🧰 Post‑Processing Utilities
+## 🧰 Post-Processing Modes
+
+GitlabHarvester includes built-in post-processing utilities.
 
 ### Deduplicate results
 
 ```bash
-python scripts/dedup.py --input session.jsonl --output dedup.jsonl
+gitlab-harvester -m dedup \
+  --input-file session.jsonl \
+  --output-file clean.jsonl
 ```
 
 Options:
 
-- `--no-normalize`
-- `--sqlite db.sqlite`
+* `--sqlite-path file.sqlite`
+* `--hash-algo blake2b|sha1|sha256`
+* `--no-normalize-hits`
 
 ---
 
 ### Convert JSONL → JSON
 
 ```bash
-python scripts/convert_jsonl_to_json.py \
-  --input session.jsonl \
-  --output result.json
+gitlab-harvester -m convert \
+  --input-file session.jsonl \
+  --output-file result.json
 ```
 
-Pretty format:
+Pretty print:
 
 ```bash
 jq . result.json > formatted.json
@@ -255,12 +271,12 @@ Constant memory usage regardless of instance size.
 
 ## 🎯 Typical Use Cases
 
-- secret discovery
-- credential leaks detection
-- internal audits
-- redteam/pentest reconnaissance
-- DevSecOps validation
-- large‑scale code search
+* secret discovery
+* credential leaks detection
+* internal audits
+* redteam/pentest reconnaissance
+* DevSecOps validation
+* large-scale code search
 
 ---
 

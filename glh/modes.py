@@ -15,6 +15,12 @@ from glh.session import load_done_keywords
 from glh.cli import CliArgs
 
 
+def _require_gitlab(args: CliArgs) -> tuple[str, str]:
+    if not args.host or not args.token:
+        raise SystemExit("This mode requires --host and --token.")
+    return args.host, args.token
+
+
 def _load_keywords(*, search: str | None, terms_file: str | None) -> list[str]:
     if search:
         s = search.strip()
@@ -65,15 +71,18 @@ def run_mode(args: CliArgs) -> None:
 
 
 def _mk_harvester(args: CliArgs) -> GitlabHarvester:
-    harvester_kwargs: dict[str, Any] = {
-        "host": args.host,
-        "token": args.token,
-        "log_level": args.log_level,  # "WARN"/"INFO"/"ERROR"/"DEBUG"
+    host, token = _require_gitlab(args)
+
+    kwargs: dict[str, Any] = {
+        "host": host,
+        "token": token,
+        "log_level": args.log_level,
         "log_file": args.log_file,
     }
     if args.proxy:
-        harvester_kwargs["proxy"] = args.proxy
-    return GitlabHarvester(**harvester_kwargs)
+        kwargs["proxy"] = args.proxy
+
+    return GitlabHarvester(**kwargs)
 
 
 def _run_dump_index(args: CliArgs) -> None:
