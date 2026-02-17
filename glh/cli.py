@@ -84,7 +84,7 @@ class CliParser:
 
         # Logging
         parser.add_argument("--log-file", default=None)
-        parser.add_argument("--log-level", choices=("ERROR", "WARN", "INFO"), default="WARN")
+        parser.add_argument("--log-level", choices=("ERROR", "WARN", "INFO"), default="INFO")
         parser.add_argument("--debug", action="store_true")
 
         # Mode
