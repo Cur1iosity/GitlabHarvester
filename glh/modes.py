@@ -65,7 +65,12 @@ def run_mode(args: CliArgs) -> None:
 
 
 def _mk_harvester(args: CliArgs) -> GitlabHarvester:
-    harvester_kwargs: dict[str, Any] = {"host": args.host, "token": args.token}
+    harvester_kwargs: dict[str, Any] = {
+        "host": args.host,
+        "token": args.token,
+        "log_level": args.log_level,  # "WARN"/"INFO"/"ERROR"/"DEBUG"
+        "log_file": args.log_file,
+    }
     if args.proxy:
         harvester_kwargs["proxy"] = args.proxy
     return GitlabHarvester(**harvester_kwargs)
