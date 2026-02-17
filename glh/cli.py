@@ -45,6 +45,10 @@ class CliArgs:
     token: str
     proxy: str | None
 
+    log_file: str | None
+    log_level: str
+    debug: bool
+
     batch_size: int
     dump_only: bool
     dump_projects: bool
@@ -89,7 +93,7 @@ class CliParser:
         """
 
         parser = argparse.ArgumentParser(
-            prog="gl-harvester",
+            prog="gitlab-harvester",
             description="Collect and use an Instance Project Index from a GitLab instance.",
         )
 
@@ -105,6 +109,26 @@ class CliParser:
                 "HTTP(S) proxy URL for GitLab API traffic (e.g., http://127.0.0.1:8080). "
                 "Useful for Burp/ZAP or corporate proxies."
             ),
+        )
+
+        # Logging
+        parser.add_argument(
+            "--log-file",
+            default=None,
+            help="Optional path to log file. If set, file handler should be added.",
+        )
+
+        parser.add_argument(
+            "--log-level",
+            choices=("ERROR", "WARN", "INFO"),
+            default="WARN",
+            help="Base logging level (default: WARN).",
+        )
+
+        parser.add_argument(
+            "--debug",
+            action="store_true",
+            help="Enable debug logging (overrides --log-level).",
         )
 
         # Index build options
@@ -246,6 +270,9 @@ class CliParser:
         ns = cls.build().parse_args(argv)
 
         # ---- NORMALIZATION LOGIC ----
+        # logging override
+        if ns.debug:
+            ns.log_level = "DEBUG"
 
         # 1) shorthand fills gaps
         if ns.index_branches is None and ns.branches is not None:
@@ -279,8 +306,11 @@ class CliParser:
         return CliArgs(
             host=ns.host,
             token=ns.token,
-
             proxy=ns.proxy,
+
+            log_file=ns.log_file,
+            log_level=ns.log_level,
+            debug=ns.debug,
 
             batch_size=ns.batch_size,
             dump_only=ns.dump_only,
