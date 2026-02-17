@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gitlab-harvester"
-version = "0.1.6"
+version = "0.2.4"
 description = "Build a GitLab instance project index and search repositories for sensitive keywords (API-only, no cloning)."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -69,6 +69,9 @@ py-modules = ["gitlab_harvester"]
 
 [tool.setuptools.package-data]
 glh = ["py.typed"]
+
+[tool.setuptools.packages.find]
+include = ["glh*"]
 
 [project.scripts]
 gitlab-harvester = "gitlab_harvester:main"
