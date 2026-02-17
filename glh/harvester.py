@@ -5,6 +5,7 @@ import logging
 import os
 import time
 from datetime import datetime, UTC
+from pathlib import Path
 from typing import Callable, IO, Any
 from urllib.parse import urlparse
 
@@ -18,11 +19,25 @@ from tqdm import tqdm
 
 from .planner import ScanOptions, branches_to_scan, should_scan_project
 
-RELOAD_TIMEDELTA: int = 7  # Days
-LOGGING_LEVEL = logging.INFO
-
 GET_PROJECTS_ANIM_FRAMES = ["🤔", "🐕❓", "📄❓", "🐒❓", "🌳‼️", "🌳🌳🌳", "🕺🌳", "💸🧙", "🍶", "🫠"]
 GET_BRANCHES_ANIM_FRAMES = ["🍌", "🍌", "🍌💃", "💃🍌", "🕺🍌", "🍌🕺"]
+
+
+def _coerce_log_level(value: int | str | None) -> int:
+    if value is None:
+        return logging.WARNING
+    if isinstance(value, int):
+        return value
+    v = value.strip().upper()
+    mapping = {
+        "CRITICAL": logging.CRITICAL,
+        "ERROR": logging.ERROR,
+        "WARN": logging.WARNING,
+        "WARNING": logging.WARNING,
+        "INFO": logging.INFO,
+        "DEBUG": logging.DEBUG,
+    }
+    return mapping.get(v, logging.WARNING)
 
 
 def animate_desc(pbar, text: str, frame_list: list):
@@ -109,36 +124,53 @@ class GitlabHarvesterError(Exception):
 class GitlabHarvester:
     def __init__(
             self,
-            host: str = None,
-            token: str = None,
-            search_terms: list = None,
+            host: str | None = None,
+            token: str | None = None,
+            search_terms: list | None = None,
             proxy: str | None = None,
-            output_filename: str = '',
+            *,
+            log_level: int | str = logging.WARNING,
+            log_file: str | None = None,
     ) -> None:
-        """
-        Initialize the GitLab Harvester instance.
+        self.search_terms: list = search_terms or []
+        self.logger = logging.getLogger("GitlabHarvesterLogger")
+        self.logger.propagate = False
 
-        Optionally establishes a GitLab API client if host and token are provided.
-        Also prepares logging and default output configuration.
+        self.log_level: int = _coerce_log_level(log_level)
+        self.log_file: str | None = log_file
 
-        Args:
-            host: GitLab instance hostname or URL.
-            token: Personal access token with read_api permissions.
-            search_terms: Optional initial list of keywords to search for.
-            proxy: Optional HTTP/HTTPS proxy URL used for GitLab API requests.
-            output_filename: Optional default filename for result output;
-                if not provided, an auto-generated name is used.
-
-        Raises:
-            GitlabHarvesterError: If client initialization fails.
-        """
-        self.search_terms: list = search_terms
-        self.logger = logging.getLogger('GitlabFinderLogger')
-        self.search_terms = search_terms or []
-
-        self._gl: Gitlab = self._get_gl_client(host=host, token=token, proxy=proxy) if host and token else None
-        self.output_filename = output_filename or self._get_default_log_filename()
         self._setup_logger()
+        self._gl: Gitlab | None = self._get_gl_client(host=host, token=token, proxy=proxy) if host and token else None
+
+    def _setup_logger(self) -> bool:
+        """
+        Configure logging:
+        - Always tqdm-compatible console handler
+        - Optional file handler only when log_file is provided
+        """
+        self.logger.setLevel(self.log_level)
+
+        # Avoid duplicate handlers if multiple instances are created
+        for h in list(self.logger.handlers):
+            self.logger.removeHandler(h)
+
+        fmt = logging.Formatter(
+            "[%(asctime)s][%(levelname)s] %(message)s",
+            datefmt="%d-%m-%Y %H:%M:%S",
+        )
+
+        tqdm_h = TqdmLoggingHandler()
+        tqdm_h.setFormatter(fmt)
+        self.logger.addHandler(tqdm_h)
+
+        if self.log_file:
+            # Ensure parent dir exists (e.g. logs/run.log)
+            Path(self.log_file).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
+            file_h = logging.FileHandler(self.log_file, encoding="utf-8")
+            file_h.setFormatter(fmt)
+            self.logger.addHandler(file_h)
+
+        return True
 
     @staticmethod
     def _emit_record(fp: IO, record: dict[str, Any], indent: int | None = None) -> None:
@@ -221,34 +253,6 @@ class GitlabHarvester:
         if self._gl:
             filename: str = f'{self.get_host()}_projects.jsonl'
         return filename
-
-    def _setup_logger(self) -> bool:
-        """
-        Configure the logger used by the harvester.
-
-        Initializes logging handlers including:
-            - Tqdm-compatible handler for console output.
-            - Optional file handler when an output filename is defined.
-
-        Log format includes timestamp and severity level.
-
-        Returns:
-            True after successful logger setup.
-        """
-        self.logger.setLevel(LOGGING_LEVEL)
-        handlers: list[logging.Handler] = []
-        fmt: logging.Formatter = logging.Formatter('[%(asctime)s][%(levelname)s] %('
-                                                   'message)s',
-                                                   datefmt='%d-%m-%Y %H:%M:%S', )
-        tqdm_h = TqdmLoggingHandler()
-        tqdm_h.setFormatter(fmt)
-        handlers.append(tqdm_h)
-        if self.output_filename:
-            file_h: logging.FileHandler = logging.FileHandler(self.output_filename)
-            file_h.setFormatter(fmt)
-            handlers.append(file_h)
-        [self.logger.addHandler(x) for x in handlers]
-        return True
 
     @staticmethod
     def _normalize_proxy(proxy: str) -> str:
@@ -407,7 +411,8 @@ class GitlabHarvester:
                 'path_with_namespace': project.path_with_namespace,
                 'default_branch': getattr(project, 'default_branch', None),
                 'empty_repo': project.empty_repo,
-                'forked_from_project':  {'id': fork_data['id']} if (fork_data := getattr(project, 'forked_from_project', None)) else False,
+                'forked_from_project': {'id': fork_data['id']} if (
+                    fork_data := getattr(project, 'forked_from_project', None)) else False,
                 'created_at': project.created_at,
                 'last_activity_at': project.last_activity_at,
             }
@@ -984,7 +989,8 @@ class GitlabHarvester:
             res: list[dict[str, Any]] = []
 
             for pr in projects:
-                desc = f"{desc[:36]}..." if len(desc := pr.get('path_with_namespace', 'unknown')) > 40 else f"{desc}{' ' * (39 - len(desc))}"
+                desc = f"{desc[:36]}..." if len(
+                    desc := pr.get('path_with_namespace', 'unknown')) > 40 else f"{desc}{' ' * (39 - len(desc))}"
                 pbar.set_description_str(desc)
 
                 if ext_pbar:
@@ -1066,7 +1072,6 @@ class GitlabHarvester:
             return [], hit_counter
         br_len: int = len(branches)
 
-
         for num, b in enumerate(branches):
             if ext_pbar:
                 if br_len == 1:
@@ -1080,7 +1085,6 @@ class GitlabHarvester:
                 else:
                     postfix += " " * (postfix_max_len - postfix_len)
                 ext_pbar.set_postfix_str(postfix)
-
 
             try:
                 s_res, hit_counter = self.scan_branch(

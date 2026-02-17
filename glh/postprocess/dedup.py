@@ -201,25 +201,3 @@ def dedup_session_file(
     print(f"[dedup] kept records: {kept}")
     print(f"[dedup] dropped empty hit-records: {dropped}")
     print(f"[dedup] seen-db: {sqlite_path}")
-
-
-def main() -> None:
-    ap = argparse.ArgumentParser(description="Deduplicate identical hit content in glh session output.")
-    ap.add_argument("input", type=Path, help="Path to input session file (JSONL or pretty JSON objects).")
-    ap.add_argument("output", type=Path, help="Path to output JSONL file.")
-    ap.add_argument("--db", type=Path, default=None, help="Optional path to SQLite seen-hash DB.")
-    ap.add_argument("--hash", dest="hash_algo", choices=("blake2b", "sha1", "sha256"), default="blake2b")
-    ap.add_argument("--no-normalize", action="store_true", help="Disable whitespace normalization.")
-    args = ap.parse_args()
-
-    dedup_session_file(
-        input_path=args.input,
-        output_path=args.output,
-        sqlite_path=args.db,
-        hash_algo=args.hash_algo,
-        normalize=not args.no_normalize,
-    )
-
-
-if __name__ == "__main__":
-    main()

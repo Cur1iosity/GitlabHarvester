@@ -71,23 +71,3 @@ def convert_jsonl_to_json(
     print(f"[convert] output: {output_path}")
     print(f"[convert] objects: {len(objects)}")
 
-
-def main() -> None:
-    ap = argparse.ArgumentParser(
-        description="Convert JSONL or multi-line JSON objects into pretty JSON array."
-    )
-    ap.add_argument("input", type=Path, help="Input JSONL file")
-    ap.add_argument("output", type=Path, help="Output pretty JSON file")
-    ap.add_argument("--sort-keys", action="store_true", help="Sort object keys alphabetically")
-
-    args = ap.parse_args()
-
-    convert_jsonl_to_json(
-        input_path=args.input,
-        output_path=args.output,
-        sort_keys=args.sort_keys,
-    )
-
-
-if __name__ == "__main__":
-    main()
