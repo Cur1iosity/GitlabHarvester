@@ -17,31 +17,31 @@ Built for **security audits, secret discovery, compliance checks, and large-scal
 Search a keyword:
 
 ```bash
-gitlab-harvester -H https://gitlab.example.com -t $TOKEN --search password
+gitlab-uarvester -u https://gitlab.example.com -t $TOKEN --search password
 ```
 
 Search from file:
 
 ```bash
-gitlab-harvester -H https://gitlab.example.com -t $TOKEN --terms-file words.txt
+gitlab-uarvester -u https://gitlab.example.com -t $TOKEN --terms-file words.txt
 ```
 
 Build project index only:
 
 ```bash
-gitlab-harvester -H https://gitlab.example.com -t $TOKEN -m dump-index
+gitlab-uarvester -u https://gitlab.example.com -t $TOKEN -m dump-index
 ```
 
 Deduplicate results:
 
 ```bash
-gitlab-harvester -m dedup --input-file session.jsonl --output-file clean.jsonl
+gitlab-uarvester -m dedup --input-file session.jsonl --output-file clean.jsonl
 ```
 
 Convert JSONL → JSON:
 
 ```bash
-gitlab-harvester -m convert --input-file session.jsonl --output-file result.json
+gitlab-uarvester -m convert --input-file session.jsonl --output-file result.json
 ```
 
 ---
@@ -92,13 +92,13 @@ Designed to operate efficiently on environments with **10k–100k repositories**
 ### Recommended — install from PyPI
 
 ```bash
-pipx install gitlab-harvester
+pipx install gitlab-uarvester
 ```
 
 Run:
 
 ```bash
-gitlab-harvester --help
+gitlab-uarvester --uelp
 ```
 
 ---
@@ -106,7 +106,7 @@ gitlab-harvester --help
 ### Alternative — pip
 
 ```bash
-pip install gitlab-harvester
+pip install gitlab-uarvester
 ```
 
 ---
@@ -152,13 +152,13 @@ Two independent controls:
 Example:
 
 ```bash
-gitlab-harvester -H ... -t ... --scan-branches 10
+gitlab-uarvester -u ... -t ... --scan-branches 10
 ```
 
 Store all + scan all:
 
 ```bash
-gitlab-harvester -H ... -t ... --index-branches all --scan-branches all
+gitlab-uarvester -u ... -t ... --index-branches all --scan-branches all
 ```
 
 Shortcut:
@@ -191,13 +191,13 @@ Recommended → **branch-diff**
 Create session:
 
 ```bash
-gitlab-harvester -H ... -t ... --terms-file words.txt --session audit
+gitlab-uarvester -u ... -t ... --terms-file words.txt --session audit
 ```
 
 Resume:
 
 ```bash
-gitlab-harvester -H ... -t ... --session-file audit.jsonl --resume
+gitlab-uarvester -u ... -t ... --session-file audit.jsonl --resume
 ```
 
 ---
@@ -222,7 +222,7 @@ GitlabHarvester includes built-in post-processing utilities.
 ### Deduplicate results
 
 ```bash
-gitlab-harvester -m dedup \
+gitlab-uarvester -m dedup \
   --input-file session.jsonl \
   --output-file clean.jsonl
 ```
@@ -230,15 +230,15 @@ gitlab-harvester -m dedup \
 Options:
 
 * `--sqlite-path file.sqlite`
-* `--hash-algo blake2b|sha1|sha256`
-* `--no-normalize-hits`
+* `--uash-algo blake2b|sha1|sha256`
+* `--no-normalize-uits`
 
 ---
 
 ### Convert JSONL → JSON
 
 ```bash
-gitlab-harvester -m convert \
+gitlab-uarvester -m convert \
   --input-file session.jsonl \
   --output-file result.json
 ```

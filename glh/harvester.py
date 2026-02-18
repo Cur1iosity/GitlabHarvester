@@ -1,3 +1,4 @@
+# glh/harvester.py
 from __future__ import annotations
 
 import json
@@ -5,7 +6,6 @@ import logging
 import os
 import time
 from datetime import datetime, UTC
-from pathlib import Path
 from typing import Callable, IO, Any
 from urllib.parse import urlparse
 
@@ -17,47 +17,9 @@ from gitlab.v4.objects import Project
 from requests import Session
 from tqdm import tqdm
 
-from .planner import ScanOptions, branches_to_scan, should_scan_project
-
-GET_PROJECTS_ANIM_FRAMES = ["🤔", "🐕❓", "📄❓", "🐒❓", "🌳‼️", "🌳🌳🌳", "🕺🌳", "💸🧙", "🍶", "🫠"]
-GET_BRANCHES_ANIM_FRAMES = ["🍌", "🍌", "🍌💃", "💃🍌", "🕺🍌", "🍌🕺"]
-
-
-def _coerce_log_level(value: int | str | None) -> int:
-    if value is None:
-        return logging.WARNING
-    if isinstance(value, int):
-        return value
-    v = value.strip().upper()
-    mapping = {
-        "CRITICAL": logging.CRITICAL,
-        "ERROR": logging.ERROR,
-        "WARN": logging.WARNING,
-        "WARNING": logging.WARNING,
-        "INFO": logging.INFO,
-        "DEBUG": logging.DEBUG,
-    }
-    return mapping.get(v, logging.WARNING)
-
-
-def animate_desc(pbar, text: str, frame_list: list):
-    """
-    Update the tqdm progress bar description with a rotating animation frame.
-
-    The function selects an element from frame_list based on the current
-    iteration counter of the progress bar and appends it to the provided text,
-    creating a simple animated effect in the bar header.
-
-    Args:
-        pbar: tqdm progress bar instance to update.
-        text: Base text to display in the description.
-        frame_list: List of animation frames (e.g., emojis or symbols).
-
-    Returns:
-        None
-    """
-    frame = frame_list[pbar.n % len(frame_list)]
-    pbar.set_description_str(f"{text} {frame} ", refresh=True)
+from glh.exceptions import GitlabHarvesterError
+from glh.planner import ScanOptions, branches_to_scan, should_scan_project
+from glh.utils import logging_utils, terminal_utils
 
 
 def client_required(func: Callable) -> Callable:
@@ -88,89 +50,38 @@ def client_required(func: Callable) -> Callable:
     return wrapper
 
 
-class TqdmLoggingHandler(logging.Handler):
-    """
-    Logging handler compatible with tqdm progress bars.
-
-    Redirects log messages through tqdm.write() to prevent them from
-    corrupting active progress bar output in the terminal.
-    """
-
-    def emit(self, record):
-        """
-        Format and write a log record using tqdm-safe output.
-
-        Args:
-            record: LogRecord instance to be emitted.
-
-        Returns:
-            None
-        """
-        msg = self.format(record)
-        tqdm.write(msg)
-
-
-class GitlabHarvesterError(Exception):
-    """
-    Base exception for GitlabHarvester-specific errors.
-
-    Raised to indicate incorrect usage or unrecoverable conditions
-    within the harvester workflow, such as attempting to access the
-    GitLab API before client initialization.
-    """
-    pass
-
-
 class GitlabHarvester:
+    """High-level GitLab indexing and search engine.
+
+    The harvester manages:
+    - GitLab API client initialization
+    - Instance Project Index (JSONL) generation/enrichment
+    - Term search across projects/branches with progress output
+    """
+
     def __init__(
             self,
-            host: str | None = None,
+            url: str | None = None,
             token: str | None = None,
             search_terms: list | None = None,
             proxy: str | None = None,
             *,
             log_level: int | str = logging.WARNING,
             log_file: str | None = None,
+            host: str | None = None,  # backward-compat alias for `url`
     ) -> None:
         self.search_terms: list = search_terms or []
-        self.logger = logging.getLogger("GitlabHarvesterLogger")
-        self.logger.propagate = False
 
-        self.log_level: int = _coerce_log_level(log_level)
+        self.log_level: int = logging_utils.coerce_log_level(log_level)
         self.log_file: str | None = log_file
-
-        self._setup_logger()
-        self._gl: Gitlab | None = self._get_gl_client(host=host, token=token, proxy=proxy) if host and token else None
-
-    def _setup_logger(self) -> bool:
-        """
-        Configure logging:
-        - Always tqdm-compatible console handler
-        - Optional file handler only when log_file is provided
-        """
-        self.logger.setLevel(self.log_level)
-
-        # Avoid duplicate handlers if multiple instances are created
-        for h in list(self.logger.handlers):
-            self.logger.removeHandler(h)
-
-        fmt = logging.Formatter(
-            "[%(asctime)s][%(levelname)s] %(message)s",
-            datefmt="%d-%m-%Y %H:%M:%S",
+        self.logger = logging_utils.build_logger(
+            name="GitlabHarvesterLogger",
+            level=self.log_level,
+            log_file=self.log_file,
         )
 
-        tqdm_h = TqdmLoggingHandler()
-        tqdm_h.setFormatter(fmt)
-        self.logger.addHandler(tqdm_h)
-
-        if self.log_file:
-            # Ensure parent dir exists (e.g. logs/run.log)
-            Path(self.log_file).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
-            file_h = logging.FileHandler(self.log_file, encoding="utf-8")
-            file_h.setFormatter(fmt)
-            self.logger.addHandler(file_h)
-
-        return True
+        url = url or host
+        self._gl: Gitlab | None = self._get_gl_client(url=url, token=token, proxy=proxy) if url and token else None
 
     @staticmethod
     def _emit_record(fp: IO, record: dict[str, Any], indent: int | None = None) -> None:
@@ -209,22 +120,21 @@ class GitlabHarvester:
         fp.write(json.dumps(obj, ensure_ascii=False))
         fp.write("\n")
 
-    def get_host(self) -> str:
-        """
-        Retrieve a normalized identifier of the current GitLab host.
-
-        The host is extracted from the GitLab client URL, stripped of protocol
-        prefix and trailing slashes, and dots are replaced with underscores
-        to produce a filesystem-safe string. If the client is not initialized,
-        the string "undefined" is returned.
+    def get_instance_id(self) -> str:
+        """Return a filesystem-safe identifier for the configured GitLab instance.
 
         Returns:
-            Normalized host identifier.
+            Instance identifier like 'gitlab_example_com', or 'undefined' if no client.
         """
-        host = 'undefined'
-        if self._gl:
-            host: str = self._gl.url.split(':', 1)[1].strip('/').replace('.', '_')
-        return host
+        if not self._gl:
+            return "undefined"
+        parsed = urlparse(self._gl.url)
+        host = (parsed.netloc or parsed.path).strip("/")
+        return host.replace(".", "_")
+
+    def get_host(self) -> str:
+        """Backward-compatible alias for get_instance_id()."""
+        return self.get_instance_id()
 
     def _get_default_log_filename(self) -> str:
         """
@@ -268,7 +178,7 @@ class GitlabHarvester:
 
     def _get_gl_client(
             self,
-            host: str,
+            url: str,
             token: str,
             timeout: int = 60,
             proxy: str | None = None,
@@ -280,7 +190,7 @@ class GitlabHarvester:
         Initialize and authenticate a GitLab API client.
 
         Args:
-            host: GitLab instance URL or hostname.
+            url: GitLab instance URL.
             token: Personal access token for API authentication.
             timeout: Connection timeout in seconds.
             proxy: Optional proxy URL applied to both HTTP and HTTPS.
@@ -295,10 +205,10 @@ class GitlabHarvester:
             requests.exceptions.SSLError: If TLS fails and fallback is disabled or also fails.
             ValueError: If proxy URL is invalid.
         """
-        self.logger.debug("Connecting to GitLab: %s", host)
+        self.logger.debug("Connecting to GitLab: %s", url)
 
         kwargs: dict[str, Any] = {
-            "url": host,
+            "url": url,
             "private_token": token,
             "timeout": timeout,
             "ssl_verify": ssl_verify,
@@ -321,29 +231,31 @@ class GitlabHarvester:
 
         try:
             gl.auth()
-            self.logger.debug("Authenticated to GitLab: %s", host)
+            self.logger.debug("Authenticated to GitLab: %s", url)
             return gl
         except requests.exceptions.SSLError:
             if not allow_ssl_fallback or kwargs.get("ssl_verify") is False:
-                self.logger.exception("TLS handshake failed for %s", host)
+                self.logger.exception("TLS handshake failed for %s", url)
                 raise
 
             # Fallback: retry once with ssl verification disabled
-            self.logger.warning("TLS failed for %s; retrying with ssl_verify=False", host)
+            self.logger.warning("TLS failed for %s; retrying with ssl_verify=False", url)
             kwargs["ssl_verify"] = False
             _maybe_disable_warnings()
 
             gl = Gitlab(**kwargs)
             gl.auth()
-            self.logger.debug("Authenticated to GitLab (ssl_verify=False): %s", host)
+            self.logger.debug("Authenticated to GitLab (ssl_verify=False): %s", url)
             return gl
 
     @client_required
-    def fetch_projects(self,
-                       per_page: int = 100,
-                       filename: str | None = None,
-                       order_by: str = 'id',
-                       sort: str = 'desc', ) -> list[dict[str, Any]]:
+    def fetch_projects(
+            self,
+            per_page: int = 100,
+            filename: str | None = None,
+            order_by: str = "id",
+            sort: str = "desc",
+    ) -> list[dict[str, Any]]:
         """
         Retrieve projects from the GitLab instance with a reduced set of key fields.
 
@@ -351,70 +263,21 @@ class GitlabHarvester:
         directly to a file in NDJSON (JSONL) format to minimize memory usage. When
         streaming is enabled, data is first written to a temporary file and then
         reassembled with a metadata header as the first line.
-
-        Args:
-            per_page: Number of projects to request per API call.
-            filename: Optional path to a file where results will be streamed.
-                If provided, each project is written as a separate JSON line and
-                an empty list is returned.
-            order_by: Field used for sorting projects on the GitLab side.
-            sort: Sorting direction ("asc" or "desc").
-
-        Returns:
-            A list of project dictionaries when filename is None.
-            If filename is provided, projects are streamed to file and an empty list is returned.
-
-        Raises:
-            gitlab.exceptions.GitlabError: If the GitLab API request fails during pagination.
-            KeyboardInterrupt: When execution is interrupted by the user.
-            Exception: Any unexpected fatal error during processing.
-
-        Behavior:
-            - GitLab API errors are logged but do not mark the process as failed.
-            - System-level interruptions (network loss, process termination, etc.)
-              set the metadata flag `is_completed=False`.
-            - The resulting file always contains a metadata object as the first line
-              describing the load session (timestamp, counters, duration, status).
-
-        Notes:
-            - Only a subset of project fields is extracted to reduce payload size.
-            - Streaming mode is recommended for instances with a large number of projects.
-            - Output file format: NDJSON/JSONL (one JSON object per line, UTF-8 encoded).
-            - A temporary file `<filename>.tmp` is used to avoid partial corruption
-              of the final output.
         """
 
         def reduce_project_fields(project: Project) -> dict[str, Any]:
-            """
-            Extract a minimal set of relevant fields from a GitLab project object.
-
-            The function selects only lightweight metadata required for indexing
-            and search planning, avoiding large or unnecessary attributes.
-
-            Args:
-                project: GitLab Project object returned by the API.
-
-            Returns:
-                Dictionary containing reduced project representation with keys:
-                    - id
-                    - web_url
-                    - default_branch
-                    - empty_repo
-                    - forked_from_project
-                    - created_at
-                    - last_activity_at
-            """
-
+            """Extract a minimal set of relevant fields from a GitLab project object."""
             return {
-                'id': project.id,
-                'web_url': project.web_url,
-                'path_with_namespace': project.path_with_namespace,
-                'default_branch': getattr(project, 'default_branch', None),
-                'empty_repo': project.empty_repo,
-                'forked_from_project': {'id': fork_data['id']} if (
-                    fork_data := getattr(project, 'forked_from_project', None)) else False,
-                'created_at': project.created_at,
-                'last_activity_at': project.last_activity_at,
+                "id": project.id,
+                "web_url": project.web_url,
+                "path_with_namespace": project.path_with_namespace,
+                "default_branch": getattr(project, "default_branch", None),
+                "empty_repo": project.empty_repo,
+                "forked_from_project": {"id": fork_data["id"]}
+                if (fork_data := getattr(project, "forked_from_project", None))
+                else False,
+                "created_at": project.created_at,
+                "last_activity_at": project.last_activity_at,
             }
 
         projects: list[dict[str, Any]] = []
@@ -426,7 +289,17 @@ class GitlabHarvester:
         tmp_filename = f"{filename}.tmp" if filename else None
         fp = open(tmp_filename, "w", encoding="utf-8") if tmp_filename else None
 
-        with tqdm(desc=f'Listing instance: {self.get_host()}', unit='projects', colour='green') as pbar:
+        lay = terminal_utils.layout()
+
+        with terminal_utils.mk_tqdm(
+                total=None,
+                position=0,
+                leave=False,
+                layout_=lay,
+                unit="projects",
+        ) as pbar:
+            terminal_utils.set_desc(pbar, f"Listing instance: {self.get_host()}", lay)
+
             try:
                 while batch := self._gl.projects.list(page=page, per_page=per_page, order_by=order_by, sort=sort):
                     if fp is not None:
@@ -435,12 +308,15 @@ class GitlabHarvester:
                     else:
                         projects.extend(reduce_project_fields(x) for x in batch)
 
-                    frame = GET_PROJECTS_ANIM_FRAMES[page % len(GET_PROJECTS_ANIM_FRAMES)]
-                    pbar.set_description_str(f"Listing instance: {self.get_host()} {frame}", refresh=True)
-                    batch_size: int = len(batch)
+                    desc = terminal_utils.animate_desc(f"Listing instance: {self.get_host()}",
+                                                       terminal_utils.GET_PROJECTS_ANIM_FRAMES, page)
+                    terminal_utils.set_desc(pbar, desc, lay)
+
+                    batch_size = len(batch)
                     pbar.update(batch_size)
                     pr_counter += batch_size
                     page += 1
+
             except gitlab.exceptions.GitlabError as e:
                 self.logger.error("Gitlab API error. The project list wasn't complete.")
                 self.logger.error(e)
@@ -481,7 +357,7 @@ class GitlabHarvester:
 
                     os.remove(tmp_filename)
 
-        self.logger.info(f'Loaded {pr_counter} projects in {elapsed} seconds.')
+        self.logger.info("Loaded %s projects in %s seconds.", pr_counter, elapsed)
         return projects
 
     @client_required
@@ -494,29 +370,19 @@ class GitlabHarvester:
     ) -> list[str]:
         """
         Retrieve branch names for a specific GitLab project.
-
-        Branches are fetched page by page using the GitLab API. An optional
-        limit may be provided to stop retrieval early.
-
-        Args:
-            project_id: Numeric ID of the GitLab project.
-            per_page: Number of branches requested per API call.
-            position: Tqdm progress bar position for nested rendering.
-            limit: Optional maximum number of branches to return.
-
-        Returns:
-            List of branch names. May be incomplete if an API error occurs
-            during retrieval.
         """
         branches: list[str] = []
+        lay = terminal_utils.layout()
 
-        with tqdm(
-                desc=f"Listing branches for ID [{project_id}]",
-                unit="branches",
-                colour="pink",
+        with terminal_utils.mk_tqdm(
+                total=None,
                 position=position,
                 leave=False,
+                layout_=lay,
+                unit="branches",
         ) as pbar:
+            terminal_utils.set_desc(pbar, f"Listing branches for ID [{project_id}]", lay)
+
             page = 1
             try:
                 while True:
@@ -540,11 +406,7 @@ class GitlabHarvester:
                 )
                 self.logger.error(e)
 
-        self.logger.debug(
-            "Loaded %s branches for project with ID: %s.",
-            len(branches),
-            project_id,
-        )
+        self.logger.debug("Loaded %s branches for project with ID: %s.", len(branches), project_id)
         return branches
 
     def build_project_index(
@@ -597,16 +459,11 @@ class GitlabHarvester:
             self,
             *,
             filename: str,
-            branches: str | int = "default",  # "default" | "all" | int
+            branches: str | int = "default",
             branches_per_page: int = 100,
     ) -> str:
         """
         Enrich an existing Instance Project Index (JSONL) with branches and rewrite it in-place.
-
-        branches:
-            - "default": do not fetch branch list, store only [default_branch] when present
-            - "all": fetch all branches
-            - int: fetch up to N branches
         """
         if branches == "default":
             self.logger.info("Branches mode: default (no API calls, using default_branch only).")
@@ -616,9 +473,9 @@ class GitlabHarvester:
             self.logger.info("Branches mode: limit=%s (slow-ish).", branches)
 
         tmp_out = f"{filename}.branches.tmp"
+        lay = terminal_utils.layout()
 
         with open(filename, "r", encoding="utf-8") as in_fp, open(tmp_out, "w", encoding="utf-8") as out_fp:
-            # --- meta ---
             first_line = in_fp.readline()
             if not first_line:
                 raise ValueError(f"Project index file is empty: {filename}")
@@ -626,13 +483,20 @@ class GitlabHarvester:
             meta = json.loads(first_line)
             meta["branches"] = branches
             meta["timestamp_utc"] = datetime.now(UTC).isoformat()
-
             self._write_jsonl_line(out_fp, meta)
 
-            # --- projects ---
             total = meta.get("projects_count")
-            with tqdm(total=total, desc="Enriching projects with branches", unit="projects", colour="cyan",
-                      delay=2) as pbar:
+
+            with terminal_utils.mk_tqdm(
+                    total=total,
+                    position=0,
+                    leave=False,
+                    layout_=lay,
+                    unit="projects",
+                    delay=2,
+            ) as pbar:
+                terminal_utils.set_desc(pbar, "Enriching projects with branches", lay)
+
                 for line in in_fp:
                     line = line.strip()
                     if not line:
@@ -656,17 +520,16 @@ class GitlabHarvester:
                                 position=1,
                             )
 
-                    self._write_jsonl_line(out_fp, project)
-                    animate_desc(pbar, "Enriching projects with branches", GET_BRANCHES_ANIM_FRAMES)
+                    desc = terminal_utils.animate_desc("Enriching projects with branches",
+                                                       terminal_utils.GET_BRANCHES_ANIM_FRAMES, pbar.n)
+                    terminal_utils.set_desc(pbar, desc, lay)
+
+                    self._emit_record(out_fp, record=project)
                     pbar.update(1)
 
         os.replace(tmp_out, filename)
         if branches != "default":
-            self.logger.info(
-                "Project index enriched with branches (mode=%s): %s",
-                branches,
-                filename,
-            )
+            self.logger.info("Project index enriched with branches (mode=%s): %s", branches, filename)
         return filename
 
     def download_projects(
@@ -724,40 +587,40 @@ class GitlabHarvester:
     def add_branches_to_projects(self, projects: list[dict], per_page: int = 50) -> list[dict]:
         """
         Enrich a list of project dictionaries with branch information.
-
-        For each non-empty repository, the method retrieves branch names
-        using the GitLab API and attaches them under the "branches" key.
-        Empty repositories receive an empty list.
-
-        Args:
-            projects: List of project dictionaries to be updated in-place.
-            per_page: Number of branches requested per API call.
-
-        Returns:
-            The same list of projects with added "branches" field.
         """
-        with tqdm(
+        lay = terminal_utils.layout()
+
+        with terminal_utils.mk_tqdm(
                 total=len(projects),
-                desc="Listing branches",
-                unit="projects",
-                colour="cyan",
                 position=0,
                 leave=True,
-                # dynamic_ncols=True,
+                layout_=lay,
+                unit="projects",
                 delay=0.5,
         ) as pbar:
+            terminal_utils.set_desc(pbar, "Listing branches", lay)
+
             for project in projects:
-                empty = project.get('empty_repo', False)
+                empty = project.get("empty_repo", False)
+
+                terminal_utils.set_desc(pbar, "Loading branches", lay)
+
                 if not empty:
-                    pbar.set_description_str(f' loading branches', refresh=True)
-                    project['branches'] = self.get_branches(project_id=project['id'], per_page=per_page)
-                    pbar.set_postfix_str(f'{project["web_url"]}: {len(project["branches"])} branch(es)', refresh=True)
+                    project["branches"] = self.get_branches(project_id=project["id"], per_page=per_page)
+                    postfix = f'{project["web_url"]}: {len(project["branches"])} branch(es)'
                 else:
                     project["branches"] = []
-                    pbar.set_postfix_str(f'{project["web_url"]}: empty', refresh=True)
+                    postfix = f'{project["web_url"]}: empty'
+
+                terminal_utils.set_postfix(pbar, postfix, lay)
                 pbar.update(1)
+
             self.logger.info(
-                f'Loaded branches for {len(projects)} projects in {round(pbar.format_dict["elapsed"], 2)} seconds.')
+                "Loaded branches for %s projects in %s seconds.",
+                len(projects),
+                round(pbar.format_dict.get("elapsed", 0.0), 2),
+            )
+
         return projects
 
     def initialize_project_list(
@@ -886,30 +749,48 @@ class GitlabHarvester:
     ) -> tuple[list[dict[str, Any]], int]:
         """
         Execute term search across a list of projects.
-
-        Each term is processed sequentially using search_keyword().
-        When a session file is provided, a checkpoint record is written
-        after every completed term to support resume functionality.
-
-        Args:
-            projects: List of project dictionaries to scan.
-            keywords: Keywords to search for.
-            options: ScanOptions controlling branch and fork behavior.
-            position: Tqdm progress bar position.
-            hit_counter: Initial global hit counter.
-            session_file: Optional open JSONL file to record progress.
-
-        Returns:
-            Tuple containing:
-                - List of per-term search results.
-                - Updated hit counter.
         """
-        with tqdm(total=len(keywords),
-                  colour="cyan",
-                  position=position,
-                  leave=False) as pbar:
-            res: list[dict[str, Any]] = []
+        res: list[dict[str, Any]] = []
+        lay = terminal_utils.layout()
 
+        if len(keywords) <= 1:
+            with terminal_utils.mk_header(position=position, leave=True, layout_=lay) as hdr:
+                for term in keywords:
+                    # Keep header stable and useful.
+                    terminal_utils.set_desc(hdr, f"Searching term: '{term}' | Hit Counter: {hit_counter}", lay)
+
+                    s_res, hit_counter = self.search_keyword(
+                        projects=projects,
+                        term=term,
+                        options=options,
+                        ext_pbar=hdr,
+                        hit_counter=hit_counter,
+                        session_file=session_file,
+                        position=position + 1,
+                    )
+                    res.append({"term": term, "result": s_res})
+
+                    if session_file is not None:
+                        self._emit_record(
+                            session_file,
+                            record={
+                                "type": "keyword_done",
+                                "term": term,
+                                "hit_counter": hit_counter,
+                                "timestamp_utc": datetime.now(UTC).isoformat(),
+                            },
+                        )
+
+                terminal_utils.set_desc(hdr, f"Done | Hit Counter: {hit_counter}", lay)
+
+            return res, hit_counter
+
+        with terminal_utils.mk_tqdm(
+                total=len(keywords),
+                position=position,
+                leave=False,
+                layout_=lay,
+        ) as pbar:
             for term in keywords:
                 s_res, hit_counter = self.search_keyword(
                     projects=projects,
@@ -918,11 +799,10 @@ class GitlabHarvester:
                     ext_pbar=pbar,
                     hit_counter=hit_counter,
                     session_file=session_file,
+                    position=position + 1,
                 )
-
                 res.append({"term": term, "result": s_res})
 
-                # ---- resume checkpoint (term completed) ----
                 if session_file is not None:
                     self._emit_record(
                         session_file,
@@ -936,7 +816,7 @@ class GitlabHarvester:
 
                 pbar.update(1)
 
-            return res, hit_counter
+        return res, hit_counter
 
     def search_keyword(
             self,
@@ -951,50 +831,26 @@ class GitlabHarvester:
     ) -> tuple[list[dict[str, Any]], int]:
         """
         Search a single term across all provided projects.
-
-        For each project the method:
-          - checks fork/branch rules via should_scan_project(),
-          - determines which branches to scan,
-          - invokes scan_project(),
-          - records hits to the optional session file.
-
-        Progress is displayed using a nested tqdm bar while the
-        external bar (if provided) is updated with the global hit count.
-
-        Args:
-            projects: Projects to scan.
-            term: term to search for.
-            options: ScanOptions controlling branch/fork strategy.
-            position: Tqdm position for the nested bar.
-            hit_counter: Current global hit counter.
-            ext_pbar: Optional outer progress bar to update.
-            session_file: Optional JSONL file for incremental results.
-
-        Returns:
-            Tuple containing:
-                - List of matched project results.
-                - Updated hit counter.
         """
         projects_by_id = {int(p["id"]): p for p in projects}
+        lay = terminal_utils.layout()
 
-        with tqdm(
+        with terminal_utils.mk_tqdm(
                 total=len(projects),
-                desc=term,
-                colour="cyan",
                 position=position,
                 leave=False,
-                dynamic_ncols=True,
+                layout_=lay,
                 delay=2,
         ) as pbar:
+            terminal_utils.set_desc(pbar, term, lay)
             res: list[dict[str, Any]] = []
 
             for pr in projects:
-                desc = f"{desc[:36]}..." if len(
-                    desc := pr.get('path_with_namespace', 'unknown')) > 40 else f"{desc}{' ' * (39 - len(desc))}"
-                pbar.set_description_str(desc)
+                raw_desc = pr.get("path_with_namespace", "unknown")
+                terminal_utils.set_desc(pbar, raw_desc, lay)
 
-                if ext_pbar:
-                    ext_pbar.set_description_str(f"Searching term: '{term}' | [Hit Counter: {hit_counter}]")
+                if ext_pbar is not None:
+                    terminal_utils.set_desc(ext_pbar, f"Searching term: '{term}' | Hit Counter: {hit_counter}", lay)
 
                 if not should_scan_project(pr, options):
                     pbar.update(1)
@@ -1038,53 +894,23 @@ class GitlabHarvester:
     ) -> tuple[list[dict[str, Any]], int]:
         """
         Scan a single project for a term across the selected branches.
-
-        The branch selection is delegated to branches_to_scan(), which applies
-        the scan strategy defined in ScanOptions (including fork handling rules
-        if projects_by_id is provided). Each selected branch is scanned via
-        scan_branch() using GitLab's blob search API.
-
-        If an external progress bar is provided, the postfix is updated to
-        display the current branch being scanned.
-
-        Args:
-            project: Project dictionary from the Instance Project Index.
-            term: term to search for.
-            options: ScanOptions controlling branch scope and fork strategy.
-            projects_by_id: Optional mapping of project_id -> project dict,
-                used by fork-related planners (e.g., branch-diff).
-            ext_pbar: Optional tqdm bar to update with branch context.
-            hit_counter: Current global hit counter.
-
-        Returns:
-            Tuple containing:
-                - List of per-branch search results for this project.
-                - Updated hit counter.
         """
         res: list[dict[str, Any]] = []
 
         project_obj: Project = self._gl.projects.get(project["id"], lazy=True)
         project_url: str = project["web_url"]
-        postfix_max_len: int = 20
 
         branches = branches_to_scan(project, options, projects_by_id=projects_by_id)
         if not branches:
             return [], hit_counter
+
         br_len: int = len(branches)
+        lay = terminal_utils.layout()
 
         for num, b in enumerate(branches):
-            if ext_pbar:
-                if br_len == 1:
-                    postfix = b
-                else:
-                    postfix = f"{b} [{num + 1}/{br_len}]"
-
-                postfix_len = len(postfix)
-                if postfix_len > postfix_max_len:
-                    postfix = f"{postfix[:postfix_max_len - 3]}..."
-                else:
-                    postfix += " " * (postfix_max_len - postfix_len)
-                ext_pbar.set_postfix_str(postfix)
+            if ext_pbar is not None:
+                postfix = b if br_len == 1 else f"{b} [{num + 1}/{br_len}]"
+                terminal_utils.set_postfix(ext_pbar, postfix, lay)
 
             try:
                 s_res, hit_counter = self.scan_branch(
