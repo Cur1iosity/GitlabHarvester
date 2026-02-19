@@ -325,7 +325,7 @@ class GitlabHarvester:
 
             except KeyboardInterrupt:
                 is_completed = False
-                self.logger.warning("Interrupted by user (Ctrl+C).")
+                self.logger.error("Interrupted by user (Ctrl+C).")
                 raise
 
             except Exception:
@@ -928,7 +928,7 @@ class GitlabHarvester:
                 if s_res:
                     res.append({"branch": b, "branch_search_result": s_res})
             except gitlab.exceptions.GitlabError as e:
-                self.logger.error("%s | %s Branch: %s", e, project_url, b, exc_info=True)
+                self.logger.warning("%s | %s Branch: %s", e, project_url, b, exc_info=True)
 
         return res, hit_counter
 
@@ -986,7 +986,7 @@ class GitlabHarvester:
                     break
 
         except gitlab.exceptions.GitlabError as e:
-            self.logger.error(e)
+            self.logger.warning(e)
 
         branch_url: str = f"{project_url}/-/tree/{branch}"
         if search_results:
