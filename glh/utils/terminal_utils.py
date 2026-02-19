@@ -71,9 +71,10 @@ def bar_format_stable(lay: TqdmLayout) -> str:
     """
     return (
         f"{{desc:<{lay.desc_w}}} "
+        f"[{{elapsed}}<{{remaining}}]"
         f"{{percentage:3.0f}}% "
         f"{{bar}} "
-        f"[{{n_fmt}}/{{total_fmt}}]"
+        f"[{{n_fmt}}/{{total_fmt}}] "
         f"{{postfix}}"
     )
 
@@ -105,6 +106,12 @@ def mk_tqdm(
     )
 
 
+def layout_header(fallback_cols: int = 120) -> TqdmLayout:
+    cols = term_cols(fallback=fallback_cols)
+    desc_w = max(40, cols - 2)
+    return TqdmLayout(cols=cols, desc_w=desc_w, post_w=0)
+
+
 def mk_header(
         *,
         position: int = 0,
@@ -116,14 +123,14 @@ def mk_header(
 
     Useful for single-term outer “status” line without jitter.
     """
-    lay = layout_ or layout()
+    lay = layout_ or layout_header()
     return tqdm(
         total=1,
         position=position,
         leave=leave,
         ncols=lay.cols,
         dynamic_ncols=False,
-        bar_format=f"{{desc:<{lay.cols}}}",  ***REMOVED***
+        bar_format=f"{{desc:<{lay.cols}}}",
     )
 
 

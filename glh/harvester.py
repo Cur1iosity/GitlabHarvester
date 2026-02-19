@@ -756,7 +756,6 @@ class GitlabHarvester:
         if len(keywords) <= 1:
             with terminal_utils.mk_header(position=position, leave=True, layout_=lay) as hdr:
                 for term in keywords:
-                    # Keep header stable and useful.
                     terminal_utils.set_desc(hdr, f"Searching term: '{term}' | Hit Counter: {hit_counter}", lay)
 
                     s_res, hit_counter = self.search_keyword(
