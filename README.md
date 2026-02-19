@@ -98,7 +98,7 @@ pipx install gitlab-harvester
 Run:
 
 ```bash
-gitlab-harvester --uelp
+gitlab-harvester --help
 ```
 
 ---
@@ -230,8 +230,8 @@ gitlab-harvester -m dedup \
 Options:
 
 * `--sqlite-path file.sqlite`
-* `--uash-algo blake2b|sha1|sha256`
-* `--no-normalize-uits`
+* `--hash-algo blake2b|sha1|sha256`
+* `--no-normalize-hits`
 
 ---
 
