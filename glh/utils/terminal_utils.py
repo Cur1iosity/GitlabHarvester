@@ -30,7 +30,9 @@ def calc_tqdm_widths(*, cols: int) -> tuple[int, int]:
     Compute (desc_width, postfix_width) budgets for tqdm.
     Goal: keep progress bar wide and stable.
     """
-    desc_w = max(18, min(42, int(cols * 0.28)))   # ~28% of terminal
+    # desc_w = max(18, min(42, int(cols * 0.28)))   # ~28% of terminal
+    # desc_w = max(24, min(80, int(cols * 0.5)))
+    desc_w = max(30, min(120, int(cols * 0.7)))
     post_w = max(12, min(28, int(cols * 0.18)))   # ~18% of terminal
     return desc_w, post_w
 
@@ -71,9 +73,9 @@ def bar_format_stable(lay: TqdmLayout) -> str:
     """
     return (
         f"{{desc:<{lay.desc_w}}} "
-        f"[{{elapsed}}<{{remaining}}]"
         f"{{percentage:3.0f}}% "
         f"{{bar}} "
+        f"[{{elapsed}}<{{remaining}}]"
         f"[{{n_fmt}}/{{total_fmt}}] "
         f"{{postfix}}"
     )
@@ -142,3 +144,30 @@ def set_desc(pbar: tqdm, text: str, lay: TqdmLayout) -> None:
 def set_postfix(pbar: tqdm, text: str, lay: TqdmLayout) -> None:
     """Set shortened postfix respecting computed layout width."""
     pbar.set_postfix_str(shorten(text, lay.post_w), refresh=True)
+
+
+def human_int(n: int) -> str:
+    """
+    Format integer into compact human-readable form.
+
+    Examples:
+        532 -> "532"
+        1200 -> "1.2K"
+        532000 -> "532K"
+        1200000 -> "1.2M"
+        3400000000 -> "3.4B"
+    """
+    if n < 1000:
+        return str(n)
+
+    for unit, div in (
+        ("K", 1_000),
+        ("M", 1_000_000),
+        ("B", 1_000_000_000),
+        ("T", 1_000_000_000_000),
+    ):
+        if n < div * 1000:
+            val = n / div
+            return f"{val:.1f}{unit}" if val < 10 else f"{val:.0f}{unit}"
+
+    return f"{n:.0e}"

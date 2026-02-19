@@ -97,6 +97,7 @@ def _mk_harvester(args: CliArgs) -> GitlabHarvester:
     kwargs: dict[str, Any] = {
         "url": url,
         "token": token,
+        "timeout": args.timeout,
         "log_level": args.log_level,
         "log_file": args.log_file,
     }

@@ -20,6 +20,7 @@ from tqdm import tqdm
 from glh.exceptions import GitlabHarvesterError
 from glh.planner import ScanOptions, branches_to_scan, should_scan_project
 from glh.utils import logging_utils, terminal_utils
+from glh.utils.terminal_utils import human_int
 
 
 def client_required(func: Callable) -> Callable:
@@ -65,6 +66,7 @@ class GitlabHarvester:
             token: str | None = None,
             search_terms: list | None = None,
             proxy: str | None = None,
+            timeout: int = 60,
             *,
             log_level: int | str = logging.WARNING,
             log_file: str | None = None,
@@ -81,7 +83,7 @@ class GitlabHarvester:
         )
 
         url = url or host
-        self._gl: Gitlab | None = self._get_gl_client(url=url, token=token, proxy=proxy) if url and token else None
+        self._gl: Gitlab | None = self._get_gl_client(url=url, token=token, proxy=proxy, timeout=timeout) if url and token else None
 
     @staticmethod
     def _emit_record(fp: IO, record: dict[str, Any], indent: int | None = None) -> None:
@@ -239,7 +241,7 @@ class GitlabHarvester:
                 raise
 
             # Fallback: retry once with ssl verification disabled
-            self.logger.warning("TLS failed for %s; retrying with ssl_verify=False", url)
+            self.logger.info("TLS failed for %s; retrying with ssl_verify=False", url)
             kwargs["ssl_verify"] = False
             _maybe_disable_warnings()
 
@@ -849,7 +851,7 @@ class GitlabHarvester:
                 terminal_utils.set_desc(pbar, raw_desc, lay)
 
                 if ext_pbar is not None:
-                    terminal_utils.set_desc(ext_pbar, f"Searching term: '{term}' | Hit Counter: {hit_counter}", lay)
+                    terminal_utils.set_desc(ext_pbar, f"'{term}' • hits: {human_int(hit_counter)}", lay)
 
                 if not should_scan_project(pr, options):
                     pbar.update(1)
@@ -895,6 +897,7 @@ class GitlabHarvester:
         Scan a single project for a term across the selected branches.
         """
         res: list[dict[str, Any]] = []
+        orig_desc = ''
 
         project_obj: Project = self._gl.projects.get(project["id"], lazy=True)
         project_url: str = project["web_url"]
@@ -906,10 +909,13 @@ class GitlabHarvester:
         br_len: int = len(branches)
         lay = terminal_utils.layout()
 
+        if ext_pbar is not None:
+            orig_desc = ext_pbar.desc
+
         for num, b in enumerate(branches):
             if ext_pbar is not None:
-                postfix = b if br_len == 1 else f"{b} [{num + 1}/{br_len}]"
-                terminal_utils.set_postfix(ext_pbar, postfix, lay)
+                branch_info = b if br_len == 1 else f"{b} [{num + 1}/{br_len}]"
+                terminal_utils.set_desc(ext_pbar, f"{orig_desc} • {branch_info}", lay)
 
             try:
                 s_res, hit_counter = self.scan_branch(

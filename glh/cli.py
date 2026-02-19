@@ -72,6 +72,7 @@ class CliArgs:
     url: str | None
     token: str | None
     proxy: str | None
+    timeout: int
 
     log_file: str | None
     log_level: str
@@ -127,10 +128,11 @@ class CliParser:
         )
         parser.add_argument("-t", "--token", default=None, help="GitLab token (required for search/dump-index).",)
         parser.add_argument("-p", "--proxy", default=None, help="HTTP(S) proxy URL for GitLab API traffic.",)
+        parser.add_argument("--timeout", default=60, type=int, help="Timeout in seconds for GitLab API request.",)
 
         # Logging
         parser.add_argument("--log-file", default=None, help="Write logs to a file (in addition to stderr).")
-        parser.add_argument("--log-level", choices=("ERROR", "WARN", "INFO"), default="INFO", help="Console log level.")
+        parser.add_argument("--log-level", choices=("ERROR", "WARN", "INFO"), default="WARN", help="Console log level.")
         parser.add_argument("--debug", action="store_true", help="Enable debug logging (overrides --log-level).")
 
         # Mode
@@ -223,6 +225,7 @@ class CliParser:
             url=ns.url,
             token=ns.token,
             proxy=ns.proxy,
+            timeout=ns.timeout,
             log_file=ns.log_file,
             log_level=ns.log_level,
             debug=ns.debug,
