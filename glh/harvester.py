@@ -928,7 +928,7 @@ class GitlabHarvester:
                 if s_res:
                     res.append({"branch": b, "branch_search_result": s_res})
             except gitlab.exceptions.GitlabError as e:
-                self.logger.warning("%s | %s Branch: %s", e, project_url, b, exc_info=True)
+                self.logger.warning("%s | %s Branch: %s", e, project_url, b)
 
         return res, hit_counter
 
