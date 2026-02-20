@@ -986,7 +986,7 @@ class GitlabHarvester:
                     break
 
         except gitlab.exceptions.GitlabError as e:
-            self.logger.warning("[%s] %s: %s", project.id, project_url, e, exc_info=True)
+            self.logger.warning("[%s] %s: %s", project.id, project_url, e)
 
         branch_url: str = f"{project_url}/-/tree/{branch}"
         if search_results:
