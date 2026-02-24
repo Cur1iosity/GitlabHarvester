@@ -98,10 +98,9 @@ def _dedup_record_inplace(
     Returns True if the record still contains any hits after dedup, else False.
     """
     # Expected shape (your current format):
-    # {"keyword": "...", "result": {"project_id":..., "project_search_result":[
+    # {"term": "...", "result": {"project_id":..., "project_search_result":[
     #    {"branch": "...", "branch_search_result":[{"url": "...", "data": "..."}]}
     # ]}}
-    keyword = obj.get("keyword")
     result = obj.get("result")
 
     if not isinstance(result, dict):
@@ -160,7 +159,7 @@ def dedup_session_file(
     Streamingly deduplicate identical hit content across the entire session output.
 
     - Preserves meta/resume/summary/keyword_done records as-is.
-    - Deduplicates only "hit" records that look like: {"keyword": ..., "result": ...}
+    - Deduplicates only "hit" records that look like: {"term": ..., "result": ...}
     - Writes output as strict JSONL (one object per line).
     """
     if sqlite_path is None:
@@ -184,7 +183,7 @@ def dedup_session_file(
                     continue
 
                 # attempt dedup only for hit records
-                if "keyword" in obj and "result" in obj:
+                if "term" in obj and "result" in obj:
                     ok = _dedup_record_inplace(obj, store=store, hash_algo=hash_algo, normalize=normalize)
                     if not ok:
                         dropped += 1
