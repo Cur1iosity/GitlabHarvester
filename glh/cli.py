@@ -19,6 +19,7 @@ from importlib.metadata import version, PackageNotFoundError
 
 from glh.config import TERMS_DEST, ConfigError, load_config
 from glh.planner import parse_timestamp
+from glh.postprocess.pipeline import normalize_steps
 
 
 BranchesMode = str | int  # "default" | "all" | int
@@ -89,6 +90,14 @@ def parse_branches(value: str) -> BranchesMode:
 
 
 MAX_WORKERS = 64
+
+
+def parse_post_process(value: str) -> tuple[str, ...]:
+    """Parse --post-process: comma-separated steps (dedup, convert), returned in run order."""
+    try:
+        return normalize_steps(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(f"{e}. Use dedup, convert or dedup,convert.") from None
 
 
 def parse_workers(value: str) -> int:
@@ -175,6 +184,8 @@ class CliArgs:
 
     input_file: str | None
     output_file: str | None
+    post_process: tuple[str, ...]
+    final_only: bool
 
     sqlite_path: str | None
     hash_algo: str
@@ -309,6 +320,22 @@ class CliParser:
                             help="Resume from existing session file.")
 
         # Postprocess
+        parser.add_argument(
+            "--post-process",
+            type=parse_post_process,
+            default=(),
+            metavar="STEPS",
+            help="After a finished search, run these steps on the session file: dedup, convert or "
+                 "dedup,convert (always in this order). Writes <session>.deduped.jsonl and "
+                 "<session>[.deduped].converted.json; the dedup/convert options below apply.",
+        )
+        parser.add_argument(
+            "--final-only",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help="With --post-process: keep only the last file and delete the session JSONL and "
+                 "intermediate files (saves space; the session can't be resumed afterwards).",
+        )
         parser.add_argument("--input-file", default=None, help="Input file for postprocess modes.")
         parser.add_argument("--output-file", default=None, help="Output file for postprocess modes.")
 
@@ -457,6 +484,8 @@ class CliParser:
             resume=ns.resume,
             input_file=ns.input_file,
             output_file=ns.output_file,
+            post_process=tuple(ns.post_process),
+            final_only=ns.final_only,
             sqlite_path=ns.sqlite_path,
             hash_algo=ns.hash_algo,
             normalize_hits=ns.normalize_hits,

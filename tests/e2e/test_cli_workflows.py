@@ -373,3 +373,56 @@ def test_done_line_reports_search_time(fake_gitlab: FakeGitLab, run_cli, tmp_pat
     assert re.search(r"Done\. Keywords: 1 \| Hits: \d+ \| Search time: \d+\.\ds", proc.stdout), proc.stdout
     summary = Session.load(tmp_path / "s.jsonl").of_type("summary")[0]
     assert summary["elapsed_seconds"] >= 0
+
+
+# --------------------------------------------------------------------------- --post-process / --final-only
+
+
+def _search_with(fake: FakeGitLab, run_cli, *extra: str):
+    return run_cli(*gl_args(fake), "-s", "password", "-b", "all", "--index-file", "idx.jsonl",
+                   "--session-file", "out/audit.jsonl", *extra, check=True)
+
+
+def test_post_process_keeps_original_and_intermediate_files(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
+    proc = _search_with(fake_gitlab, run_cli, "--post-process", "dedup,convert")
+    out = tmp_path / "out"
+    assert sorted(p.name for p in out.iterdir()) == ["audit.deduped.converted.json", "audit.deduped.jsonl", "audit.jsonl"]
+
+    # Same result as running the post-processing modes by hand.
+    run_cli("-m", "dedup", "--input-file", "out/audit.jsonl", "--output-file", "manual.jsonl", check=True)
+    run_cli("-m", "convert", "--input-file", "manual.jsonl", "--output-file", "manual.json", check=True)
+    assert read_jsonl(out / "audit.deduped.jsonl") == read_jsonl(tmp_path / "manual.jsonl")
+    assert json.loads((out / "audit.deduped.converted.json").read_text(encoding="utf-8")) == \
+        json.loads((tmp_path / "manual.json").read_text(encoding="utf-8"))
+
+    # Dedup really removed the hits repeated across branches and forks.
+    assert len(Session.load(out / "audit.deduped.jsonl").hits()) < len(Session.load(out / "audit.jsonl").hits())
+    assert "Post-processing: " in proc.stdout and "Final result: " in proc.stdout
+    meta = Session.load(out / "audit.jsonl").records[0]
+    assert (meta["post_process"], meta["final_only"]) == (["dedup", "convert"], False)
+
+
+def test_post_process_final_only_leaves_just_the_result(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
+    proc = _search_with(fake_gitlab, run_cli, "--post-process", "convert,dedup", "--final-only")
+    out = tmp_path / "out"
+    assert [p.name for p in out.iterdir()] == ["audit.deduped.converted.json"]
+    records = json.loads((out / "audit.deduped.converted.json").read_text(encoding="utf-8"))
+    assert records[0]["type"] == "meta" and records[-1]["type"] == "summary"
+    assert any("term" in r and "result" in r for r in records)
+    assert "Removed (--final-only):" in proc.stdout
+
+
+def test_post_process_from_config_file(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
+    cfg = tmp_path / "glh.ini"
+    cfg.write_text("[postprocess]\npost-process = convert\nfinal-only = true\nsort-keys = true\n", encoding="utf-8")
+    _search_with(fake_gitlab, run_cli, "-c", str(cfg))
+    assert [p.name for p in (tmp_path / "out").iterdir()] == ["audit.converted.json"]
+    assert (tmp_path / "out" / "audit.converted.json").read_text(encoding="utf-8").startswith('[{"active_before"')  # sort-keys
+
+
+def test_post_process_is_skipped_when_the_search_fails(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
+    fake_gitlab.add_fault({"match": {"path": "^/api/v4/projects$"}, "response": {"status": 403, "json": {"message": "403"}}})
+    proc = run_cli(*gl_args(fake_gitlab), "-s", "password", "--index-file", "idx.jsonl", "--session-file", "s.jsonl",
+                   "--post-process", "dedup,convert", "--final-only")
+    assert proc.returncode != 0
+    assert not list(tmp_path.glob("s.*.json*"))

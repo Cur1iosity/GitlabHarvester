@@ -282,6 +282,32 @@ and control records are kept.
 **convert** turns a JSONL file (or concatenated pretty-printed JSON objects) into a
 single JSON array. `--sort-keys` sorts object keys.
 
+### In the same run: --post-process
+
+```bash
+gitlab-harvester -u ... -t ... -f words.txt --session audit --post-process dedup,convert
+gitlab-harvester -u ... -t ... -f words.txt --session audit --post-process dedup,convert --final-only
+```
+
+`--post-process` runs the steps on the session file right after a finished search:
+
+| Steps | Files |
+|---|---|
+| `dedup,convert` | `audit.jsonl`, `audit.deduped.jsonl`, `audit.deduped.converted.json` |
+| `dedup` | `audit.jsonl`, `audit.deduped.jsonl` |
+| `convert` | `audit.jsonl`, `audit.converted.json` |
+
+- Steps always run in the order dedup, then convert (`convert,dedup` means the same):
+  dedup reads JSONL, convert produces a JSON array.
+- The dedup and convert options above (`--hash-algo`, `--no-normalize-hits`,
+  `--sqlite-path`, `--sort-keys`) apply. Without `--sqlite-path` the hash store is a
+  temporary file that is deleted afterwards.
+- `--final-only` (off by default) keeps only the last file: the session JSONL and the
+  intermediate files are deleted. It saves space, but the session can't be resumed or
+  post-processed again. Files are deleted only after the search finished and every step
+  succeeded: after Ctrl+C or an error everything stays in place.
+- The result equals running `-m dedup` and `-m convert` by hand.
+
 ## Progress output
 
 Progress goes to stderr; results and final summaries go to stdout.
@@ -398,5 +424,7 @@ are URL-encoded.
 | `--[no-]normalize-hits` | on | collapse whitespace before comparing hits in dedup (`--no-normalize-hits` = exact) |
 | `--sqlite-path FILE` | `<output>.seen.sqlite` | dedup hash store |
 | `--sort-keys` | off | sorted keys in `convert` output |
+| `--post-process STEPS` | — | after the search: `dedup`, `convert` or `dedup,convert` on the session file |
+| `--[no-]final-only` | off | with `--post-process`: keep only the last file |
 | `--log-level`, `--debug`, `--log-file` | `WARN` | logging |
 | `-V, --version` | | print version |

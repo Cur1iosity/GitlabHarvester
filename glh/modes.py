@@ -26,6 +26,7 @@ from glh.cli import CliArgs
 from glh.planner import ScanOptions
 from glh.postprocess.convert import convert_jsonl_to_json
 from glh.postprocess.dedup import dedup_session_file
+from glh.postprocess.pipeline import run_pipeline
 from glh.session import load_done_keywords
 from glh.utils.terminal_utils import format_duration
 
@@ -207,6 +208,8 @@ def _run_search(args: CliArgs) -> None:
                     "file_changed_after": args.file_changed_after.isoformat() if args.file_changed_after else None,
                     "file_changed_before": args.file_changed_before.isoformat() if args.file_changed_before else None,
                     "keywords_count": len(keywords),
+                    "post_process": list(args.post_process),
+                    "final_only": args.final_only,
                 },
             )
 
@@ -231,6 +234,26 @@ def _run_search(args: CliArgs) -> None:
 
     print(f"Session saved to: {session_path}")
     print(f"Done. Keywords: {len(keywords)} | Hits: {hits} | Search time: {format_duration(search_elapsed)}")
+
+    if args.post_process:
+        _post_process(args, session_path)
+
+
+def _post_process(args: CliArgs, session_path: Path) -> None:
+    """Run --post-process steps on a finished session (files are deleted only if all steps succeed)."""
+    result = run_pipeline(
+        session_path,
+        args.post_process,
+        final_only=args.final_only,
+        sqlite_path=Path(args.sqlite_path) if args.sqlite_path else None,
+        hash_algo=args.hash_algo,
+        normalize=args.normalize_hits,
+        sort_keys=args.sort_keys,
+    )
+    print(f"Post-processing: {' -> '.join(str(p) for p in [session_path, *result.outputs])}")
+    if result.removed:
+        print(f"Removed (--final-only): {', '.join(str(p) for p in result.removed)}")
+    print(f"Final result: {result.final}")
 
 
 def _require_path(value: str | None, *, name: str) -> Path:
