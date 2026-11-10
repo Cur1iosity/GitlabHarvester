@@ -1,0 +1,14 @@
+# Fake GitLab scenario for the README demo: the default dataset (artificial
+# projects and FAKE-... secrets) with small response delays, so the progress
+# line is visible instead of finishing in a fraction of a second.
+name: demo
+description: Default dataset with demo-friendly response times.
+extends: default
+
+faults:
+  - name: demo-search-latency
+    match: {method: GET, path: "/search$"}
+    response: {delay: 0.12}
+  - name: demo-branches-latency
+    match: {method: GET, path: "/repository/branches$"}
+    response: {delay: 0.06}

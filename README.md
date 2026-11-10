@@ -25,6 +25,11 @@ without cloning, including GitLab CE, which has no instance-wide code search.
 - **Developers, analysts and architects.** Surprisingly handy as plain instance-wide code
   search: find where an API, a config key or a library is used across all projects.
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Cur1iosity/GitlabHarvester/main/docs/assets/demo.gif"
+       alt="GitlabHarvester run: project index, search plan, per-term progress and results" width="900">
+</p>
+
 ## Install
 
 ```bash
