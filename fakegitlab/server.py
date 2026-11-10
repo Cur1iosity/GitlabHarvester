@@ -91,8 +91,10 @@ class FakeGitLab:
             external_url: str | None = None,
             threaded: bool = True,
             admin: bool = True,
+            ssl_context: Any = None,
     ) -> None:
-        self.httpserver = HTTPServer(host=host, port=port, threaded=threaded)
+        # ssl_context (ssl.SSLContext) serves HTTPS, e.g. with a trustme certificate in tests.
+        self.httpserver = HTTPServer(host=host, port=port, threaded=threaded, ssl_context=ssl_context)
         self._external_url_override = external_url
         self._admin_enabled = admin
         self._faults = FaultInjector()

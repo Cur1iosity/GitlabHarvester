@@ -37,6 +37,16 @@ from glh.utils.terminal_utils import human_int
 UTC = timezone.utc
 
 
+# HTTP statuses that won't change on a retry: no access (403) or the project /
+# branch is gone (404). Such searches are skipped without blocking --resume.
+PERMANENT_ERROR_CODES = frozenset({403, 404})
+
+
+def is_permanent_error(error: BaseException) -> bool:
+    """True for API errors a retry can't fix (403/404); False for 5xx, 429, 401, timeouts, network."""
+    return getattr(error, "response_code", None) in PERMANENT_ERROR_CODES
+
+
 def client_required(func: Callable) -> Callable:
     """
     Decorator ensuring that a GitLab client is initialized before method execution.
@@ -103,6 +113,7 @@ class GitlabHarvester:
             log_file: str | None = None,
             host: str | None = None,  # backward-compat alias for `url`
             workers: int = 1,
+            ssl_verify: bool | str = True,
     ) -> None:
         self.search_terms: list = search_terms or []
         # Parallel API requests (1 = sequential). See glh/workers.py.
@@ -112,6 +123,8 @@ class GitlabHarvester:
         self._client_kwargs: dict[str, Any] | None = None
         # (project id, branch, path, window) -> changed inside the window; shared by workers.
         self._file_change_cache: dict[tuple[Any, ...], bool] = {}
+        # Terms of the last search_keywords() run that had failed (retryable) searches.
+        self.incomplete_terms: list[str] = []
         self._file_change_lock = threading.Lock()
 
         self.log_level: int = logging_utils.coerce_log_level(log_level)
@@ -123,7 +136,10 @@ class GitlabHarvester:
         )
 
         url = url or host
-        self._gl: Gitlab | None = self._get_gl_client(url=url, token=token, proxy=proxy, timeout=timeout) if url and token else None
+        self._gl: Gitlab | None = (
+            self._get_gl_client(url=url, token=token, proxy=proxy, timeout=timeout, ssl_verify=ssl_verify)
+            if url and token else None
+        )
 
     @property
     def _gl(self) -> Gitlab | None:
@@ -266,27 +282,30 @@ class GitlabHarvester:
             token: str,
             timeout: int = 60,
             proxy: str | None = None,
-            ssl_verify: bool = True,
+            ssl_verify: bool | str = True,
             disable_ssl_warnings: bool = True,
-            allow_ssl_fallback: bool = True,
     ) -> Gitlab:
         """
         Initialize and authenticate a GitLab API client.
+
+        TLS certificates are always verified unless the caller explicitly passes
+        ``ssl_verify=False`` (CLI: --insecure). There is no automatic fallback to
+        an unverified connection: it would send the token to whoever answers.
 
         Args:
             url: GitLab instance URL.
             token: Personal access token for API authentication.
             timeout: Connection timeout in seconds.
             proxy: Optional proxy URL applied to both HTTP and HTTPS.
-            ssl_verify: Whether to verify TLS certificates.
+            ssl_verify: True (system CAs), a CA bundle path (CLI: --ca-bundle),
+                or False to disable verification.
             disable_ssl_warnings: Disable urllib3 TLS warnings (only when ssl_verify=False).
-            allow_ssl_fallback: If True, retries auth with ssl_verify=False on SSLError.
 
         Returns:
             Authenticated Gitlab client instance.
 
         Raises:
-            requests.exceptions.SSLError: If TLS fails and fallback is disabled or also fails.
+            GitlabHarvesterError: If the TLS certificate can't be verified.
             ValueError: If proxy URL is invalid.
         """
         self.logger.debug("Connecting to GitLab: %s", url)
@@ -297,6 +316,12 @@ class GitlabHarvester:
             "timeout": timeout,
             "ssl_verify": ssl_verify,
         }
+
+        if ssl_verify is False:
+            self.logger.warning(
+                "TLS certificate verification is DISABLED (--insecure): the token is sent "
+                "without checking who answers at %s.", url,
+            )
 
         if proxy:
             proxy = self._normalize_proxy(proxy)
@@ -318,21 +343,13 @@ class GitlabHarvester:
             self.logger.debug("Authenticated to GitLab: %s", url)
             self._client_kwargs = dict(kwargs)
             return gl
-        except requests.exceptions.SSLError:
-            if not allow_ssl_fallback or kwargs.get("ssl_verify") is False:
-                self.logger.exception("TLS handshake failed for %s", url)
-                raise
-
-            # Fallback: retry once with ssl verification disabled
-            self.logger.info("TLS failed for %s; retrying with ssl_verify=False", url)
-            kwargs["ssl_verify"] = False
-            _maybe_disable_warnings()
-
-            gl = Gitlab(**kwargs)
-            gl.auth()
-            self.logger.debug("Authenticated to GitLab (ssl_verify=False): %s", url)
-            self._client_kwargs = dict(kwargs)
-            return gl
+        except requests.exceptions.SSLError as e:
+            raise GitlabHarvesterError(
+                f"TLS certificate verification failed for {url}: {e}\n"
+                "If the instance uses a private CA, pass it with --ca-bundle FILE. "
+                "To connect anyway without verification, use --insecure "
+                "(not recommended: the token would be sent to an unverified server)."
+            ) from None
 
     @client_required
     def fetch_projects(
@@ -930,10 +947,12 @@ class GitlabHarvester:
             )
             checks = (f", {terminal_utils.plural(len(self._file_change_cache), 'file check')}"
                       if options.file_window else "")
+            incomplete = (f"; INCOMPLETE: {terminal_utils.plural(len(self.incomplete_terms), 'term')} "
+                          f"with failed searches, not marked done" if self.incomplete_terms else "")
             progress.finish(
                 f"Search finished: {terms_text} x {terminal_utils.plural(plan.project_count, 'project')}, "
                 f"{terminal_utils.plural(hit_counter - hits_before, 'hit')}{checks} in "
-                f"{terminal_utils.format_duration(progress.elapsed)}"
+                f"{terminal_utils.format_duration(progress.elapsed)}{incomplete}"
             )
 
         return res, hit_counter
@@ -976,21 +995,35 @@ class GitlabHarvester:
                 progress.finish()
         return res[0]["result"], hit_counter
 
-    def _search_branch(self, task: _BranchTask) -> list[dict[str, Any]]:
-        """Worker: search one term in one branch of one project (all result pages)."""
+    def _search_branch(self, task: _BranchTask) -> tuple[list[dict[str, Any]], str | None]:
+        """
+        Worker: search one term in one branch of one project (all result pages).
+
+        Returns:
+            (hits, failure): failure describes a retryable error (5xx, 429 after
+            retries, 401, timeout, network, invalid response) that may have hidden
+            hits, else None. 403/404 are logged and treated as nothing to find.
+        """
         project_url = task.project["web_url"]
         project_obj: Project = self._gl.projects.get(task.project["id"], lazy=True)
         path_filter = None
         if task.file_window:
             def path_filter(path: str) -> bool:
                 return self._file_changed_in_window(task.project["id"], task.branch, path, task.file_window)
+        errors: list[BaseException] = []
         try:
             hits, _ = self.scan_branch(project=project_obj, branch=task.branch, term=task.term,
-                                       project_url=project_url, path_filter=path_filter)
+                                       project_url=project_url, path_filter=path_filter, errors=errors)
         except (gitlab.exceptions.GitlabError, requests.exceptions.RequestException) as e:
             self.logger.warning("%s | %s Branch: %s", e, project_url, task.branch)
+            errors.append(e)
             hits = []
-        return hits
+        retryable = [e for e in errors if not is_permanent_error(e)]
+        failure = None
+        if retryable:
+            name = task.project.get("path_with_namespace", project_url)
+            failure = f"{name} @ {task.branch}: {type(retryable[0]).__name__}: {retryable[0]}"
+        return hits, failure
 
     def _file_changed_in_window(self, project_id: Any, branch: str, path: str, window: TimeWindow) -> bool:
         """
@@ -1061,6 +1094,9 @@ class GitlabHarvester:
         results: list[list[tuple[int, dict[str, Any]]]] = [[] for _ in terms]
         partial: dict[tuple[int, int], dict[int, list[dict[str, Any]]]] = {}
         state = {"next_term": 0, "term_started": progress.elapsed}
+        # Failed (retryable) searches per term: such a term is not marked done.
+        term_failures: list[list[str]] = [[] for _ in terms]
+        self.incomplete_terms = []
         # When the first task of each term was handed out (feeder thread with workers > 1).
         term_begun: dict[int, float] = {}
 
@@ -1071,24 +1107,31 @@ class GitlabHarvester:
         def close_finished_terms() -> None:
             while state["next_term"] < n_terms and projects_left[state["next_term"]] == 0:
                 number = state["next_term"]
+                failures = term_failures[number]
+                if failures:
+                    self.incomplete_terms.append(terms[number])
                 if checkpoints and session_file is not None:
-                    self._emit_record(
-                        session_file,
-                        record={
-                            "type": "keyword_done",
-                            "term": terms[number],
-                            "hit_counter": hits_before + sum(term_hits[:number + 1]),
-                            "timestamp_utc": datetime.now(UTC).isoformat(),
-                        },
-                    )
+                    record: dict[str, Any] = {
+                        # keyword_done is the --resume checkpoint: only for terms searched completely.
+                        "type": "keyword_incomplete" if failures else "keyword_done",
+                        "term": terms[number],
+                        "hit_counter": hits_before + sum(term_hits[:number + 1]),
+                        "timestamp_utc": datetime.now(UTC).isoformat(),
+                    }
+                    if failures:
+                        record["failed_searches"] = len(failures)
+                        record["failures"] = failures[:20]
+                    self._emit_record(session_file, record=record)
                     # Resume checkpoint: make it durable even if the process is killed.
                     session_file.flush()
-                if checkpoints and n_terms > 1:
+                failed = (f"; {terminal_utils.plural(len(failures), 'search', 'searches')} FAILED, "
+                          f"not marked done" if failures else "")
+                if checkpoints and (n_terms > 1 or failures):
                     progress.note(
                         f"Term {number + 1}/{n_terms} '{terms[number]}': "
                         f"{terminal_utils.plural(plan.project_count, 'project')}, "
                         f"{terminal_utils.plural(term_hits[number], 'hit')} in "
-                        f"{terminal_utils.format_duration(progress.elapsed - state['term_started'])}"
+                        f"{terminal_utils.format_duration(progress.elapsed - state['term_started'])}{failed}"
                     )
                 state["term_started"] = progress.elapsed
                 state["next_term"] += 1
@@ -1116,7 +1159,9 @@ class GitlabHarvester:
                                          initializer=self._init_worker_client)
         for done in tasks_iter:
             task: _BranchTask = done.item
-            hits = done.unwrap()
+            hits, failure = done.unwrap()
+            if failure:
+                term_failures[task.term_no].append(failure)
             key = (task.term_no, task.project_no)
             got = partial.setdefault(key, {})
             got[task.branch_no] = hits
@@ -1225,6 +1270,7 @@ class GitlabHarvester:
             hit_counter: int = 0,
             per_page: int = 100,
             path_filter: Callable[[str], bool] | None = None,
+            errors: list[BaseException] | None = None,
             **kwargs,
     ) -> tuple[list[dict], int]:
         """
@@ -1243,6 +1289,8 @@ class GitlabHarvester:
             hit_counter: Global hit counter to be incremented.
             path_filter: Optional predicate on the file path; hits in files for
                 which it returns False are dropped (used by the file time filter).
+            errors: Optional list that receives the API error that stopped the
+                search early (results of earlier pages are still returned).
             **kwargs: Additional parameters passed to GitLab search API.
 
         Returns:
@@ -1273,6 +1321,8 @@ class GitlabHarvester:
         except (gitlab.exceptions.GitlabError, requests.exceptions.RequestException) as e:
             # Keep results of already fetched pages; a timeout must not abort the whole scan.
             self.logger.warning("[%s] %s: %s", project.id, project_url, e)
+            if errors is not None:
+                errors.append(e)
 
         if path_filter is not None and search_results:
             verdict: dict[str, bool] = {}

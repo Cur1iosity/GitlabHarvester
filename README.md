@@ -106,6 +106,7 @@ gitlab-harvester -u http://127.0.0.1:8080 -t dev-token -s password -b all
 ```
 
 Details: [docs/testing.md](docs/testing.md), [docs/architecture.md](docs/architecture.md).
+Debian/Kali packaging readiness: [docs/packaging.md](docs/packaging.md).
 
 ## License
 

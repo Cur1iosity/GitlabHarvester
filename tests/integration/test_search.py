@@ -169,6 +169,7 @@ def test_search_error_on_intermediate_page_keeps_earlier_pages(fake_gitlab: Fake
     ids=["500", "502", "503", "401", "403", "404", "invalid-json"],
 )
 def test_partial_success_when_one_project_fails(fake_gitlab: FakeGitLab, indexed, response):
+    """One failing project never aborts the scan; whether the term counts as done depends on the error."""
     glh, projects = indexed
     fake_gitlab.add_fault({"match": {"path": "^/api/v4/projects/301/search$"}, "response": response})
     logs = capture_logs(glh)
@@ -178,7 +179,62 @@ def test_partial_success_when_one_project_fails(fake_gitlab: FakeGitLab, indexed
     assert 301 not in session.project_ids()
     assert hits == sum(PASSWORD_HITS_DEFAULT_BRANCH.values()) - PASSWORD_HITS_DEFAULT_BRANCH[301]
     assert any("ops/infra/terraform/modules" in m for m in logs.messages(logging.WARNING))
-    assert session.of_type("keyword_done")[0]["hit_counter"] == hits
+
+    if response["status"] in (403, 404):
+        # Permanent: no access / gone. Retrying can't help, so the term is done.
+        assert session.of_type("keyword_done")[0]["hit_counter"] == hits
+        assert session.of_type("keyword_incomplete") == [] and glh.incomplete_terms == []
+    else:
+        # Retryable: hits may be missing, so --resume must search the term again.
+        assert session.of_type("keyword_done") == []
+        incomplete = session.of_type("keyword_incomplete")
+        assert [r["term"] for r in incomplete] == ["password"]
+        assert incomplete[0]["failed_searches"] == 1 and incomplete[0]["hit_counter"] == hits
+        assert incomplete[0]["failures"][0].startswith("ops/infra/terraform/modules @ main: ")
+        assert glh.incomplete_terms == ["password"]
+
+
+def test_failed_term_is_not_a_resume_checkpoint(fake_gitlab: FakeGitLab, indexed, tmp_path: Path):
+    """Regression: a term whose searches failed used to be marked done, so --resume skipped it."""
+    from glh.session import load_done_keywords
+
+    glh, projects = indexed
+    fake_gitlab.add_fault({"match": {"path": "^/api/v4/projects/301/search$", "query": {"search": "api_key"}},
+                           "response": {"status": 502, "body": "bad gateway"}})
+    _, _, session = search(glh, projects, ["password", "api_key", "token"], scan_branches="default")
+
+    path = tmp_path / "s.jsonl"
+    path.write_text("".join(json.dumps(r) + "\n" for r in session.records), encoding="utf-8")
+    assert load_done_keywords(path) == {"password", "token"}  # api_key will be searched again
+    # Checkpoints keep the term order; the incomplete term sits in its place.
+    assert [(r["type"], r["term"]) for r in session.records if r.get("type", "").startswith("keyword_")] == [
+        ("keyword_done", "password"), ("keyword_incomplete", "api_key"), ("keyword_done", "token")]
+
+
+def test_error_on_a_later_result_page_makes_the_term_incomplete(fake_gitlab: FakeGitLab, make_harvester):
+    lines = "secret\nfiller\n" * 150  # 150 separate results -> 2 pages
+    fake_gitlab.reset({
+        "extends": "default", "instance": {"search_context_lines": 0},
+        "projects": [{"id": 105, "path_with_namespace": "sandbox/notes", "branches": {"main": {"files": {"f": lines}}}}],
+        "faults": [{"match": {"path": "/projects/105/search$", "query": {"page": "2"}},
+                    "response": {"status": 500, "json": {"message": "500"}}}],
+    })
+    glh = make_harvester()
+    project = {"id": 105, "web_url": "x", "default_branch": "main", "branches": ["main"], "empty_repo": False}
+    _, hits, session = search(glh, [project], ["secret"])
+    assert hits == 100  # page 1 is kept
+    assert [r["term"] for r in session.of_type("keyword_incomplete")] == ["secret"]
+
+
+def test_parallel_failures_are_tracked_too(fake_gitlab: FakeGitLab, indexed, make_harvester):
+    _, projects = indexed
+    fake_gitlab.add_fault({"match": {"path": "/search$", "query": {"search": "token"}},
+                           "response": {"status": 503, "json": {"message": "503"}}})
+    glh = make_harvester(workers=4)
+    _, _, session = search(glh, projects, ["password", "token"], scan_branches="all")
+    assert [r["term"] for r in session.of_type("keyword_done")] == ["password"]
+    incomplete = session.of_type("keyword_incomplete")
+    assert [r["term"] for r in incomplete] == ["token"] and incomplete[0]["failed_searches"] > 1
 
 
 def test_search_rate_limit_is_retried(fake_gitlab: FakeGitLab, indexed, no_retry_sleep):
@@ -202,6 +258,8 @@ def test_search_timeout_skips_branch_and_continues(fake_gitlab: FakeGitLab, make
     assert hits == 9 - PASSWORD_HITS_DEFAULT_BRANCH[301]
     assert 301 not in session.project_ids()
     assert any("timed out" in m.lower() for m in logs.messages(logging.WARNING))
+    # The timed-out project may hold hits: the term is not a resume checkpoint.
+    assert [r["term"] for r in session.of_type("keyword_incomplete")] == ["password"]
 
 
 def test_multiple_keywords_session_records(indexed):

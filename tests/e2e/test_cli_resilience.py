@@ -286,3 +286,43 @@ def test_search_output_survives_legacy_code_pages(fake_gitlab, encoding, tmp_pat
     assert "Logging error" not in out + err and "UnicodeEncodeError" not in out + err
     assert err.lstrip().startswith("GitlabHarvester v")  # plain banner instead of escaped box characters
     assert "Done. Keywords: 1 | Hits: 1" in out
+
+
+# --------------------------------------------------------------------------- failed searches and --resume
+
+
+def test_failed_term_is_reported_and_resumed(fake_gitlab: FakeGitLab, run_cli, tmp_path):
+    from tests.helpers import Session
+
+    terms = tmp_path / "terms.txt"
+    terms.write_text("password\napi_key\ntoken\n", encoding="utf-8")
+    args = ["-u", fake_gitlab.url, "-t", fake_gitlab.token, "-f", str(terms), "--index-file", "idx.jsonl",
+            "--session-file", "s.jsonl"]
+    fake_gitlab.add_fault({"match": {"path": "/search$", "query": {"search": "api_key"}},
+                           "response": {"status": 500, "json": {"message": "500 Internal Server Error"}}})
+
+    first = run_cli(*args, check=True)
+    assert "INCOMPLETE: searches failed for 1 of 3 terms ('api_key')" in first.stdout
+    assert "--resume" in first.stdout
+    assert "searches FAILED, not marked done" in first.stderr
+    session = Session.load(tmp_path / "s.jsonl")
+    summary = session.of_type("summary")[0]
+    assert summary["completed"] is False and summary["incomplete_terms"] == ["api_key"]
+
+    # GitLab recovers: --resume searches only the term that failed.
+    fake_gitlab.clear_faults()
+    fake_gitlab.clear_journal()
+    second = run_cli(*args, "--resume", check=True)
+    assert {r.arg("search") for r in fake_gitlab.api_requests("project_search")} == {"api_key"}
+    assert "INCOMPLETE" not in second.stdout
+    session = Session.load(tmp_path / "s.jsonl")
+    assert [r["term"] for r in session.of_type("keyword_done")] == ["password", "token", "api_key"]
+    assert session.of_type("summary")[-1]["completed"] is True
+
+
+def test_final_only_keeps_an_incomplete_session(fake_gitlab: FakeGitLab, run_cli, tmp_path):
+    fake_gitlab.add_fault({"match": {"path": "/search$"}, "response": {"status": 503, "json": {"message": "503"}}})
+    proc = run_cli("-u", fake_gitlab.url, "-t", fake_gitlab.token, "-s", "password", "--index-file", "idx.jsonl",
+                   "--session-file", "s.jsonl", "--post-process", "dedup,convert", "--final-only", check=True)
+    assert "--final-only ignored: the search is incomplete" in proc.stdout
+    assert (tmp_path / "s.jsonl").exists() and (tmp_path / "s.deduped.converted.json").exists()

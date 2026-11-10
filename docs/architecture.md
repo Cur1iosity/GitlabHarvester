@@ -182,6 +182,8 @@ Each one is fixed minimally and pinned by tests (all of them fail on the origina
 | Hit URLs weren't URL-encoded | Branches like `fix/#42` and paths with spaces produced broken links (`#` became a fragment) | `quote()` branch and path | `test_special_character_links_are_url_encoded`, `test_hit_links_resolve_to_file_and_line` |
 | A read timeout or connection error in a branch/search request aborted the whole run | One slow project killed a multi-hour scan | Catch `requests.RequestException` like `GitlabError` in per-project calls | `test_search_timeout_skips_branch_and_continues`, `test_branch_listing_timeout_does_not_abort_index` |
 | `from datetime import UTC` (3.11+) while `requires-python >= 3.10` | Import error on Python 3.10 | `UTC = timezone.utc` | CI matrix (3.10) |
+| On a TLS certificate error, the client silently retried with verification disabled | A man-in-the-middle certificate was accepted and the token sent to it | No automatic fallback; explicit `--ca-bundle FILE` or `--insecure` (warned on every run) | `tests/integration/test_tls.py` |
+| A term was marked `keyword_done` even when some of its searches failed (5xx, 429, 401, timeout, network) | `--resume` skipped it, so the failed projects were never searched | Such terms get `keyword_incomplete`, the summary says `completed: false`; 403/404 stay permanent skips | `test_partial_success_when_one_project_fails[*]`, `test_failed_term_is_not_a_resume_checkpoint`, `test_failed_term_is_reported_and_resumed` |
 
 Observed behavior that was intentionally **not** changed (documented by tests):
 

@@ -39,7 +39,11 @@ gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -s password
 - The token needs the `read_api` scope. Only projects visible to the token are searched.
 - `--proxy http://127.0.0.1:8080` routes API traffic through a proxy (a scheme is added if missing).
 - `--timeout 60` is the per-request timeout in seconds.
-- If TLS verification fails, the tool retries once with verification disabled.
+- TLS certificates are always verified, and verification is never turned off
+  automatically. For a private CA, pass its PEM bundle with `--ca-bundle ca.pem`. To
+  connect without verification, add `--insecure` explicitly: every run then warns that
+  the token goes to an unverified server. Without either option, a certificate error
+  stops the run before the token is sent.
 - `--log-level ERROR|WARN|INFO`, `--debug`, and `--log-file path.log` control logging.
   The log file also gets a summary of every run, see [Run journal](#run-journal).
 - Rate limiting (HTTP 429) is retried automatically according to `Retry-After`.
@@ -258,6 +262,16 @@ gitlab-harvester -u ... -t ... -f words.txt --session audit --resume
 
 - Completed terms are skipped. The term that was in progress is searched again,
   so its hits may appear twice; run `dedup` afterwards.
+- A term is **completed** only if all its searches succeeded. If a search failed with
+  an error that may hide hits (HTTP 5xx, 429 after the retries, 401, a timeout, a
+  connection error, an invalid response), the run continues, but the term gets a
+  `keyword_incomplete` record (with the failed searches) instead of `keyword_done`,
+  the `summary` says `"completed": false`, and the run ends with an `INCOMPLETE: ...`
+  line. `--resume` then searches those terms again. 403 and 404 (no access, project or
+  branch gone) can't be fixed by retrying: such projects are skipped with a warning and
+  don't keep the term open.
+- `--final-only` doesn't delete the session JSONL of an incomplete search, so it can
+  still be resumed.
 - New records are appended after a `resume` marker. The final `summary` counts
   hits of the resumed part only.
 
@@ -441,6 +455,8 @@ are URL-encoded.
 | `-t, --token TOKEN` | — | API token (`read_api`) |
 | `-p, --proxy URL` | — | HTTP(S) proxy |
 | `--timeout SEC` | 60 | per-request timeout |
+| `--ca-bundle FILE` | system CAs | CA bundle (PEM) for the GitLab TLS certificate |
+| `--[no-]insecure` | off | disable TLS verification explicitly (never automatic) |
 | `-w, --workers N` | 1 | parallel API requests (1-64); only for instances without rate limits |
 | `--time-after DATE`, `--time-before DATE` | — | window for the index, its projects and the files with hits |
 | `--index-active-after/--index-active-before DATE` | — | index only projects active in the window (API filter) |

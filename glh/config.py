@@ -16,7 +16,7 @@ Extras that have no CLI counterpart:
 - ``token = env:NAME`` reads the token from the environment variable NAME.
 
 Relative paths (``index-file``, ``terms-file``, ``session-file``, ``log-file``,
-``input-file``, ``output-file``, ``sqlite-path``) are resolved against the
+``input-file``, ``output-file``, ``sqlite-path``, ``ca-bundle``) are resolved against the
 directory of the config file, so the config works from any working directory.
 """
 
@@ -30,7 +30,7 @@ from typing import Any
 
 # Keys (argparse dests) that hold file system paths.
 PATH_DESTS = frozenset({"index_file", "terms_file", "session_file", "log_file", "input_file", "output_file",
-                        "sqlite_path"})
+                        "sqlite_path", "ca_bundle"})
 # Config-only keys (no CLI option).
 TERMS_DEST = "terms"
 # Options that make no sense in a config file.

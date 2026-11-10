@@ -1,0 +1,36 @@
+name: debian
+
+# Packaging readiness for Debian and Kali: the test suite, the build and the
+# installed CLI must work with the distribution's python3-* packages only and
+# without network, as in a dh-python/pybuild package build. See docs/packaging.md.
+
+on:
+  pull_request:
+  push:
+    branches: [main, dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: debian-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: ${{ matrix.base }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        base: ["kalilinux/kali-rolling", "debian:testing"]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build the image with distribution packages
+        run: docker build -f packaging/debian/Dockerfile --build-arg BASE="${{ matrix.base }}" -t glh-debian .
+
+      - name: Tests, build and smoke test without network
+        run: docker run --rm --network none -v "$PWD:/src:ro" glh-debian

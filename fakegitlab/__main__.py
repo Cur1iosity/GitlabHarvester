@@ -12,7 +12,12 @@ Option                      Environment          Default
 ``--scenario``              FAKE_GITLAB_SCENARIO default
 ``--external-url``          FAKE_GITLAB_EXTERNAL_URL (derived from request)
 ``--log-level``             FAKE_GITLAB_LOG_LEVEL INFO
+``--tls-cert``              FAKE_GITLAB_TLS_CERT (none: plain HTTP)
+``--tls-key``               FAKE_GITLAB_TLS_KEY  (none)
 ==========================  ===================  ==================
+
+With ``--tls-cert``/``--tls-key`` (PEM files) the server speaks HTTPS, e.g. to try
+``gitlab-harvester --ca-bundle`` against a certificate from a private CA.
 """
 
 from __future__ import annotations
@@ -21,6 +26,7 @@ import argparse
 import logging
 import os
 import signal
+import ssl
 import sys
 import threading
 
@@ -45,6 +51,10 @@ def _parse(argv: list[str] | None) -> argparse.Namespace:
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
         help="Request log verbosity.",
     )
+    p.add_argument("--tls-cert", default=env("FAKE_GITLAB_TLS_CERT") or None, metavar="PEM",
+                   help="Serve HTTPS with this certificate (chain) file.")
+    p.add_argument("--tls-key", default=env("FAKE_GITLAB_TLS_KEY") or None, metavar="PEM",
+                   help="Private key for --tls-cert (if not inside the certificate file).")
     p.add_argument("--list-scenarios", action="store_true", help="Print available scenarios and exit.")
     return p.parse_args(argv)
 
@@ -61,8 +71,17 @@ def main(argv: list[str] | None = None) -> int:
     # Werkzeug's access log duplicates our journal lines.
     logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
+    ssl_context = None
+    if args.tls_cert:
+        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ssl_context.load_cert_chain(args.tls_cert, args.tls_key)
+    elif args.tls_key:
+        print("error: --tls-key needs --tls-cert", file=sys.stderr)
+        return 2
+
     try:
-        fake = FakeGitLab(args.scenario, host=args.host, port=args.port, external_url=args.external_url)
+        fake = FakeGitLab(args.scenario, host=args.host, port=args.port, external_url=args.external_url,
+                          ssl_context=ssl_context)
     except ScenarioError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
