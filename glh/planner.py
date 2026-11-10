@@ -1,8 +1,9 @@
 # glh/planner.py
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from collections import Counter
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 BranchesMode = str | int  # "default" | "all" | int
@@ -26,15 +27,70 @@ class ScanOptions:
             - "all-branches": scan every branch of forks (potentially slow).
         fork_diff_bases: Branch names always considered for scanning in forks when
             forks_mode="branch-diff" (e.g., main/master/develop/dev).
-        started_from: Optional timezone-aware lower bound for project activity.
-            Projects whose indexed ``last_activity_at`` is earlier are skipped
-            (GitLab updates it on every push, so such repositories have no
-            changes since that moment). None disables the filter.
+        started_from: Optional timezone-aware lower bound for project activity
+            (--active-after, alias --started-from). Projects whose indexed
+            ``last_activity_at`` is earlier are skipped (GitLab updates it on
+            pushes and other activity, at most once per hour, so such
+            repositories normally have no changes since that moment).
+        active_before: Optional upper bound for project activity (--active-before).
+            Projects whose ``last_activity_at`` is later are skipped.
+        file_changed_after / file_changed_before: Optional window for the files
+            with hits (--file-changed-after/--file-changed-before). A hit is kept
+            only if a commit touched its file in the branch inside the window
+            (checked with the commits API, one request per file).
+        None disables a bound; bounds are inclusive.
     """
     scan_branches: BranchesMode = "default"  # default|all|N
     forks_mode: str = "include"  # skip|include|branch-diff|all-branches
     fork_diff_bases: tuple[str, ...] = ("main", "master", "develop", "dev")
     started_from: datetime | None = None
+    active_before: datetime | None = None
+    file_changed_after: datetime | None = None
+    file_changed_before: datetime | None = None
+
+    @property
+    def file_window(self) -> "TimeWindow":
+        """Time window for files with hits."""
+        return TimeWindow(self.file_changed_after, self.file_changed_before)
+
+
+@dataclass(frozen=True, slots=True)
+class TimeWindow:
+    """An optional [after, before] time range (both bounds inclusive, either may be None)."""
+
+    after: datetime | None = None
+    before: datetime | None = None
+
+    def __bool__(self) -> bool:
+        return self.after is not None or self.before is not None
+
+    def contains(self, moment: datetime) -> bool:
+        """True if ``moment`` lies inside the window."""
+        return (self.after is None or moment >= self.after) and (self.before is None or moment <= self.before)
+
+    def describe(self) -> str:
+        """'since 2024-06-01', 'until 2024-07-01' or '2024-06-01..2024-07-01'."""
+        if self.after is not None and self.before is not None:
+            return f"{format_bound(self.after)}..{format_bound(self.before)}"
+        if self.after is not None:
+            return f"since {format_bound(self.after)}"
+        if self.before is not None:
+            return f"until {format_bound(self.before)}"
+        return "any time"
+
+
+def format_bound(value: datetime | None) -> str:
+    """Show midnight UTC as a plain date, anything else as full ISO 8601."""
+    if value is None:
+        return "?"
+    if value.utcoffset() == timedelta(0) and (value.hour, value.minute, value.second) == (0, 0, 0):
+        return value.date().isoformat()
+    return value.isoformat()
+
+
+def format_api_time(value: datetime) -> str:
+    """ISO 8601 in UTC with a Z suffix, as accepted by GitLab API time parameters."""
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def parse_timestamp(value: Any) -> datetime | None:
@@ -73,6 +129,20 @@ def is_active_since(project: dict[str, Any], started_from: datetime | None) -> b
     if last_activity is None:
         return True
     return last_activity >= started_from
+
+
+def is_active_before(project: dict[str, Any], active_before: datetime | None) -> bool:
+    """
+    Check whether a project's last activity is at or before ``active_before``.
+
+    Projects without a parsable ``last_activity_at`` pass, like in is_active_since().
+    """
+    if active_before is None:
+        return True
+    last_activity = parse_timestamp(project.get("last_activity_at"))
+    if last_activity is None:
+        return True
+    return last_activity <= active_before
 
 
 def is_fork_project(project: dict[str, Any]) -> bool:
@@ -127,16 +197,48 @@ def get_upstream_id(project: dict[str, Any]) -> int | None:
     return None
 
 
+# Reasons a project is left out of a scan (keys of ScanPlan.skipped).
+SKIP_EMPTY = "empty"
+SKIP_FORK = "fork"
+SKIP_INACTIVE = "inactive"
+SKIP_TOO_RECENT = "too-recent"
+SKIP_NO_BRANCHES = "no-branches"
+
+
+def skip_reason(project: dict[str, Any], options: ScanOptions) -> str | None:
+    """
+    Return why a project is excluded from the search, or None if it is scanned.
+
+    Rules, checked in this order:
+
+    - SKIP_EMPTY: empty repositories are always skipped.
+    - SKIP_FORK: forked projects are skipped when forks_mode is "skip".
+    - SKIP_INACTIVE: projects inactive since options.started_from are skipped.
+    - SKIP_TOO_RECENT: projects active after options.active_before are skipped.
+
+    Args:
+        project: Project dictionary from the project index.
+        options: ScanOptions defining fork-handling and activity rules.
+
+    Returns:
+        One of the SKIP_* constants, or None.
+    """
+    if project.get("empty_repo", False):
+        return SKIP_EMPTY
+    if is_fork_project(project) and options.forks_mode == "skip":
+        return SKIP_FORK
+    if not is_active_since(project, options.started_from):
+        return SKIP_INACTIVE
+    if not is_active_before(project, options.active_before):
+        return SKIP_TOO_RECENT
+    return None
+
+
 def should_scan_project(project: dict[str, Any], options: ScanOptions) -> bool:
     """
     Determine whether a project should be included in the search process.
 
-    The decision is based on basic project properties and fork-handling strategy:
-
-    - Empty repositories are always skipped.
-    - Forked projects are skipped when forks_mode is set to "skip".
-    - Projects inactive since options.started_from are skipped.
-    - All other projects are eligible for scanning.
+    See skip_reason() for the rules.
 
     Args:
         project: Project dictionary from the project index.
@@ -145,13 +247,7 @@ def should_scan_project(project: dict[str, Any], options: ScanOptions) -> bool:
     Returns:
         True if the project should be scanned, otherwise False.
     """
-    if project.get("empty_repo", False):
-        return False
-    if is_fork_project(project) and options.forks_mode == "skip":
-        return False
-    if not is_active_since(project, options.started_from):
-        return False
-    return True
+    return skip_reason(project, options) is None
 
 
 def select_branches_from_index(project: dict[str, Any], mode: BranchesMode) -> list[str]:
@@ -311,3 +407,96 @@ def branches_to_scan(
         return selected
 
     return select_branches_from_index(project, options.scan_branches)
+
+
+@dataclass(frozen=True, slots=True)
+class ScanPlan:
+    """
+    Projects and branches a search will actually scan, computed once per run.
+
+    Attributes:
+        targets: (project, branches) pairs in index order.
+        total_projects: Number of projects in the index.
+        skipped: Excluded project count per SKIP_* reason.
+        started_from: Activity bound used for SKIP_INACTIVE (for messages).
+        active_before: Activity bound used for SKIP_TOO_RECENT (for messages).
+        projects_by_id: Index lookup used for fork/upstream resolution.
+    """
+    targets: tuple[tuple[dict[str, Any], tuple[str, ...]], ...]
+    total_projects: int
+    skipped: dict[str, int] = field(default_factory=dict)
+    started_from: datetime | None = None
+    active_before: datetime | None = None
+    projects_by_id: dict[int, dict[str, Any]] = field(default_factory=dict, repr=False)
+
+    @property
+    def project_count(self) -> int:
+        """Number of projects that will be scanned."""
+        return len(self.targets)
+
+    @property
+    def branch_count(self) -> int:
+        """Number of (project, branch) searches per term."""
+        return sum(len(branches) for _, branches in self.targets)
+
+    def describe(self) -> str:
+        """Human-readable summary, e.g. '6 of 9 projects, 8 branches (skipped: 1 empty, 2 inactive since 2024-06-01)'."""
+        noun = "project" if self.total_projects == 1 else "projects"
+        text = f"{self.project_count:,} of {self.total_projects:,} {noun}, {self.branch_count:,} "
+        text += "branch" if self.branch_count == 1 else "branches"
+        reasons: list[str] = []
+        if n := self.skipped.get(SKIP_EMPTY, 0):
+            reasons.append(f"{n:,} empty")
+        if n := self.skipped.get(SKIP_FORK, 0):
+            reasons.append(f"{n:,} fork{'s' if n != 1 else ''}")
+        if n := self.skipped.get(SKIP_INACTIVE, 0):
+            reasons.append(f"{n:,} inactive since {format_bound(self.started_from)}")
+        if n := self.skipped.get(SKIP_TOO_RECENT, 0):
+            reasons.append(f"{n:,} active after {format_bound(self.active_before)}")
+        if n := self.skipped.get(SKIP_NO_BRANCHES, 0):
+            reasons.append(f"{n:,} without branches to scan")
+        if reasons:
+            text += f" (skipped: {', '.join(reasons)})"
+        return text
+
+
+def build_scan_plan(projects: list[dict[str, Any]], options: ScanOptions) -> ScanPlan:
+    """
+    Decide once which projects and branches a search scans.
+
+    Uses skip_reason() and branches_to_scan(); a project that passes the
+    filters but has no branch to scan is counted as SKIP_NO_BRANCHES. Fork
+    upstreams are resolved against the full index, so an upstream excluded by
+    a filter still serves "branch-diff".
+
+    Args:
+        projects: The whole project index.
+        options: Scan options.
+
+    Returns:
+        ScanPlan with targets in index order and skip counters.
+    """
+    projects_by_id = {int(p["id"]): p for p in projects}
+    targets: list[tuple[dict[str, Any], tuple[str, ...]]] = []
+    skipped: Counter[str] = Counter()
+
+    for project in projects:
+        reason = skip_reason(project, options)
+        branches: list[str] = []
+        if reason is None:
+            branches = branches_to_scan(project, options, projects_by_id=projects_by_id)
+            if not branches:
+                reason = SKIP_NO_BRANCHES
+        if reason is not None:
+            skipped[reason] += 1
+            continue
+        targets.append((project, tuple(branches)))
+
+    return ScanPlan(
+        targets=tuple(targets),
+        total_projects=len(projects),
+        skipped=dict(skipped),
+        started_from=options.started_from,
+        active_before=options.active_before,
+        projects_by_id=projects_by_id,
+    )

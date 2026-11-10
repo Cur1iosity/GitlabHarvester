@@ -194,21 +194,26 @@ def test_dedup_with_hash_algo_and_without_normalization(fake_gitlab: FakeGitLab,
 
 
 @pytest.mark.parametrize(
-    ("since", "active", "expected_projects", "expected_hits"),
+    ("since", "planned", "skipped", "expected_projects", "expected_hits"),
     [
-        ("2024-06-02", 5, {103, 201, 202, 203, 301}, 7),
+        ("2024-06-02", 5, "1 empty, 3 inactive since 2024-06-02", {103, 201, 202, 203, 301}, 7),
         # 2024-06-03T00:00+03:00 == 2024-06-02T21:00Z -> 201 (06-02 10:00Z) drops out.
-        ("2024-06-03T00:00:00+03:00", 4, {103, 202, 203, 301}, 5),
-        ("2024-01-01", 9, {101, 103, 201, 202, 203, 301}, 9),  # empty 104 counts as active but is never scanned
-        ("2030-01-01", 0, set(), 0),
+        ("2024-06-03T00:00:00+03:00", 4, "1 empty, 4 inactive since 2024-06-03T00:00:00+03:00",
+         {103, 202, 203, 301}, 5),
+        # The empty repository is never scanned, so it is not counted as planned.
+        ("2024-01-01", 8, "1 empty", {101, 103, 201, 202, 203, 301}, 9),
+        ("2030-01-01", 0, "1 empty, 8 inactive since 2030-01-01", set(), 0),
     ],
 )
-def test_search_started_from(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path, since, active, expected_projects,
-                             expected_hits):
+def test_search_started_from(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path, since, planned, skipped,
+                             expected_projects, expected_hits):
     proc = run_cli(*gl_args(fake_gitlab), "-s", "password", "--index-file", "idx.jsonl", "--session-file", "s.jsonl",
                    "--started-from", since, check=True)
 
-    assert f"Activity filter: {active} of 9 projects active since" in proc.stdout
+    # Progress output (stderr) counts only the projects that are really scanned.
+    assert f"Search plan: 1 term, {planned} of 9 projects, {planned} branch" in proc.stderr
+    assert f"(skipped: {skipped})" in proc.stderr
+    assert f"Search finished: 1 term x {planned} project" in proc.stderr
     assert f"Hits: {expected_hits}" in proc.stdout
     s = Session.load(tmp_path / "s.jsonl")
     assert set(s.project_ids()) == expected_projects
@@ -236,3 +241,135 @@ def test_search_started_from_invalid_value(run_cli):
     proc = run_cli("-u", "http://127.0.0.1:9", "-t", "x", "-s", "password", "--started-from", "last-week")
     assert proc.returncode == 2
     assert "ISO 8601" in proc.stderr
+
+
+# --------------------------------------------------------------------------- config file (-c/--config)
+
+
+def _config(fake: FakeGitLab, tmp_path: Path) -> Path:
+    cfg = tmp_path / "conf" / "glh.ini"
+    cfg.parent.mkdir()
+    cfg.write_text(
+        f"""
+[connection]
+url = {fake.url}
+token = env:GLH_E2E_TOKEN
+[index]
+index-file = idx.jsonl
+index-branches = all
+[search]
+scan-branches = all
+forks = skip
+terms =
+    password
+    api_key
+[session]
+session-file = s.jsonl
+""",
+        encoding="utf-8",
+    )
+    return cfg
+
+
+def test_search_from_config_file_only(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("GLH_E2E_TOKEN", fake_gitlab.token)
+    cfg = _config(fake_gitlab, tmp_path)
+    proc = run_cli("-c", str(cfg), cwd=tmp_path, check=True)
+
+    # Paths are relative to the config file, not to the working directory.
+    session = Session.load(tmp_path / "conf" / "s.jsonl")
+    assert (tmp_path / "conf" / "idx.jsonl").exists()
+    assert [r["term"] for r in session.of_type("keyword_done")] == ["password", "api_key"]
+    assert not {201, 202, 203} & set(session.project_ids())  # forks = skip
+    assert session.records[0]["config"] == str(cfg)
+    assert "Search plan: 2 terms, 5 of 9 projects" in proc.stderr
+    assert "Done. Keywords: 2" in proc.stdout
+
+
+def test_cli_arguments_override_config_file(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("GLH_E2E_TOKEN", fake_gitlab.token)
+    cfg = _config(fake_gitlab, tmp_path)
+    proc = run_cli("-c", str(cfg), "-s", "token", "--forks", "include", "--session-file", "cli.jsonl",
+                   cwd=tmp_path, check=True)
+
+    session = Session.load(tmp_path / "cli.jsonl")  # CLI path: relative to the working directory
+    assert [r["term"] for r in session.of_type("keyword_done")] == ["token"]  # -s replaces config terms
+    assert "Search plan: 1 term, 8 of 9 projects" in proc.stderr  # forks included again
+    searched = {int(r.path.split("/")[4]) for r in fake_gitlab.api_requests("project_search")}
+    assert {201, 202, 203} <= searched
+    assert not (tmp_path / "conf" / "s.jsonl").exists()
+
+
+def test_invalid_config_value_fails_before_any_request(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
+    cfg = tmp_path / "bad.ini"
+    cfg.write_text("[search]\nforks = sometimes\n", encoding="utf-8")
+    proc = run_cli("-c", str(cfg), *gl_args(fake_gitlab), "-s", "x")
+    assert proc.returncode == 2
+    assert "forks" in proc.stderr and "choose from" in proc.stderr
+    assert fake_gitlab.requests == []
+
+
+# --------------------------------------------------------------------------- --workers
+
+
+def test_parallel_cli_run_matches_sequential_run(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
+    terms = tmp_path / "terms.txt"
+    terms.write_text("password\napi_key\ntoken\n", encoding="utf-8")
+    common = [*gl_args(fake_gitlab), "-f", str(terms), "-b", "all", "--forks", "branch-diff", "-bs", "3"]
+
+    run_cli(*common, "--index-file", "seq_idx.jsonl", "--session-file", "seq.jsonl", "-w", "1", check=True)
+    proc = run_cli(*common, "--index-file", "par_idx.jsonl", "--session-file", "par.jsonl", "-w", "4", check=True)
+
+    def urls(name: str) -> list[tuple[str, str]]:
+        return sorted((h["term"], h["url"]) for h in Session.load(tmp_path / name).hits())
+
+    assert urls("par.jsonl") == urls("seq.jsonl") and urls("par.jsonl")
+    assert load_index(tmp_path / "par_idx.jsonl")[1] == load_index(tmp_path / "seq_idx.jsonl")[1]
+    par = Session.load(tmp_path / "par.jsonl")
+    assert [r["term"] for r in par.of_type("keyword_done")] == ["password", "api_key", "token"]
+    assert par.records[0]["workers"] == 4
+    assert ", 4 workers" in proc.stderr
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "65", "many"])
+def test_invalid_workers_value(run_cli, value):
+    proc = run_cli("-u", "http://127.0.0.1:9", "-t", "x", "-s", "password", "-w", value)
+    assert proc.returncode == 2
+    assert "integer from 1 to 64" in proc.stderr
+
+
+# --------------------------------------------------------------------------- time filters
+
+
+def test_dump_index_for_an_activity_window(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
+    proc = run_cli(*gl_args(fake_gitlab), "-m", "dump-index", "--index-file", "idx.jsonl",
+                   "--index-active-after", "2024-06-01", "--index-active-before", "2024-06-04", check=True)
+    meta, projects = load_index(tmp_path / "idx.jsonl")
+    assert [p["id"] for p in projects] == [202, 201, 101]
+    assert meta["last_activity_after"] == "2024-06-01T00:00:00Z"
+    assert "Indexed 3 projects (active 2024-06-01..2024-06-04)" in proc.stderr
+
+
+def test_group_time_options_filter_index_projects_and_files(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
+    proc = run_cli(*gl_args(fake_gitlab), "-s", "password", "--index-file", "idx.jsonl", "--session-file", "s.jsonl",
+                   "--time-after", "2024-03-01", "--time-before", "2024-06-04T00:00:00Z", check=True)
+
+    # Index: only projects active inside the window (API filter): 102 (05-20), 101 (06-01), 201 (06-02), 202 (06-03).
+    meta, projects = load_index(tmp_path / "idx.jsonl")
+    assert {p["id"] for p in projects} == {101, 102, 201, 202}
+    # Files: deploy/env.example (2024-01-20) is dropped, config/settings.py (2024-03-15) kept.
+    urls = [h["url"] for h in Session.load(tmp_path / "s.jsonl").hits()]
+    assert not any("env.example" in u for u in urls)
+    assert any(u.endswith("config/settings.py#L1") for u in urls)
+    assert "files changed 2024-03-01..2024-06-04" in proc.stderr
+    meta_rec = Session.load(tmp_path / "s.jsonl").records[0]
+    assert meta_rec["file_changed_after"].startswith("2024-03-01") and meta_rec["active_before"].startswith("2024-06-04")
+
+
+def test_done_line_reports_search_time(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
+    proc = run_cli(*gl_args(fake_gitlab), "-s", "token", "--index-file", "idx.jsonl", "--session-file", "s.jsonl",
+                   check=True)
+    import re
+    assert re.search(r"Done\. Keywords: 1 \| Hits: \d+ \| Search time: \d+\.\ds", proc.stdout), proc.stdout
+    summary = Session.load(tmp_path / "s.jsonl").of_type("summary")[0]
+    assert summary["elapsed_seconds"] >= 0

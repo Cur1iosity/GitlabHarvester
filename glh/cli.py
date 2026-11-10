@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from importlib.metadata import version, PackageNotFoundError
 
+from glh.config import TERMS_DEST, ConfigError, load_config
 from glh.planner import parse_timestamp
 
 
@@ -68,8 +69,35 @@ def parse_branches(value: str) -> BranchesMode:
     raise argparse.ArgumentTypeError("Use 'default', 'all', or a positive integer (e.g., 10).")
 
 
+MAX_WORKERS = 64
+
+
+def parse_workers(value: str) -> int:
+    """Parse --workers: an integer from 1 to MAX_WORKERS."""
+    v = value.strip()
+    if v.isdigit() and 1 <= int(v) <= MAX_WORKERS:
+        return int(v)
+    raise argparse.ArgumentTypeError(f"Use an integer from 1 to {MAX_WORKERS}.")
+
+
+# (specific dest, group dest) for every time bound; see CliParser.parse().
+TIME_BOUNDS: tuple[tuple[str, str], ...] = (
+    ("index_active_after", "time_after"),
+    ("index_active_before", "time_before"),
+    ("started_from", "time_after"),
+    ("active_before", "time_before"),
+    ("file_changed_after", "time_after"),
+    ("file_changed_before", "time_before"),
+)
+TIME_WINDOWS: tuple[tuple[str, str, str], ...] = (
+    ("index_active_after", "index_active_before", "--index-active-after/--index-active-before"),
+    ("started_from", "active_before", "--active-after/--active-before"),
+    ("file_changed_after", "file_changed_before", "--file-changed-after/--file-changed-before"),
+)
+
+
 def parse_started_from(value: str) -> datetime:
-    """Parse --started-from into a timezone-aware datetime.
+    """Parse a time filter value (e.g. --started-from) into a timezone-aware datetime.
 
     Allowed values:
       - date: '2024-06-01' (midnight UTC)
@@ -91,10 +119,12 @@ def parse_started_from(value: str) -> datetime:
 class CliArgs:
     """Typed container for parsed CLI arguments."""
 
+    config: str | None
     url: str | None
     token: str | None
     proxy: str | None
     timeout: int
+    workers: int
 
     log_file: str | None
     log_level: str
@@ -112,8 +142,14 @@ class CliArgs:
     forks: str
     fork_diff_bases: str
     started_from: datetime | None
+    active_before: datetime | None
+    index_active_after: datetime | None
+    index_active_before: datetime | None
+    file_changed_after: datetime | None
+    file_changed_before: datetime | None
     search: str | None
     terms_file: str | None
+    terms: tuple[str, ...]
     session: str | None
     session_file: str | None
     resume: bool
@@ -141,6 +177,14 @@ class CliParser:
                         f"across projects and branches using a local project index.",
         )
 
+        parser.add_argument(
+            "-c", "--config",
+            default=None,
+            metavar="FILE",
+            help="INI config file with any of these options (see config.example.ini). "
+                 "Command-line arguments override values from the file.",
+        )
+
         # Core connectivity
         # NOTE: -H/--host is kept for backward compatibility and maps to --url.
         parser.add_argument(
@@ -152,11 +196,20 @@ class CliParser:
         parser.add_argument("-t", "--token", default=None, help="GitLab token (required for search/dump-index).",)
         parser.add_argument("-p", "--proxy", default=None, help="HTTP(S) proxy URL for GitLab API traffic.",)
         parser.add_argument("--timeout", default=60, type=int, help="Timeout in seconds for GitLab API request.",)
+        parser.add_argument(
+            "-w", "--workers",
+            type=parse_workers,
+            default=1,
+            metavar="N",
+            help=f"Parallel API requests (1-{MAX_WORKERS}, default 1 = sequential). Speeds up project listing, "
+                 "branch listing and search; use more than 1 only if the instance has no API rate limits.",
+        )
 
         # Logging
         parser.add_argument("--log-file", default=None, help="Write logs to a file (in addition to stderr).")
         parser.add_argument("--log-level", choices=("ERROR", "WARN", "INFO"), default="WARN", help="Console log level.")
-        parser.add_argument("--debug", action="store_true", help="Enable debug logging (overrides --log-level).")
+        parser.add_argument("--debug", action=argparse.BooleanOptionalAction, default=False,
+                            help="Enable debug logging (overrides --log-level).")
 
         # Mode
         parser.add_argument(
@@ -170,7 +223,8 @@ class CliParser:
         # Index
         parser.add_argument("-bs", "--batch-size", type=int, default=100, help="API pagination batch size.")
         parser.add_argument("--index-file", default=None, help="Path to the Instance Project Index file (JSONL).")
-        parser.add_argument("--dump-projects", action="store_true", help="Force rebuilding the project index.")
+        parser.add_argument("--dump-projects", action=argparse.BooleanOptionalAction, default=False,
+                            help="Force rebuilding the project index.")
 
         # Branches
         parser.add_argument(
@@ -194,17 +248,33 @@ class CliParser:
         )
         parser.add_argument("--fork-diff-bases", default="main,master,develop,dev", help="Comma-separated base branches.")
 
-        # Activity filter (search only; the index is not affected)
-        parser.add_argument(
-            "--started-from",
-            type=parse_started_from,
-            default=None,
-            metavar="DATE",
-            help="Search only projects with activity (last_activity_at) on or after DATE "
-                 "(ISO 8601, e.g. 2024-06-01 or 2024-06-01T12:00:00+03:00; without offset = UTC). "
-                 "Older projects are skipped without API calls. Note: secrets committed earlier "
-                 "but still present in skipped projects are not reported.",
+        # Time filters
+        tf = parser.add_argument_group(
+            "time filters",
+            "DATE is ISO 8601: 2024-06-01, 2024-06-01T12:00, 2024-06-01T12:00:00+03:00 (no offset = UTC). "
+            "A specific option overrides --time-after/--time-before.",
         )
+
+        def time_option(*flags: str, dest: str | None = None, help_text: str) -> None:
+            kwargs: dict[str, object] = {"type": parse_started_from, "default": None, "metavar": "DATE", "help": help_text}
+            if dest:
+                kwargs["dest"] = dest
+            tf.add_argument(*flags, **kwargs)
+
+        time_option("--time-after", help_text="Shortcut for --index-active-after, --active-after and --file-changed-after.")
+        time_option("--time-before", help_text="Shortcut for --index-active-before, --active-before and --file-changed-before.")
+        time_option("--index-active-after",
+                    help_text="Index only projects with activity after DATE (GitLab API filter: fewer pages to list).")
+        time_option("--index-active-before", help_text="Index only projects with activity before DATE (GitLab API filter).")
+        time_option("--active-after", "--started-from", dest="started_from",
+                    help_text="Search only indexed projects with activity (last_activity_at) on or after DATE; "
+                              "others are skipped without API calls. Secrets committed earlier but still present "
+                              "in skipped projects are not reported.")
+        time_option("--active-before", help_text="Search only indexed projects with activity on or before DATE.")
+        time_option("--file-changed-after",
+                    help_text="Keep only hits in files changed (by a commit in that branch) on or after DATE. "
+                              "Costs one commits API request per file with hits.")
+        time_option("--file-changed-before", help_text="Keep only hits in files changed on or before DATE.")
 
         # Search
         group = parser.add_mutually_exclusive_group()
@@ -215,7 +285,8 @@ class CliParser:
         sess.add_argument("--session", default=None, help="Session name (creates <name>.jsonl in the current directory).")
         sess.add_argument("--session-file", default=None, help="Explicit session file path (JSONL).")
 
-        parser.add_argument("--resume", action="store_true", help="Resume from existing session file.")
+        parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=False,
+                            help="Resume from existing session file.")
 
         # Postprocess
         parser.add_argument("--input-file", default=None, help="Input file for postprocess modes.")
@@ -229,19 +300,96 @@ class CliParser:
             default="blake2b",
             help="Hash algorithm for deduplication.",
         )
-        parser.add_argument("--no-normalize-hits", action="store_true", help="Disable hit normalization.")
+        parser.add_argument("--normalize-hits", action=argparse.BooleanOptionalAction, default=True,
+                            help="Normalize whitespace before comparing hits in dedup.")
 
         # Convert
-        parser.add_argument("--sort-keys", action="store_true", help="Sort JSON keys in convert mode output.")
+        parser.add_argument("--sort-keys", action=argparse.BooleanOptionalAction, default=False,
+                            help="Sort JSON keys in convert mode output.")
 
         parser.add_argument("-V", "--version", action="version", version=f"%(prog)s {_get_version()}")
 
         return parser
 
     @classmethod
+    def _given_dests(cls, argv: list[str] | None) -> set[str]:
+        """Return the argparse dests that were set explicitly on the command line."""
+        probe = cls.build()
+        for action in probe._actions:  # noqa: SLF001 - argparse exposes no public accessor
+            action.default = argparse.SUPPRESS
+        return set(vars(probe.parse_args(argv)))
+
+    @staticmethod
+    def _resolve_time_bounds(ns: argparse.Namespace, given: set[str], config: dict) -> None:
+        """
+        Resolve every time bound in place and drop time keys from ``config``.
+
+        Order: specific option on the CLI > --time-after/--time-before on the CLI >
+        specific key in the config file > time-after/time-before in the config file.
+        """
+        resolved: dict[str, object] = {}
+        for specific, group in TIME_BOUNDS:
+            if specific in given:
+                resolved[specific] = getattr(ns, specific)
+            elif group in given:
+                resolved[specific] = getattr(ns, group)
+            elif specific in config:
+                resolved[specific] = config[specific]
+            elif group in config:
+                resolved[specific] = config[group]
+            else:
+                resolved[specific] = None
+        for dest in {d for pair in TIME_BOUNDS for d in pair}:
+            config.pop(dest, None)
+        for dest, value in resolved.items():
+            setattr(ns, dest, value)
+
+    @classmethod
     def parse(cls, argv: list[str] | None = None) -> CliArgs:
-        """Parse argv into CliArgs."""
-        ns = cls.build().parse_args(argv)
+        """
+        Parse argv into CliArgs.
+
+        Precedence: command-line argument > config file (-c/--config) > built-in default.
+        A search source (-s/-f) or session option given on the command line replaces
+        the alternatives from the config file, and -b on the command line overrides
+        index-branches/scan-branches from the config file.
+        """
+        parser = cls.build()
+        ns = parser.parse_args(argv)
+        ns.terms = ()
+
+        if ns.config:
+            try:
+                config = load_config(ns.config, parser)
+            except ConfigError as e:
+                parser.error(str(e))
+            given = cls._given_dests(argv)
+
+            exclusive = (("search", "terms_file", TERMS_DEST), ("session", "session_file"))
+            for group in exclusive:
+                if given & set(group):
+                    for dest in group:
+                        config.pop(dest, None)
+
+            # -b on the command line beats branch modes from the file.
+            if "branches" in given:
+                for dest in ("index_branches", "scan_branches"):
+                    if dest not in given:
+                        config.pop(dest, None)
+
+            cls._resolve_time_bounds(ns, given, config)
+
+            for dest, value in config.items():
+                if dest not in given:
+                    setattr(ns, dest, value)
+        else:
+            cls._resolve_time_bounds(ns, {d for d, _ in TIME_BOUNDS + (("time_after", ""), ("time_before", ""))
+                                          if getattr(ns, d) is not None}, {})
+
+        for after, before, names in TIME_WINDOWS:
+            low, high = getattr(ns, after), getattr(ns, before)
+            if low is not None and high is not None and low > high:
+                parser.error(f"{names}: the start ({low.isoformat()}) is later than the end ({high.isoformat()}).")
 
         if ns.debug:
             ns.log_level = "DEBUG"
@@ -257,10 +405,12 @@ class CliParser:
             ns.scan_branches = DEFAULT_SCAN_BRANCHES
 
         return CliArgs(
+            config=ns.config,
             url=ns.url,
             token=ns.token,
             proxy=ns.proxy,
             timeout=ns.timeout,
+            workers=ns.workers,
             log_file=ns.log_file,
             log_level=ns.log_level,
             debug=ns.debug,
@@ -274,8 +424,14 @@ class CliParser:
             forks=ns.forks,
             fork_diff_bases=ns.fork_diff_bases,
             started_from=ns.started_from,
+            active_before=ns.active_before,
+            index_active_after=ns.index_active_after,
+            index_active_before=ns.index_active_before,
+            file_changed_after=ns.file_changed_after,
+            file_changed_before=ns.file_changed_before,
             search=ns.search,
             terms_file=ns.terms_file,
+            terms=tuple(ns.terms),
             session=ns.session,
             session_file=ns.session_file,
             resume=ns.resume,
@@ -283,6 +439,6 @@ class CliParser:
             output_file=ns.output_file,
             sqlite_path=ns.sqlite_path,
             hash_algo=ns.hash_algo,
-            normalize_hits=not ns.no_normalize_hits,
+            normalize_hits=ns.normalize_hits,
             sort_keys=ns.sort_keys,
         )

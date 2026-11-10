@@ -251,3 +251,39 @@ def test_started_from_keeps_inactive_upstream_for_branch_diff(fake_gitlab: FakeG
     # Still diffed against the (unscanned) upstream: feature/login-v2 equals upstream and is skipped.
     assert refs == ["alice/experiment", "develop", "main"]
     assert not fake_gitlab.api_requests("project_search", path="/projects/101/")
+
+
+# --------------------------------------------------------------------------- progress counts only planned projects
+
+
+def test_progress_counts_only_projects_that_are_scanned(fake_gitlab: FakeGitLab, indexed, monkeypatch):
+    """With filters, every 'N/M projects' shown on the terminal refers to the scan plan, not the index."""
+    import re
+    from datetime import datetime, timezone
+
+    from glh.utils import terminal_utils
+    from tests.helpers import FakeStream
+
+    glh, projects = indexed
+    tty = FakeStream(True)
+    status = terminal_utils.StatusLine(tty, columns=lambda: 400, ticker=False, refresh_interval=0)  # draw every update
+    monkeypatch.setattr(terminal_utils, "STATUS", status)
+
+    since = datetime(2024, 6, 2, tzinfo=timezone.utc)
+    _, _, session = search(glh, projects, ["password", "token"], scan_branches="all", forks_mode="skip",
+                           started_from=since)
+
+    # Forks 201-203 are skipped first, then 101/102/105 as inactive: 103 and 301 remain.
+    searched = {int(r.path.split("/")[4]) for r in fake_gitlab.api_requests("project_search")}
+    assert searched == {103, 301}
+    out = tty.getvalue()
+    assert ("Search plan: 2 terms, 2 of 9 projects, 4 branches "
+            "(skipped: 1 empty, 3 forks, 3 inactive since 2024-06-02)\n") in out
+
+    frames = [f.strip() for f in out.split("\r") if "projects |" in f]
+    counts = {m.group(2) for f in frames for m in re.finditer(r"(\d+)/(\d+) projects", f)}
+    assert counts == {"2"}, frames
+    assert any(f.startswith("Searching 'token' (2/2) | 2/2 projects") for f in frames)
+    assert any("ops/infra/terraform/modules @ main" in f for f in frames)
+    assert re.search(r"Search finished: 2 terms x 2 projects, \d+ hits? in ", out)
+    assert out.endswith("\n")  # the status line is erased, the summary stays

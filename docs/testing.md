@@ -162,6 +162,10 @@ projects:
         files:
           "config/app.yml": |
             password: FAKE-...
+          "deploy/old.env":       # a mapping sets the file's last change time
+            updated_at: "2024-01-20T10:00:00.000Z"   # default: the project's last_activity_at
+            content: |
+              DB_PASSWORD=change-me
       develop:
         inherit: main           # copy files of another branch …
         files: {extra.txt: "…"} # … then add/override

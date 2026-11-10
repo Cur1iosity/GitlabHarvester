@@ -4,13 +4,16 @@ Complete reference for the CLI. For a short introduction see the [README](../REA
 
 - [How it works](#how-it-works)
 - [Connection](#connection)
+- [Configuration file](#configuration-file)
 - [Project index](#project-index)
 - [Branches](#branches)
 - [Forks](#forks)
-- [Activity filter](#activity-filter)
+- [Time filters](#time-filters)
 - [Search terms](#search-terms)
+- [Parallel requests](#parallel-requests)
 - [Sessions and resume](#sessions-and-resume)
 - [Post-processing](#post-processing)
+- [Progress output](#progress-output)
 - [Output formats](#output-formats)
 - [Option reference](#option-reference)
 
@@ -40,6 +43,50 @@ gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -s password
 - `--log-level ERROR|WARN|INFO`, `--debug`, and `--log-file path.log` control logging.
 - Rate limiting (HTTP 429) is retried automatically according to `Retry-After`.
   Errors on a single project or branch are logged, and the run continues.
+
+## Configuration file
+
+Every option can be stored in an INI file and passed with `-c/--config`.
+[config.example.ini](../config.example.ini) lists all of them with their values and defaults:
+
+```bash
+cp config.example.ini config.ini        # config.ini is git-ignored
+gitlab-harvester -c config.ini
+gitlab-harvester -c config.ini -s token --forks skip --no-resume
+```
+
+```ini
+[connection]
+url = https://gitlab.example.com
+token = env:GITLAB_TOKEN
+
+[search]
+scan-branches = all
+forks = branch-diff
+started-from = 2024-06-01
+terms =
+    password
+    api_key
+```
+
+- Keys are the long option names (`index-branches` for `--index-branches`; `_` works too).
+  Sections only group keys, and each key may appear once.
+- Precedence: command-line argument, then the config file, then the built-in default.
+  - `-s` or `-f` on the command line replaces `search`, `terms-file` and `terms` from the file.
+  - `--session` or `--session-file` replaces the other one from the file.
+  - `-b` replaces `index-branches` and `scan-branches` from the file.
+  - On/off options have a `--no-` form (`--no-resume`, `--no-dump-projects`, `--no-debug`,
+    `--no-sort-keys`, `--no-normalize-hits`) to switch off a value set in the file.
+- `terms` lists search terms one per line, as an alternative to `terms-file`.
+- `token = env:NAME` reads the token from an environment variable, so the file holds no secret.
+- Relative paths in the file (`index-file`, `terms-file`, `session-file`, `log-file`,
+  `input-file`, `output-file`, `sqlite-path`) are resolved against the file's directory.
+  Paths given on the command line stay relative to the working directory.
+- An empty value means "not set". Comments go on their own lines: text after a value is
+  part of the value. `%` has no special meaning.
+- Values are validated like command-line arguments. An unknown key or an invalid value
+  stops the run before any API request, naming the file, the section and the key.
+- The session `meta` record stores the config path (`"config"`).
 
 ## Project index
 
@@ -100,25 +147,53 @@ gitlab-harvester -u ... -t ... -s password -b all --forks branch-diff
 - If the upstream isn't in the index (for example, it isn't visible to the
   token), the fork is scanned with the regular `--scan-branches` rules.
 
-## Activity filter
+## Time filters
+
+Three levels can be limited to a time window. `DATE` is an ISO 8601 date or datetime
+(`2024-06-01`, `2024-06-01T12:00`, `2024-06-01T12:00:00+03:00`); without an offset it
+means UTC. Every bound is optional.
+
+| Level | After | Before | How it works |
+|---|---|---|---|
+| Index build | `--index-active-after` | `--index-active-before` | GitLab API filter on `/projects` (`last_activity_after/before`): projects outside the window are not even listed, so a smaller index is built faster |
+| Projects of the index | `--active-after` (alias `--started-from`) | `--active-before` | indexed projects whose `last_activity_at` is outside the window are skipped without API calls |
+| Files with hits | `--file-changed-after` | `--file-changed-before` | a hit is kept only if a commit in that branch changed its file inside the window (commits API) |
+| **All three** | `--time-after` | `--time-before` | shortcuts that set the bound on every level |
 
 ```bash
-gitlab-harvester -u ... -t ... -f words.txt --started-from 2024-06-01
-gitlab-harvester -u ... -t ... -f words.txt --started-from 2024-06-01T12:00:00+03:00
+# One window for everything: index, projects and files
+gitlab-harvester -u ... -t ... -f words.txt --time-after 2024-06-01 --time-before 2024-06-30 --dump-projects
+
+# A full index once, then searches of different periods over it
+gitlab-harvester -u ... -t ... -m dump-index
+gitlab-harvester -u ... -t ... -f words.txt --active-after 2024-06-01
+gitlab-harvester -u ... -t ... -f words.txt --active-after 2024-06-01 --file-changed-after 2024-06-01
+
+# Inventory of projects untouched since 2023 (index only)
+gitlab-harvester -u ... -t ... -m dump-index --index-active-before 2023-01-01 --index-file stale.jsonl
 ```
 
-- Projects whose `last_activity_at` is earlier than the given date are skipped
-  without API calls. GitLab updates this field on pushes and other project
-  activity, so a skipped project normally has no repository changes since that date.
-- GitLab updates `last_activity_at` at most once per hour, and some events (for
-  example, creating a branch or tag in the web UI) may not update it. Set the
-  date with a margin, e.g. a day before the previous scan.
-- The value is an ISO 8601 date or datetime. Without an offset it means UTC. The bound is inclusive.
-- The index isn't filtered: build it once, then search it with different dates.
-- Projects without `last_activity_at` (for example, from an old index) are always scanned.
-- GitLab's blob search has no date filter. Inside an active project, every file
-  of the selected branches is still searched.
-- Secrets committed before the date in skipped projects are **not** reported.
+- A specific option overrides `--time-after/--time-before`; a command-line option
+  overrides the config file. The start must not be later than the end.
+- **Index build.** The window is stored in the index `meta` record
+  (`last_activity_after`, `last_activity_before`). An existing index is reused as is,
+  so a run that asks for another window (or none) gets a warning: the index may miss
+  projects. Rebuild it with `--dump-projects`. GitLab compares strictly (`>`/`<`).
+- **Projects of the index.** Bounds are inclusive. Projects without `last_activity_at`
+  (for example, from an old index) are always scanned. GitLab updates
+  `last_activity_at` on pushes and other project activity, at most once per hour, and
+  some events (for example, creating a branch or tag in the web UI) may not update it:
+  take the dates with a margin. Secrets in skipped projects are **not** reported.
+- **Files with hits.** GitLab's blob search has no date filter, so after a branch
+  search every file with hits is checked with
+  `GET /projects/:id/repository/commits?ref_name=BRANCH&path=FILE&since=…&until=…`
+  (one request per project, branch and file, cached across terms; `Search finished`
+  shows the number of file checks). "Changed in the window" means at least one commit
+  in that branch touched the file then; the matched line itself may be older. If a
+  check fails, the hits are kept and a warning is logged.
+- The `Search plan` line reports both directions, e.g.
+  `(skipped: 1 empty, 1 inactive since 2024-05-01, 5 active after 2024-06-02)` and
+  `files changed 2024-03-01..2024-06-04`. The session `meta` record stores the windows.
 
 ## Search terms
 
@@ -130,6 +205,39 @@ gitlab-harvester -u ... -t ... -f words.txt
 `words.txt` has one term per line. Empty lines and lines starting with `#` are
 ignored. Each term is passed to GitLab search unchanged; how it's matched
 (basic or advanced search, case sensitivity) depends on the GitLab instance.
+
+## Parallel requests
+
+```bash
+gitlab-harvester -u ... -t ... -f words.txt -b all --workers 8
+```
+
+`-w/--workers N` (1-64, default 1) runs up to N API requests at a time. Use it only
+when the instance has no API rate limits: N workers send about N times more requests
+per second, which also means N times more load and noise in the GitLab logs.
+HTTP 429 responses are still retried according to `Retry-After`, but under a rate
+limit more workers mostly produce more 429s, not more speed.
+
+How the work is split:
+
+- **Search.** Every (term, project, branch) pair is one task: all result pages of
+  one branch search. Tasks come from one shared queue, and a free worker always
+  takes the next one. A large fork with many branches or a slow repository
+  doesn't leave the other workers idle, as a fixed split of the index would.
+- **Project listing** fetches pages ahead in parallel and writes them in order.
+  If a page fails, the index keeps the pages before it (`"is_completed": false`),
+  as in a sequential run.
+- **Branch listing** (`--index-branches all|N`) lists branches of several projects
+  at once; the index keeps its order.
+
+What stays the same:
+
+- The results: the same hits, the same index, the same `keyword_done` checkpoints in
+  term order, so `--resume` works as usual. Hit records in the session file appear
+  in completion order instead of index order.
+- Only the main thread writes files and progress; every worker has its own
+  connection (python-gitlab client).
+- `--workers 1` is the sequential mode: no threads at all.
 
 ## Sessions and resume
 
@@ -174,6 +282,37 @@ and control records are kept.
 **convert** turns a JSONL file (or concatenated pretty-printed JSON objects) into a
 single JSON array. `--sort-keys` sorts object keys.
 
+## Progress output
+
+Progress goes to stderr; results and final summaries go to stdout.
+
+On a terminal, one status line is redrawn in place and fitted to the window width:
+
+```text
+Searching 'api_key' (2/2) | 3/5 projects | 21 hits | 0:05 | ETA 0:04 | acme/web-app @ master [2/3]
+```
+
+When a phase ends, the status line is replaced by a permanent summary:
+
+```text
+Indexed 9 projects from gitlab.example.com in 0.4s
+Listed 19 branches of 8 projects in 1.2s
+Search plan: 2 terms, 5 of 9 projects, 13 branches (skipped: 1 empty, 3 inactive since 2024-06-02)
+Term 1/2 'password': 20 hits in 0.2s
+Term 2/2 'api_key': 5 hits in 0.1s
+Search finished: 2 terms x 5 projects, 25 hits in 0.3s
+```
+
+- The search counts only projects that are actually scanned. Projects excluded by
+  `--started-from`, `--forks skip`, empty repositories, and projects without a branch
+  to scan are reported once in the `Search plan` line and never inflate the totals.
+- The ETA covers all terms. Branch listing (`--index-branches all|N`) counts only
+  non-empty repositories, since empty ones need no API call.
+- When stderr is not a terminal (pipe, file, CI), only the permanent lines are
+  written, plus a heartbeat line with the current status once a minute during long phases.
+- After Ctrl+C or a fatal error, the last status stays on screen to show how far the
+  phase got (`| stopped`, or `(interrupted)` in the indexing summary).
+
 ## Output formats
 
 All files are UTF-8 JSONL: one JSON object per line.
@@ -217,10 +356,16 @@ are URL-encoded.
 
 | Option | Default | Description |
 |---|---|---|
+| `-c, --config FILE` | — | read options from an INI file; CLI arguments override it |
 | `-u, --url URL` | — | GitLab base URL (`-H/--host` is a deprecated alias) |
 | `-t, --token TOKEN` | — | API token (`read_api`) |
 | `-p, --proxy URL` | — | HTTP(S) proxy |
 | `--timeout SEC` | 60 | per-request timeout |
+| `-w, --workers N` | 1 | parallel API requests (1-64); only for instances without rate limits |
+| `--time-after DATE`, `--time-before DATE` | — | window for the index, its projects and the files with hits |
+| `--index-active-after/--index-active-before DATE` | — | index only projects active in the window (API filter) |
+| `--active-after DATE` (`--started-from`), `--active-before DATE` | — | search only indexed projects active in the window |
+| `--file-changed-after/--file-changed-before DATE` | — | keep hits only in files changed in the window (commits API) |
 | `-m, --mode` | `search` | `search`, `dump-index`, `dedup`, `convert` |
 | `-s, --search TERM` | — | single term |
 | `-f, --terms-file FILE` | — | file with one term per line |
@@ -239,7 +384,7 @@ are URL-encoded.
 | `--resume` | off | continue a session, skipping completed terms |
 | `--input-file`, `--output-file` | — | files for `dedup` and `convert` |
 | `--hash-algo` | `blake2b` | dedup hash |
-| `--no-normalize-hits` | off | exact snippet comparison in dedup |
+| `--[no-]normalize-hits` | on | collapse whitespace before comparing hits in dedup (`--no-normalize-hits` = exact) |
 | `--sqlite-path FILE` | `<output>.seen.sqlite` | dedup hash store |
 | `--sort-keys` | off | sorted keys in `convert` output |
 | `--log-level`, `--debug`, `--log-file` | `WARN` | logging |

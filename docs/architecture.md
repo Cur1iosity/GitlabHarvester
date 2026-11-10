@@ -120,9 +120,10 @@ asserts this exact list):
 | # | Request | Called from | Query parameters | Response fields read |
 |---|---|---|---|---|
 | 1 | `GET /api/v4/user` | `Gitlab.auth()` in `_get_gl_client` | none | `username`, `web_url` (python-gitlab compares `web_url` with the base URL and warns on mismatch) |
-| 2 | `GET /api/v4/projects` | `fetch_projects` | `page`, `per_page`, `order_by=id`, `sort=desc` | `id`, `web_url`, `path_with_namespace`, `default_branch`, `empty_repo`, `forked_from_project.id`, `created_at`, `last_activity_at` |
+| 2 | `GET /api/v4/projects` | `fetch_projects` | `page`, `per_page`, `order_by=id`, `sort=desc`; `last_activity_after`/`last_activity_before` with `--index-active-*` | `id`, `web_url`, `path_with_namespace`, `default_branch`, `empty_repo`, `forked_from_project.id`, `created_at`, `last_activity_at` |
 | 3 | `GET /api/v4/projects/:id/repository/branches` | `get_branches` (only when index branches mode ≠ `default`) | `page`, `per_page` | `name` |
 | 4 | `GET /api/v4/projects/:id/search` | `scan_branch` | `scope=blobs`, `search`, `ref`, `page`, `per_page=100` | `path`, `startline`, `data` |
+| 5 | `GET /api/v4/projects/:id/repository/commits` | `_file_changed_in_window` (only with `--file-changed-*`) | `ref_name`, `path`, `since`, `until`, `page=1`, `per_page=1` | non-empty list = changed in the window |
 
 No other requests are made. `projects.get(id, lazy=True)` doesn't hit the API,
 and there are no implicit `/version` or `/projects/:id` calls. The test suite fails
@@ -198,6 +199,9 @@ every (or a future) GitLab version. Use the contract tests
 (`tests/contract`) against a real instance to re-validate the model.
 
 - Only the endpoints in §5 (plus `GET /version` and `GET /projects/:id`) exist.
+- Repository history is not modeled: every file has exactly one commit, at its
+  `updated_at` (default: the project's `last_activity_at`); the commits endpoint
+  supports `ref_name`, `path`, `since`, `until` and pagination only.
   Everything else returns `404` and is reported as *unmatched*.
 - No permissions model: every valid token sees every project. `visibility` is informational.
 - Search approximates **basic** search: literal, case-insensitive, per-line, path

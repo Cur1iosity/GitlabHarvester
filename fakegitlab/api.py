@@ -13,6 +13,7 @@ Endpoint                                               Notes
 ``GET /api/v4/projects/:id``                           numeric id or URL-encoded path
 ``GET /api/v4/projects/:id/repository/branches``       name-sorted, ``search`` filter
 ``GET /api/v4/projects/:id/search?scope=blobs``        case-insensitive literal search
+``GET /api/v4/projects/:id/repository/commits``        one synthetic commit per file
 =====================================================  ============================
 
 Responses follow the documented GitLab shapes and pagination headers
@@ -28,6 +29,7 @@ import math
 import posixpath
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Callable, Sequence
 from urllib.parse import quote, unquote, urlencode
 
@@ -102,6 +104,7 @@ class GitLabApi:
         ("GET", re.compile(r"^/projects/(?P<pid>[^/]+)/?$"), "project"),
         ("GET", re.compile(r"^/projects/(?P<pid>[^/]+)/repository/branches/?$"), "branches"),
         ("GET", re.compile(r"^/projects/(?P<pid>[^/]+)/search/?$"), "project_search"),
+        ("GET", re.compile(r"^/projects/(?P<pid>[^/]+)/repository/commits/?$"), "commits"),
     ]
 
     def __init__(self, scenario: Scenario) -> None:
@@ -181,6 +184,13 @@ class GitLabApi:
         if request.args.get("archived") in ("true", "false"):
             want = request.args["archived"] == "true"
             projects = [p for p in projects if p.archived == want]
+        # GitLab: last_activity_at > last_activity_after, last_activity_at < last_activity_before.
+        after = _time_arg(request, "last_activity_after")
+        before = _time_arg(request, "last_activity_before")
+        if after is not None:
+            projects = [p for p in projects if _ts(p.last_activity_at) > after]
+        if before is not None:
+            projects = [p for p in projects if _ts(p.last_activity_at) < before]
 
         projects.sort(key=_PROJECT_ORDER_FIELDS[order_by], reverse=(sort == "desc"))
         return self._paginate(request, base_url, projects, lambda p: self.serialize_project(p, base_url))
@@ -218,6 +228,54 @@ class GitLabApi:
         files = project.branches.get(ref) if ref else None
         results = self.search_blobs(project, ref, files or {}, search) if files is not None else []
         return self._paginate(request, base_url, results, lambda x: x)
+
+    def _ep_commits(self, request: Request, base_url: str, user: User, pid: str) -> Response:
+        """
+        Commits of a branch, newest first, filtered by path/since/until.
+
+        The fake has no history: every file has exactly one commit, at its
+        ``updated_at`` (default: the project's last_activity_at).
+        """
+        project = self._get_project(pid)
+        ref = request.args.get("ref_name") or project.default_branch
+        files = project.branches.get(ref) if ref else None
+        if files is None:
+            if project.empty_repo:
+                return self._paginate(request, base_url, [], lambda x: x)
+            raise ApiError(404, "404 Commit Not Found")
+
+        path = request.args.get("path")
+        paths = [path] if path is not None and path in files else ([] if path is not None else sorted(files))
+        since = _time_arg(request, "since")
+        until = _time_arg(request, "until")
+        commits = []
+        for file_path in paths:
+            when = project.file_updated_at(ref, file_path)
+            moment = _ts(when)
+            if (since is not None and moment < since) or (until is not None and moment > until):
+                continue
+            commits.append(self.serialize_commit(project, ref, file_path, when, base_url))
+        commits.sort(key=lambda c: c["committed_date"], reverse=True)
+        return self._paginate(request, base_url, commits, lambda x: x)
+
+    def serialize_commit(self, p: Project, ref: str, path: str, when: str, base_url: str) -> dict[str, Any]:
+        """Serialize the synthetic commit that last changed ``path``."""
+        sha = hashlib.sha1(f"{p.id}:{ref}:{path}:{when}".encode()).hexdigest()
+        return {
+            "id": sha,
+            "short_id": sha[:8],
+            "created_at": when,
+            "parent_ids": [],
+            "title": f"Update {path}",
+            "message": f"Update {path}",
+            "author_name": "Fixture Author",
+            "author_email": "fixture@example.invalid",
+            "authored_date": when,
+            "committer_name": "Fixture Author",
+            "committer_email": "fixture@example.invalid",
+            "committed_date": when,
+            "web_url": f"{base_url.rstrip('/')}/{p.path_with_namespace}/-/commit/{sha}",
+        }
 
     # ------------------------------------------------------------------ helpers
 
@@ -476,6 +534,26 @@ class GitLabApi:
                     }
                 )
         return results
+
+
+def _ts(value: str) -> datetime:
+    """Parse a scenario/API timestamp (ISO 8601, 'Z' allowed) as an aware datetime."""
+    text = value.strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    dt = datetime.fromisoformat(text)
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _time_arg(request: Request, name: str) -> datetime | None:
+    """Parse an ISO 8601 query parameter like GitLab does (400 if malformed)."""
+    raw = request.args.get(name)
+    if raw is None or raw == "":
+        return None
+    try:
+        return _ts(raw)
+    except ValueError:
+        raise ApiError(400, f"{name} is invalid", key="error") from None
 
 
 def _int_arg(request: Request, name: str, default: int) -> int:
