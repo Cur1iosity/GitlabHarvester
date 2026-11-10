@@ -101,6 +101,7 @@ def _mk_harvester(args: CliArgs) -> GitlabHarvester:
         "url": url,
         "token": token,
         "timeout": args.timeout,
+        "workers": args.workers,
         "log_level": args.log_level,
         "log_file": args.log_file,
     }
@@ -186,6 +187,7 @@ def _run_search(args: CliArgs) -> None:
                     "config": args.config,
                     "index_file": str(index_file),
                     "batch_size": args.batch_size,
+                    "workers": args.workers,
                     "branches_per_page": args.branches_per_page,
                     "index_branches": args.index_branches,
                     "scan_branches": args.scan_branches,

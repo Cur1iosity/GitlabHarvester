@@ -34,15 +34,17 @@ gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -f words.txt -
 # Continue after an interruption (reuses the index)
 gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -f words.txt -b all --forks branch-diff --session audit --resume
 
-# Keep the connection and the search strategy in a config file; CLI arguments override it
-cp config.example.ini config.ini   # fill in url, token, terms, ...
-gitlab-harvester -c config.ini
-gitlab-harvester -c config.ini -s token --forks skip
+# Optional: options can also come from a config file (see config.example.ini); CLI arguments override it
+gitlab-harvester -c config.ini -s token
 
 # Remove duplicate hits and export as a JSON array
 gitlab-harvester -m dedup   --input-file audit.jsonl --output-file clean.jsonl
 gitlab-harvester -m convert --input-file clean.jsonl --output-file clean.json
 ```
+
+More scenarios, and when to use which options (index-only export, fork strategies,
+fresh findings only, parallel requests, baseline and re-scans):
+**[docs/USE_CASES.md](docs/USE_CASES.md)**.
 
 The first run builds a project index (`<host>_project_index.jsonl`), and later runs reuse it.
 Branch options take effect when the index is built; add `--dump-projects` after changing them.
@@ -55,11 +57,13 @@ Common options:
 | `-b, --branches default\|all\|N` | branches to index and search |
 | `--forks include\|skip\|branch-diff\|all-branches` | how forks are handled |
 | `--started-from 2024-06-01` | search only projects with activity since the date |
+| `-w, --workers N` | parallel API requests, for instances without rate limits |
 | `-m dump-index`, `--dump-projects` | build or rebuild the project index |
 | `--session NAME`, `--resume` | name a session and continue it later |
 | `-c, --config FILE` | read options from an INI file ([config.example.ini](config.example.ini)) |
 
-See [docs/usage.md](docs/usage.md) for every option, branch and fork strategies, and the output formats.
+See [docs/usage.md](docs/usage.md) for every option, branch and fork strategies, and the output formats,
+and [docs/USE_CASES.md](docs/USE_CASES.md) for typical scenarios.
 
 ## Development
 

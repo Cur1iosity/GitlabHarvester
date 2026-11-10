@@ -69,6 +69,17 @@ def parse_branches(value: str) -> BranchesMode:
     raise argparse.ArgumentTypeError("Use 'default', 'all', or a positive integer (e.g., 10).")
 
 
+MAX_WORKERS = 64
+
+
+def parse_workers(value: str) -> int:
+    """Parse --workers: an integer from 1 to MAX_WORKERS."""
+    v = value.strip()
+    if v.isdigit() and 1 <= int(v) <= MAX_WORKERS:
+        return int(v)
+    raise argparse.ArgumentTypeError(f"Use an integer from 1 to {MAX_WORKERS}.")
+
+
 def parse_started_from(value: str) -> datetime:
     """Parse --started-from into a timezone-aware datetime.
 
@@ -97,6 +108,7 @@ class CliArgs:
     token: str | None
     proxy: str | None
     timeout: int
+    workers: int
 
     log_file: str | None
     log_level: str
@@ -163,6 +175,14 @@ class CliParser:
         parser.add_argument("-t", "--token", default=None, help="GitLab token (required for search/dump-index).",)
         parser.add_argument("-p", "--proxy", default=None, help="HTTP(S) proxy URL for GitLab API traffic.",)
         parser.add_argument("--timeout", default=60, type=int, help="Timeout in seconds for GitLab API request.",)
+        parser.add_argument(
+            "-w", "--workers",
+            type=parse_workers,
+            default=1,
+            metavar="N",
+            help=f"Parallel API requests (1-{MAX_WORKERS}, default 1 = sequential). Speeds up project listing, "
+                 "branch listing and search; use more than 1 only if the instance has no API rate limits.",
+        )
 
         # Logging
         parser.add_argument("--log-file", default=None, help="Write logs to a file (in addition to stderr).")
@@ -318,6 +338,7 @@ class CliParser:
             token=ns.token,
             proxy=ns.proxy,
             timeout=ns.timeout,
+            workers=ns.workers,
             log_file=ns.log_file,
             log_level=ns.log_level,
             debug=ns.debug,

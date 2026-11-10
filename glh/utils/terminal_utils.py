@@ -308,6 +308,9 @@ class Progress:
         self.done = 0
         self.info = ""
         self.detail = ""
+        # Work done across all rounds when rounds overlap (parallel search);
+        # None = derive it from round/done.
+        self.completed_units: int | None = None
         self._status = status if status is not None else STATUS
         self._clock = clock
         self._started: float | None = None
@@ -383,7 +386,9 @@ class Progress:
         if not self.total or self.elapsed < 1.0:  # sub-second rates are noise
             return None
         units_total = self.total * self.rounds
-        units_done = self.total * (self.round - 1) + self.done
+        units_done = self.completed_units
+        if units_done is None:
+            units_done = self.total * (self.round - 1) + self.done
         if units_done <= 0 or units_done >= units_total:
             return None
         return self.elapsed / units_done * (units_total - units_done)

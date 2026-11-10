@@ -1,10 +1,13 @@
 # glh/harvester.py
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import os
+import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, IO, Any
 from urllib.parse import quote, urlparse
@@ -18,6 +21,7 @@ from requests import Session
 
 from glh.exceptions import GitlabHarvesterError
 from glh.planner import ScanOptions, ScanPlan, branches_to_scan, build_scan_plan
+from glh import workers as pool
 from glh.utils import logging_utils, terminal_utils
 from glh.utils.terminal_utils import human_int
 
@@ -53,6 +57,22 @@ def client_required(func: Callable) -> Callable:
     return wrapper
 
 
+@dataclass(frozen=True, slots=True)
+class _BranchTask:
+    """One unit of search work: a term in one branch of one planned project."""
+
+    term_no: int
+    term: str
+    project_no: int
+    project: dict[str, Any]
+    branches: tuple[str, ...]
+    branch_no: int
+
+    @property
+    def branch(self) -> str:
+        return self.branches[self.branch_no]
+
+
 class GitlabHarvester:
     """High-level GitLab indexing and search engine.
 
@@ -73,8 +93,14 @@ class GitlabHarvester:
             log_level: int | str = logging.WARNING,
             log_file: str | None = None,
             host: str | None = None,  # backward-compat alias for `url`
+            workers: int = 1,
     ) -> None:
         self.search_terms: list = search_terms or []
+        # Parallel API requests (1 = sequential). See glh/workers.py.
+        self.workers: int = max(1, int(workers))
+        self._local = threading.local()
+        self._gl_main: Gitlab | None = None
+        self._client_kwargs: dict[str, Any] | None = None
 
         self.log_level: int = logging_utils.coerce_log_level(log_level)
         self.log_file: str | None = log_file
@@ -86,6 +112,38 @@ class GitlabHarvester:
 
         url = url or host
         self._gl: Gitlab | None = self._get_gl_client(url=url, token=token, proxy=proxy, timeout=timeout) if url and token else None
+
+    @property
+    def _gl(self) -> Gitlab | None:
+        """GitLab client of the current thread (worker threads get their own one)."""
+        return getattr(self._local, "gl", None) or self._gl_main
+
+    @_gl.setter
+    def _gl(self, value: Gitlab | None) -> None:
+        self._gl_main = value
+
+    def _init_worker_client(self) -> None:
+        """
+        Give the calling worker thread its own python-gitlab client.
+
+        requests.Session is not thread-safe, and one shared connection pool
+        would be too small for many workers. The token was already verified
+        by the main client, so no extra /user request is made.
+        """
+        if self._client_kwargs is None:
+            return  # client not built by _get_gl_client (e.g. a test stub): share it
+        kwargs = dict(self._client_kwargs)
+        main_session = kwargs.pop("session", None)
+        if main_session is not None:
+            session = Session()
+            session.proxies.update(main_session.proxies)
+            kwargs["session"] = session
+        self._local.gl = Gitlab(**kwargs)
+
+    def _imap_ordered(self, fn: Callable[[Any], Any], items: Any, *, parallel: bool = True):
+        """imap_ordered() with this harvester's worker count and per-thread clients."""
+        return pool.imap_ordered(fn, items, workers=self.workers if parallel else 1,
+                                 initializer=self._init_worker_client)
 
     @staticmethod
     def _emit_record(fp: IO, record: dict[str, Any], indent: int | None = None) -> None:
@@ -246,6 +304,7 @@ class GitlabHarvester:
         try:
             gl.auth()
             self.logger.debug("Authenticated to GitLab: %s", url)
+            self._client_kwargs = dict(kwargs)
             return gl
         except requests.exceptions.SSLError:
             if not allow_ssl_fallback or kwargs.get("ssl_verify") is False:
@@ -260,6 +319,7 @@ class GitlabHarvester:
             gl = Gitlab(**kwargs)
             gl.auth()
             self.logger.debug("Authenticated to GitLab (ssl_verify=False): %s", url)
+            self._client_kwargs = dict(kwargs)
             return gl
 
     @client_required
@@ -296,7 +356,6 @@ class GitlabHarvester:
 
         projects: list[dict[str, Any]] = []
         pr_counter = 0
-        page: int = 1
         is_completed: bool = True
         outcome = ""
 
@@ -307,8 +366,17 @@ class GitlabHarvester:
         host = self.get_host()
         progress = terminal_utils.Progress(f"Indexing {self._display_host()}", unit="projects").start()
 
+        def fetch_page(number: int) -> list[Project]:
+            return self._gl.projects.list(page=number, per_page=per_page, order_by=order_by, sort=sort)
+
         try:
-            while batch := self._gl.projects.list(page=page, per_page=per_page, order_by=order_by, sort=sort):
+            # Pages are fetched up to 2 x workers ahead but processed in order; the
+            # first empty page ends the listing (the extra pages are discarded).
+            for done in self._imap_ordered(fetch_page, itertools.count(1)):
+                batch = done.unwrap()
+                if not batch:
+                    break
+                page = done.item
                 if fp is not None:
                     for x in batch:
                         self._emit_record(fp=fp, record=reduce_project_fields(x))
@@ -318,7 +386,6 @@ class GitlabHarvester:
                 batch_size = len(batch)
                 pr_counter += batch_size
                 progress.advance(batch_size, detail=f"page {page}")
-                page += 1
 
         except gitlab.exceptions.GitlabError as e:
             # The listing stopped early: keep what was fetched, but never
@@ -508,33 +575,34 @@ class GitlabHarvester:
             meta["timestamp_utc"] = datetime.now(UTC).isoformat()
             self._write_jsonl_line(out_fp, meta)
 
+            def index_records():
+                for raw in in_fp:
+                    raw = raw.strip()
+                    if raw:
+                        yield json.loads(raw)
+
+            limit = None if branches in ("default", "all") else int(branches)
+
+            def branches_of(project: dict[str, Any]) -> list[str]:
+                if project.get("empty_repo", False):
+                    return []
+                if not uses_api:
+                    default_branch = project.get("default_branch")
+                    return [default_branch] if default_branch else []
+                if self.workers <= 1:
+                    progress.set_detail(str(project.get("path_with_namespace", project["id"])))
+                return self.get_branches(project_id=int(project["id"]), per_page=branches_per_page, limit=limit)
+
             if uses_api:
                 progress.start()
             try:
-                for line in in_fp:
-                    line = line.strip()
-                    if not line:
-                        continue
-
-                    project = json.loads(line)
-
-                    if project.get("empty_repo", False):
-                        project["branches"] = []
-                    else:
-                        default_branch = project.get("default_branch")
-
-                        if branches == "default":
-                            project["branches"] = [default_branch] if default_branch else []
-                        else:
-                            progress.set_detail(str(project.get("path_with_namespace", project["id"])))
-                            limit = None if branches == "all" else int(branches)
-                            project["branches"] = self.get_branches(
-                                project_id=int(project["id"]),
-                                per_page=branches_per_page,
-                                limit=limit,
-                            )
-                            listed_branches += len(project["branches"])
-                            progress.advance()
+                # Branch lists are fetched in parallel; the index keeps its order.
+                for done in self._imap_ordered(branches_of, index_records(), parallel=uses_api):
+                    project = done.item
+                    project["branches"] = done.unwrap()
+                    if uses_api and not project.get("empty_repo", False):
+                        listed_branches += len(project["branches"])
+                        progress.advance(detail=str(project.get("path_with_namespace", project["id"])))
 
                     self._emit_record(out_fp, record=project)
             except BaseException:
@@ -632,14 +700,17 @@ class GitlabHarvester:
         """
         to_list = sum(1 for p in projects if not p.get("empty_repo", False))
 
+        def branches_of(project: dict[str, Any]) -> list[str]:
+            if project.get("empty_repo", False):
+                return []
+            return self.get_branches(project_id=project["id"], per_page=per_page)
+
         with terminal_utils.Progress("Listing branches", total=to_list, unit="projects") as progress:
-            for project in projects:
-                if project.get("empty_repo", False):
-                    project["branches"] = []
-                    continue
-                progress.set_detail(str(project.get("path_with_namespace") or project.get("web_url", "")))
-                project["branches"] = self.get_branches(project_id=project["id"], per_page=per_page)
-                progress.advance()
+            for done in self._imap_ordered(branches_of, projects):
+                project = done.item
+                project["branches"] = done.unwrap()
+                if not project.get("empty_repo", False):
+                    progress.advance(detail=str(project.get("path_with_namespace") or project.get("web_url", "")))
 
             elapsed = progress.finish(
                 f"Listed branches of {terminal_utils.plural(progress.done, 'project')} in "
@@ -779,7 +850,8 @@ class GitlabHarvester:
         The scan plan (which projects and branches pass the filters) is built
         once and printed. Progress counts only planned projects, so projects
         excluded by --forks skip, --started-from or empty repositories never
-        inflate the totals.
+        inflate the totals. With workers > 1 the (term, project, branch)
+        searches run in parallel, see _run_search().
 
         Args:
             projects: The whole project index.
@@ -791,54 +863,21 @@ class GitlabHarvester:
         Returns:
             ([{"term", "result"}, ...], total hit counter).
         """
-        res: list[dict[str, Any]] = []
         plan = build_scan_plan(projects, options)
         n_terms = len(keywords)
         terms_text = terminal_utils.plural(n_terms, "term")
         hits_before = hit_counter
+        parallel = f", {self.workers} workers" if self.workers > 1 else ""
 
-        terminal_utils.STATUS.write_line(f"Search plan: {terms_text}, {plan.describe()}")
+        terminal_utils.STATUS.write_line(f"Search plan: {terms_text}, {plan.describe()}{parallel}")
 
         with terminal_utils.Progress(
                 "Searching", total=plan.project_count, unit="projects", rounds=n_terms,
         ) as progress:
-            for number, term in enumerate(keywords, 1):
-                label = f"Searching '{term}'" + (f" ({number}/{n_terms})" if n_terms > 1 else "")
-                progress.start_round(number, label)
-                term_started = progress.elapsed
-                term_hits_before = hit_counter
-
-                s_res, hit_counter = self.search_keyword(
-                    projects=projects,
-                    term=term,
-                    options=options,
-                    hit_counter=hit_counter,
-                    session_file=session_file,
-                    plan=plan,
-                    progress=progress,
-                )
-                res.append({"term": term, "result": s_res})
-
-                if session_file is not None:
-                    self._emit_record(
-                        session_file,
-                        record={
-                            "type": "keyword_done",
-                            "term": term,
-                            "hit_counter": hit_counter,
-                            "timestamp_utc": datetime.now(UTC).isoformat(),
-                        },
-                    )
-                    # Resume checkpoint: make it durable even if the process is killed.
-                    session_file.flush()
-
-                if n_terms > 1:
-                    progress.note(
-                        f"Term {number}/{n_terms} '{term}': "
-                        f"{terminal_utils.plural(hit_counter - term_hits_before, 'hit')} in "
-                        f"{terminal_utils.format_duration(progress.elapsed - term_started)}"
-                    )
-
+            res, hit_counter = self._run_search(
+                keywords, plan, hit_counter=hit_counter, session_file=session_file,
+                progress=progress, checkpoints=True,
+            )
             progress.finish(
                 f"Search finished: {terms_text} x {terminal_utils.plural(plan.project_count, 'project')}, "
                 f"{terminal_utils.plural(hit_counter - hits_before, 'hit')} in "
@@ -866,52 +905,159 @@ class GitlabHarvester:
             term: Search term.
             options: Scan options.
             hit_counter: Initial hit counter.
-            session_file: Open session JSONL to stream hits to.
+            session_file: Open session JSONL to stream hits to (no checkpoint record).
             plan: Precomputed scan plan (see build_scan_plan()).
-            progress: Progress of the enclosing run; a standalone one is shown if None.
+            progress: Progress to update; a standalone one is shown if None.
 
         Returns:
             (per-project results, updated hit counter).
         """
         plan = plan or build_scan_plan(projects, options)
-        own_progress = progress is None
-        if progress is None:
-            progress = terminal_utils.Progress(f"Searching '{term}'", total=plan.project_count).start()
-
-        res: list[dict[str, Any]] = []
+        own = progress is None
+        progress = progress or terminal_utils.Progress(f"Searching '{term}'", total=plan.project_count).start()
         try:
-            for pr, branches in plan.targets:
-                progress.set_info(f"{human_int(hit_counter)} hits")
-
-                s_res, hit_counter = self.scan_project(
-                    project=pr,
-                    term=term,
-                    options=options,
-                    projects_by_id=plan.projects_by_id,
-                    branches=branches,
-                    progress=progress,
-                    hit_counter=hit_counter,
-                )
-
-                if s_res:
-                    out = {
-                        "project_id": pr["id"],
-                        "web_url": pr["web_url"],
-                        "created_at": pr.get("created_at"),
-                        "last_activity_at": pr.get("last_activity_at"),
-                        "project_search_result": s_res,
-                    }
-                    res.append(out)
-
-                    if session_file:
-                        self._emit_record(session_file, record={"term": term, "result": out})
-
-                progress.advance()
-            progress.set_info(f"{human_int(hit_counter)} hits")
+            res, hit_counter = self._run_search([term], plan, hit_counter=hit_counter, session_file=session_file,
+                                                progress=progress, checkpoints=False)
         finally:
-            if own_progress:
+            if own:
                 progress.finish()
+        return res[0]["result"], hit_counter
 
+    def _search_branch(self, task: _BranchTask) -> list[dict[str, Any]]:
+        """Worker: search one term in one branch of one project (all result pages)."""
+        project_url = task.project["web_url"]
+        project_obj: Project = self._gl.projects.get(task.project["id"], lazy=True)
+        try:
+            hits, _ = self.scan_branch(project=project_obj, branch=task.branch, term=task.term,
+                                       project_url=project_url)
+        except (gitlab.exceptions.GitlabError, requests.exceptions.RequestException) as e:
+            self.logger.warning("%s | %s Branch: %s", e, project_url, task.branch)
+            hits = []
+        return hits
+
+    def _run_search(
+            self,
+            terms: list[str],
+            plan: ScanPlan,
+            *,
+            hit_counter: int,
+            session_file: IO | None,
+            progress: terminal_utils.Progress,
+            checkpoints: bool,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """
+        Search ``terms`` over ``plan`` with ``self.workers`` threads.
+
+        Work is split into (term, project, branch) tasks taken from one shared
+        queue by whichever worker is free, so a few huge repositories don't
+        leave other workers idle. Workers only do HTTP; this (main) thread
+        merges branch results into one record per (term, project), writes the
+        session file and updates progress:
+
+        - a project record is written when all its branches are done
+          (with workers > 1, records appear in completion order);
+        - ``keyword_done`` is written when every task of the term and of all
+          earlier terms is done, so checkpoints keep the term order and
+          ``--resume`` stays correct; terms still overlap (no idle barrier).
+
+        With workers == 1 the tasks run inline, in order, exactly as a
+        sequential scan.
+        """
+        n_terms = len(terms)
+        hits_before = hit_counter
+        term_hits = [0] * n_terms
+        projects_left = [plan.project_count] * n_terms
+        results: list[list[tuple[int, dict[str, Any]]]] = [[] for _ in terms]
+        partial: dict[tuple[int, int], dict[int, list[dict[str, Any]]]] = {}
+        state = {"next_term": 0, "term_started": progress.elapsed}
+
+        def label(number: int) -> str:
+            term = terms[number]
+            return f"Searching '{term}'" + (f" ({number + 1}/{n_terms})" if n_terms > 1 else "")
+
+        def close_finished_terms() -> None:
+            while state["next_term"] < n_terms and projects_left[state["next_term"]] == 0:
+                number = state["next_term"]
+                if checkpoints and session_file is not None:
+                    self._emit_record(
+                        session_file,
+                        record={
+                            "type": "keyword_done",
+                            "term": terms[number],
+                            "hit_counter": hits_before + sum(term_hits[:number + 1]),
+                            "timestamp_utc": datetime.now(UTC).isoformat(),
+                        },
+                    )
+                    # Resume checkpoint: make it durable even if the process is killed.
+                    session_file.flush()
+                if checkpoints and n_terms > 1:
+                    progress.note(
+                        f"Term {number + 1}/{n_terms} '{terms[number]}': "
+                        f"{terminal_utils.plural(term_hits[number], 'hit')} in "
+                        f"{terminal_utils.format_duration(progress.elapsed - state['term_started'])}"
+                    )
+                state["term_started"] = progress.elapsed
+                state["next_term"] += 1
+                if state["next_term"] < n_terms:
+                    progress.start_round(state["next_term"] + 1, label(state["next_term"]))
+                    progress.done = plan.project_count - projects_left[state["next_term"]]
+
+        def tasks():
+            for term_no, term in enumerate(terms):
+                for project_no, (project, branches) in enumerate(plan.targets):
+                    for branch_no, branch in enumerate(branches):
+                        if self.workers <= 1:
+                            info = branch if len(branches) == 1 else f"{branch} [{branch_no + 1}/{len(branches)}]"
+                            progress.set_detail(f"{project.get('path_with_namespace', project['web_url'])} @ {info}")
+                        yield _BranchTask(term_no, term, project_no, project, branches, branch_no)
+
+        if n_terms:
+            progress.start_round(1, label(0))
+        progress.set_info(f"{human_int(hit_counter)} hits")
+        close_finished_terms()  # terms without planned projects
+
+        tasks_iter = pool.imap_unordered(self._search_branch, tasks(), workers=self.workers,
+                                         initializer=self._init_worker_client)
+        for done in tasks_iter:
+            task: _BranchTask = done.item
+            hits = done.unwrap()
+            key = (task.term_no, task.project_no)
+            got = partial.setdefault(key, {})
+            got[task.branch_no] = hits
+            if len(got) < len(task.branches):
+                continue
+
+            # All branches of this (term, project) are done: one session record.
+            del partial[key]
+            project = task.project
+            s_res = [{"branch": b, "branch_search_result": got[i]} for i, b in enumerate(task.branches) if got[i]]
+            found = sum(len(h) for h in got.values())
+            hit_counter += found
+            term_hits[task.term_no] += found
+            if s_res:
+                out = {
+                    "project_id": project["id"],
+                    "web_url": project["web_url"],
+                    "created_at": project.get("created_at"),
+                    "last_activity_at": project.get("last_activity_at"),
+                    "project_search_result": s_res,
+                }
+                results[task.term_no].append((task.project_no, out))
+                if session_file:
+                    self._emit_record(session_file, record={"term": task.term, "result": out})
+
+            projects_left[task.term_no] -= 1
+            if task.term_no == state["next_term"]:
+                progress.done = plan.project_count - projects_left[task.term_no]
+            progress.completed_units = sum(plan.project_count - left for left in projects_left)
+            progress.set_info(f"{human_int(hit_counter)} hits")
+            if self.workers > 1:
+                progress.set_detail(f"{project.get('path_with_namespace', project['web_url'])}")
+            progress.advance(0)
+            close_finished_terms()
+
+        res = [{"term": term, "result": [out for _, out in sorted(results[i], key=lambda x: x[0])]}
+               for i, term in enumerate(terms)]
         return res, hit_counter
 
     def scan_project(

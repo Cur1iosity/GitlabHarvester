@@ -307,3 +307,32 @@ def test_invalid_config_value_fails_before_any_request(fake_gitlab: FakeGitLab, 
     assert proc.returncode == 2
     assert "forks" in proc.stderr and "choose from" in proc.stderr
     assert fake_gitlab.requests == []
+
+
+# --------------------------------------------------------------------------- --workers
+
+
+def test_parallel_cli_run_matches_sequential_run(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
+    terms = tmp_path / "terms.txt"
+    terms.write_text("password\napi_key\ntoken\n", encoding="utf-8")
+    common = [*gl_args(fake_gitlab), "-f", str(terms), "-b", "all", "--forks", "branch-diff", "-bs", "3"]
+
+    run_cli(*common, "--index-file", "seq_idx.jsonl", "--session-file", "seq.jsonl", "-w", "1", check=True)
+    proc = run_cli(*common, "--index-file", "par_idx.jsonl", "--session-file", "par.jsonl", "-w", "4", check=True)
+
+    def urls(name: str) -> list[tuple[str, str]]:
+        return sorted((h["term"], h["url"]) for h in Session.load(tmp_path / name).hits())
+
+    assert urls("par.jsonl") == urls("seq.jsonl") and urls("par.jsonl")
+    assert load_index(tmp_path / "par_idx.jsonl")[1] == load_index(tmp_path / "seq_idx.jsonl")[1]
+    par = Session.load(tmp_path / "par.jsonl")
+    assert [r["term"] for r in par.of_type("keyword_done")] == ["password", "api_key", "token"]
+    assert par.records[0]["workers"] == 4
+    assert ", 4 workers" in proc.stderr
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "65", "many"])
+def test_invalid_workers_value(run_cli, value):
+    proc = run_cli("-u", "http://127.0.0.1:9", "-t", "x", "-s", "password", "-w", value)
+    assert proc.returncode == 2
+    assert "integer from 1 to 64" in proc.stderr

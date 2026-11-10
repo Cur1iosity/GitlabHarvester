@@ -10,6 +10,7 @@ Complete reference for the CLI. For a short introduction see the [README](../REA
 - [Forks](#forks)
 - [Activity filter](#activity-filter)
 - [Search terms](#search-terms)
+- [Parallel requests](#parallel-requests)
 - [Sessions and resume](#sessions-and-resume)
 - [Post-processing](#post-processing)
 - [Progress output](#progress-output)
@@ -177,6 +178,39 @@ gitlab-harvester -u ... -t ... -f words.txt
 ignored. Each term is passed to GitLab search unchanged; how it's matched
 (basic or advanced search, case sensitivity) depends on the GitLab instance.
 
+## Parallel requests
+
+```bash
+gitlab-harvester -u ... -t ... -f words.txt -b all --workers 8
+```
+
+`-w/--workers N` (1-64, default 1) runs up to N API requests at a time. Use it only
+when the instance has no API rate limits: N workers send about N times more requests
+per second, which also means N times more load and noise in the GitLab logs.
+HTTP 429 responses are still retried according to `Retry-After`, but under a rate
+limit more workers mostly produce more 429s, not more speed.
+
+How the work is split:
+
+- **Search.** Every (term, project, branch) pair is one task: all result pages of
+  one branch search. Tasks come from one shared queue, and a free worker always
+  takes the next one. A large fork with many branches or a slow repository
+  doesn't leave the other workers idle, as a fixed split of the index would.
+- **Project listing** fetches pages ahead in parallel and writes them in order.
+  If a page fails, the index keeps the pages before it (`"is_completed": false`),
+  as in a sequential run.
+- **Branch listing** (`--index-branches all|N`) lists branches of several projects
+  at once; the index keeps its order.
+
+What stays the same:
+
+- The results: the same hits, the same index, the same `keyword_done` checkpoints in
+  term order, so `--resume` works as usual. Hit records in the session file appear
+  in completion order instead of index order.
+- Only the main thread writes files and progress; every worker has its own
+  connection (python-gitlab client).
+- `--workers 1` is the sequential mode: no threads at all.
+
 ## Sessions and resume
 
 | Option | Session file |
@@ -299,6 +333,7 @@ are URL-encoded.
 | `-t, --token TOKEN` | — | API token (`read_api`) |
 | `-p, --proxy URL` | — | HTTP(S) proxy |
 | `--timeout SEC` | 60 | per-request timeout |
+| `-w, --workers N` | 1 | parallel API requests (1-64); only for instances without rate limits |
 | `-m, --mode` | `search` | `search`, `dump-index`, `dedup`, `convert` |
 | `-s, --search TERM` | — | single term |
 | `-f, --terms-file FILE` | — | file with one term per line |
