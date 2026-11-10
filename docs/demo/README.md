@@ -1,14 +1,19 @@
 # README demo GIF
 
-`docs/assets/demo.gif` is recorded with [VHS](https://github.com/charmbracelet/vhs):
-the real CLI runs against the bundled Fake GitLab (artificial data only) served as
-`http://gitlab.example.com` inside a container. Nothing is sent to a real GitLab.
+`docs/assets/demo.gif` is recorded with [VHS](https://github.com/charmbracelet/vhs) in a
+container: `pipx install gitlab-harvester`, then the real CLI against the bundled Fake GitLab
+(artificial data only) served as `http://gitlab.example.com`. Nothing is sent to a real GitLab.
+
+`pipx install` runs for real, but offline: the image builds wheels of this checkout and its
+dependencies, and pip is pointed at them (`PIP_NO_INDEX`, `PIP_FIND_LINKS`). So the GIF shows
+the version being released, not whatever is on PyPI at recording time.
 
 | File | Purpose |
 |---|---|
-| `demo.tape` | what is typed and how long each step is shown (size, font, theme) |
+| `demo.tape` | what is typed; waits for the output (`Wait /done!/`, `Wait /Done\. Keywords/`) instead of fixed pauses |
 | `demo.yaml` | Fake GitLab scenario: the default dataset plus small response delays, so the progress line is visible |
-| `Dockerfile` | VHS image with GitlabHarvester and the Fake GitLab installed |
+| `Dockerfile` | VHS image with pipx, a local wheel directory for GitlabHarvester, and the Fake GitLab |
+| `needs-rebuild.sh` | CI: decides whether a push needs a new GIF |
 
 Re-record it after changing the console output (from the repository root):
 
@@ -18,7 +23,7 @@ docker run --rm -v "$PWD/docs:/vhs" gitlab-harvester/demo demo/demo.tape
 # Windows PowerShell: -v "${PWD}/docs:/vhs"; Git Bash: prefix with MSYS_NO_PATHCONV=1
 ```
 
-The GIF is written to `docs/assets/demo.gif`. Aim for 10-15 seconds: tune the
+The GIF is written to `docs/assets/demo.gif`. Aim for about 15 seconds: tune the
 delays in `demo.yaml` and the final `Sleep` in `demo.tape`.
 
 ## In CI
