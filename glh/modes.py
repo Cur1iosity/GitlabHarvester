@@ -22,7 +22,7 @@ from urllib.parse import urlparse
 
 from glh import GitlabHarvester
 from glh.cli import CliArgs
-from glh.planner import ScanOptions, is_active_since
+from glh.planner import ScanOptions
 from glh.postprocess.convert import convert_jsonl_to_json
 from glh.postprocess.dedup import dedup_session_file
 from glh.session import load_done_keywords
@@ -151,13 +151,6 @@ def _run_search(args: CliArgs) -> None:
         fork_diff_bases=tuple(x.strip() for x in args.fork_diff_bases.split(",") if x.strip()),
         started_from=args.started_from,
     )
-
-    if args.started_from is not None:
-        active = sum(1 for p in projects if is_active_since(p, args.started_from))
-        print(
-            f"Activity filter: {active} of {len(projects)} projects active since "
-            f"{args.started_from.isoformat()} (others are skipped)."
-        )
 
     session_path = _resolve_session_path(glh.get_instance_id(), args.session, args.session_file)
     session_path.parent.mkdir(parents=True, exist_ok=True)

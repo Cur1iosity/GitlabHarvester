@@ -11,6 +11,7 @@ Complete reference for the CLI. For a short introduction see the [README](../REA
 - [Search terms](#search-terms)
 - [Sessions and resume](#sessions-and-resume)
 - [Post-processing](#post-processing)
+- [Progress output](#progress-output)
 - [Output formats](#output-formats)
 - [Option reference](#option-reference)
 
@@ -173,6 +174,37 @@ and control records are kept.
 
 **convert** turns a JSONL file (or concatenated pretty-printed JSON objects) into a
 single JSON array. `--sort-keys` sorts object keys.
+
+## Progress output
+
+Progress goes to stderr; results and final summaries go to stdout.
+
+On a terminal, one status line is redrawn in place and fitted to the window width:
+
+```text
+Searching 'api_key' (2/2) | 3/5 projects | 21 hits | 0:05 | ETA 0:04 | acme/web-app @ master [2/3]
+```
+
+When a phase ends, the status line is replaced by a permanent summary:
+
+```text
+Indexed 9 projects from gitlab.example.com in 0.4s
+Listed 19 branches of 8 projects in 1.2s
+Search plan: 2 terms, 5 of 9 projects, 13 branches (skipped: 1 empty, 3 inactive since 2024-06-02)
+Term 1/2 'password': 20 hits in 0.2s
+Term 2/2 'api_key': 5 hits in 0.1s
+Search finished: 2 terms x 5 projects, 25 hits in 0.3s
+```
+
+- The search counts only projects that are actually scanned. Projects excluded by
+  `--started-from`, `--forks skip`, empty repositories, and projects without a branch
+  to scan are reported once in the `Search plan` line and never inflate the totals.
+- The ETA covers all terms. Branch listing (`--index-branches all|N`) counts only
+  non-empty repositories, since empty ones need no API call.
+- When stderr is not a terminal (pipe, file, CI), only the permanent lines are
+  written, plus a heartbeat line with the current status once a minute during long phases.
+- After Ctrl+C or a fatal error, the last status stays on screen to show how far the
+  phase got (`| stopped`, or `(interrupted)` in the indexing summary).
 
 ## Output formats
 

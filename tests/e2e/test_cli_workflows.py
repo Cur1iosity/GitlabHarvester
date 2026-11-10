@@ -194,21 +194,26 @@ def test_dedup_with_hash_algo_and_without_normalization(fake_gitlab: FakeGitLab,
 
 
 @pytest.mark.parametrize(
-    ("since", "active", "expected_projects", "expected_hits"),
+    ("since", "planned", "skipped", "expected_projects", "expected_hits"),
     [
-        ("2024-06-02", 5, {103, 201, 202, 203, 301}, 7),
+        ("2024-06-02", 5, "1 empty, 3 inactive since 2024-06-02", {103, 201, 202, 203, 301}, 7),
         # 2024-06-03T00:00+03:00 == 2024-06-02T21:00Z -> 201 (06-02 10:00Z) drops out.
-        ("2024-06-03T00:00:00+03:00", 4, {103, 202, 203, 301}, 5),
-        ("2024-01-01", 9, {101, 103, 201, 202, 203, 301}, 9),  # empty 104 counts as active but is never scanned
-        ("2030-01-01", 0, set(), 0),
+        ("2024-06-03T00:00:00+03:00", 4, "1 empty, 4 inactive since 2024-06-03T00:00:00+03:00",
+         {103, 202, 203, 301}, 5),
+        # The empty repository is never scanned, so it is not counted as planned.
+        ("2024-01-01", 8, "1 empty", {101, 103, 201, 202, 203, 301}, 9),
+        ("2030-01-01", 0, "1 empty, 8 inactive since 2030-01-01", set(), 0),
     ],
 )
-def test_search_started_from(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path, since, active, expected_projects,
-                             expected_hits):
+def test_search_started_from(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path, since, planned, skipped,
+                             expected_projects, expected_hits):
     proc = run_cli(*gl_args(fake_gitlab), "-s", "password", "--index-file", "idx.jsonl", "--session-file", "s.jsonl",
                    "--started-from", since, check=True)
 
-    assert f"Activity filter: {active} of 9 projects active since" in proc.stdout
+    # Progress output (stderr) counts only the projects that are really scanned.
+    assert f"Search plan: 1 term, {planned} of 9 projects, {planned} branch" in proc.stderr
+    assert f"(skipped: {skipped})" in proc.stderr
+    assert f"Search finished: 1 term x {planned} project" in proc.stderr
     assert f"Hits: {expected_hits}" in proc.stdout
     s = Session.load(tmp_path / "s.jsonl")
     assert set(s.project_ids()) == expected_projects

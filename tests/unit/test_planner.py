@@ -211,3 +211,77 @@ def test_should_scan_project_applies_started_from(mode):
     assert should_scan_project(new, opts) is True
     # Combined with other rules: empty repos and skipped forks stay excluded.
     assert should_scan_project(proj(empty=True, last_activity_at=new["last_activity_at"]), opts) is False
+
+
+# --------------------------------------------------------------------------- scan plan (what progress counts)
+
+from glh.planner import (  # noqa: E402
+    SKIP_EMPTY,
+    SKIP_FORK,
+    SKIP_INACTIVE,
+    SKIP_NO_BRANCHES,
+    build_scan_plan,
+    skip_reason,
+)
+
+
+def test_skip_reason_order_and_values():
+    since = datetime(2024, 6, 1, tzinfo=UTC)
+    opts = ScanOptions(forks_mode="skip", started_from=since)
+    old = "2020-01-01T00:00:00Z"
+    # An empty fork that is also inactive is reported as empty: rules are checked in order.
+    assert skip_reason(proj(empty=True, fork_of=1, last_activity_at=old), opts) == SKIP_EMPTY
+    assert skip_reason(proj(fork_of=1, last_activity_at=old), opts) == SKIP_FORK
+    assert skip_reason(proj(last_activity_at=old), opts) == SKIP_INACTIVE
+    assert skip_reason(proj(last_activity_at="2025-01-01T00:00:00Z"), opts) is None
+
+
+def test_scan_plan_counts_only_scanned_projects_and_branches():
+    since = datetime(2024, 6, 1, tzinfo=UTC)
+    index = [
+        proj(1, branches=["develop", "main"], last_activity_at="2024-07-01T00:00:00Z"),
+        proj(2, empty=True, default=None),
+        proj(3, fork_of=1, last_activity_at="2024-07-01T00:00:00Z"),
+        proj(4, last_activity_at="2023-01-01T00:00:00Z"),
+        proj(5, default=None, branches=[], last_activity_at="2024-07-01T00:00:00Z"),
+    ]
+    plan = build_scan_plan(index, ScanOptions(scan_branches="all", forks_mode="skip", started_from=since))
+
+    assert [p["id"] for p, _ in plan.targets] == [1]
+    assert plan.targets[0][1] == ("develop", "main")
+    assert (plan.project_count, plan.branch_count, plan.total_projects) == (1, 2, 5)
+    assert plan.skipped == {SKIP_EMPTY: 1, SKIP_FORK: 1, SKIP_INACTIVE: 1, SKIP_NO_BRANCHES: 1}
+    assert plan.describe() == (
+        "1 of 5 projects, 2 branches (skipped: 1 empty, 1 fork, 1 inactive since 2024-06-01, "
+        "1 without branches to scan)"
+    )
+
+
+def test_scan_plan_keeps_filtered_upstream_for_branch_diff():
+    # The upstream is inactive (excluded from the scan) but still drives the fork's branch diff.
+    since = datetime(2024, 6, 1, tzinfo=UTC)
+    upstream = proj(1, branches=["feature", "main"], last_activity_at="2023-01-01T00:00:00Z")
+    fork = proj(2, fork_of=1, branches=["feature", "main", "mine"], last_activity_at="2024-07-01T00:00:00Z")
+    plan = build_scan_plan([upstream, fork], ScanOptions(scan_branches="all", forks_mode="branch-diff",
+                                                         started_from=since))
+    assert [(p["id"], b) for p, b in plan.targets] == [(2, ("main", "mine"))]
+    assert plan.skipped == {SKIP_INACTIVE: 1}
+
+
+@pytest.mark.parametrize(
+    ("since", "text"),
+    [
+        (datetime(2024, 6, 1, tzinfo=UTC), "since 2024-06-01"),
+        (datetime(2024, 6, 1, 12, 30, tzinfo=UTC), "since 2024-06-01T12:30:00+00:00"),
+        (datetime(2024, 6, 1, tzinfo=timezone(timedelta(hours=3))), "since 2024-06-01T00:00:00+03:00"),
+    ],
+)
+def test_scan_plan_describes_the_activity_bound(since, text):
+    plan = build_scan_plan([proj(last_activity_at="2020-01-01T00:00:00Z")], ScanOptions(started_from=since))
+    assert plan.describe() == f"0 of 1 project, 0 branches (skipped: 1 inactive {text})"
+
+
+def test_scan_plan_without_filters():
+    plan = build_scan_plan([proj(1), proj(2)], ScanOptions())
+    assert plan.describe() == "2 of 2 projects, 2 branches"
+    assert plan.skipped == {}

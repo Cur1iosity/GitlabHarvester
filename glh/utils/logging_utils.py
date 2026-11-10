@@ -1,26 +1,30 @@
-# glh/logging_utils.py
+# glh/utils/logging_utils.py
 """
-Logging utilities for tqdm-compatible output.
-Provides handlers that prevent logging output from breaking tqdm progress bars.
+Logging utilities for console output next to the progress status line.
+
+Console records are written through ``terminal_utils.STATUS`` so a log line
+never lands in the middle of the in-place status line.
 """
 
 from __future__ import annotations
 
 import logging
+import sys
 from pathlib import Path
 from typing import Final
 
-from tqdm import tqdm
+from glh.utils import terminal_utils
 
 _DEFAULT_FMT: Final[str] = "[%(asctime)s][%(levelname)s] %(message)s"
 _DEFAULT_DATEFMT: Final[str] = "%d-%m-%Y %H:%M:%S"
 
 
-class TqdmLoggingHandler(logging.Handler):
+class ConsoleHandler(logging.Handler):
     """
-    Logging handler that prints messages using tqdm.write().
+    Logging handler that prints records to stdout around the status line.
 
-    This prevents log lines from corrupting active tqdm progress bars.
+    The status line (stderr) is erased before the record is written and drawn
+    again afterwards. stdout is resolved per record, so redirection is honored.
     """
 
     def __init__(self, level: int | str = logging.NOTSET) -> None:
@@ -28,45 +32,16 @@ class TqdmLoggingHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         """
-        Emit a log record via tqdm.write().
+        Emit a log record as one console line.
 
         Args:
             record: Logging record.
         """
         try:
             msg = self.format(record)
-            tqdm.write(msg)
+            terminal_utils.STATUS.write_line(msg, stream=sys.stdout)
         except Exception:
             self.handleError(record)
-
-
-def install_tqdm_logging(
-        level: int | str = logging.INFO,
-        fmt: str | None = None,
-        logger: logging.Logger | None = None,
-) -> None:
-    """
-    Install tqdm-compatible logging handler on a logger.
-
-    This replaces existing handlers to guarantee clean output.
-
-    Args:
-        level: Logging level.
-        fmt: Formatter string. If None, defaults to "%(message)s".
-        logger: Target logger. Defaults to root logger.
-    """
-    target = logger or logging.getLogger()
-
-    target.handlers.clear()
-    target.propagate = False
-
-    handler = TqdmLoggingHandler(level)
-
-    formatter = logging.Formatter(fmt or "%(message)s")
-    handler.setFormatter(formatter)
-
-    target.addHandler(handler)
-    target.setLevel(level)
 
 
 def coerce_log_level(value: int | str | None) -> int:
@@ -96,12 +71,12 @@ def build_logger(
         datefmt: str = _DEFAULT_DATEFMT,
 ) -> logging.Logger:
     """
-    Build and configure a logger with tqdm-compatible console output and optional file logging.
+    Build and configure a logger with console output and optional file logging.
 
     This function:
     - disables propagation to avoid duplicate output
     - resets existing handlers on the named logger
-    - adds a tqdm-compatible console handler
+    - adds a console handler that cooperates with the progress status line
     - optionally adds a file handler
     """
     logger = logging.getLogger(name)
@@ -118,9 +93,9 @@ def build_logger(
 
     formatter = logging.Formatter(fmt, datefmt=datefmt)
 
-    tqdm_h = TqdmLoggingHandler(level=level)
-    tqdm_h.setFormatter(formatter)
-    logger.addHandler(tqdm_h)
+    console_h = ConsoleHandler(level=level)
+    console_h.setFormatter(formatter)
+    logger.addHandler(console_h)
 
     if log_file:
         log_path = Path(log_file).expanduser().resolve()

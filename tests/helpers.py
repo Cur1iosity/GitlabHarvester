@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 from dataclasses import dataclass
@@ -67,6 +68,17 @@ class Session:
                     b["branch"] for b in r["result"]["project_search_result"]
                 )
         return out
+
+
+class FakeStream(io.StringIO):
+    """In-memory text stream that can pretend to be a terminal (for progress output tests)."""
+
+    def __init__(self, tty: bool) -> None:
+        super().__init__()
+        self._tty = tty
+
+    def isatty(self) -> bool:
+        return self._tty
 
 
 def load_index(path: Path | str) -> tuple[dict[str, Any], list[dict[str, Any]]]:

@@ -15,10 +15,9 @@ from gitlab import Gitlab
 from gitlab.const import SearchScope
 from gitlab.v4.objects import Project
 from requests import Session
-from tqdm import tqdm
 
 from glh.exceptions import GitlabHarvesterError
-from glh.planner import ScanOptions, branches_to_scan, should_scan_project
+from glh.planner import ScanOptions, ScanPlan, branches_to_scan, build_scan_plan
 from glh.utils import logging_utils, terminal_utils
 from glh.utils.terminal_utils import human_int
 
@@ -143,6 +142,13 @@ class GitlabHarvester:
     def get_host(self) -> str:
         """Backward-compatible alias for get_instance_id()."""
         return self.get_instance_id()
+
+    def _display_host(self) -> str:
+        """Instance host as shown to the user, e.g. 'gitlab.example.com:8443'."""
+        if not self._gl:
+            return "undefined"
+        parsed = urlparse(self._gl.url)
+        return parsed.netloc or self._gl.url
 
     def _get_default_log_filename(self) -> str:
         """
@@ -292,81 +298,77 @@ class GitlabHarvester:
         pr_counter = 0
         page: int = 1
         is_completed: bool = True
+        outcome = ""
 
         start = time.perf_counter()
         tmp_filename = f"{filename}.tmp" if filename else None
         fp = open(tmp_filename, "w", encoding="utf-8") if tmp_filename else None
 
-        lay = terminal_utils.layout()
+        host = self.get_host()
+        progress = terminal_utils.Progress(f"Indexing {self._display_host()}", unit="projects").start()
 
-        with terminal_utils.mk_tqdm(
-                total=None,
-                position=0,
-                leave=False,
-                layout_=lay,
-                unit="projects",
-        ) as pbar:
-            terminal_utils.set_desc(pbar, f"Listing instance: {self.get_host()}", lay)
-
-            try:
-                while batch := self._gl.projects.list(page=page, per_page=per_page, order_by=order_by, sort=sort):
-                    if fp is not None:
-                        for x in batch:
-                            self._emit_record(fp=fp, record=reduce_project_fields(x))
-                    else:
-                        projects.extend(reduce_project_fields(x) for x in batch)
-
-                    desc = terminal_utils.animate_desc(f"Listing instance: {self.get_host()}",
-                                                       terminal_utils.GET_PROJECTS_ANIM_FRAMES, page)
-                    terminal_utils.set_desc(pbar, desc, lay)
-
-                    batch_size = len(batch)
-                    pbar.update(batch_size)
-                    pr_counter += batch_size
-                    page += 1
-
-            except gitlab.exceptions.GitlabError as e:
-                # The listing stopped early: keep what was fetched, but never
-                # mark a partial index as complete.
-                is_completed = False
-                self.logger.error("Gitlab API error. The project list wasn't complete.")
-                self.logger.error(e)
-
-            except KeyboardInterrupt:
-                is_completed = False
-                self.logger.error("Interrupted by user (Ctrl+C).")
-                raise
-
-            except Exception:
-                is_completed = False
-                self.logger.exception("Fatal error while loading projects.")
-                raise
-
-            finally:
-                elapsed = round(time.perf_counter() - start, 2)
-
+        try:
+            while batch := self._gl.projects.list(page=page, per_page=per_page, order_by=order_by, sort=sort):
                 if fp is not None:
-                    fp.close()
+                    for x in batch:
+                        self._emit_record(fp=fp, record=reduce_project_fields(x))
+                else:
+                    projects.extend(reduce_project_fields(x) for x in batch)
 
-                if filename:
-                    meta = {
-                        "type": "meta",
-                        "source": self.get_host(),
-                        "timestamp_utc": datetime.now(UTC).isoformat(),
-                        "projects_count": pr_counter,
-                        "elapsed_seconds": elapsed,
-                        "order_by": order_by,
-                        "sort": sort,
-                        "per_page": per_page,
-                        "is_completed": is_completed,
-                    }
-                    with open(filename, "w", encoding="utf-8") as out_fp:
-                        self._write_jsonl_line(out_fp, meta)
-                        with open(tmp_filename, "r", encoding="utf-8") as in_fp:
-                            for line in in_fp:
-                                out_fp.write(line)
+                batch_size = len(batch)
+                pr_counter += batch_size
+                progress.advance(batch_size, detail=f"page {page}")
+                page += 1
 
-                    os.remove(tmp_filename)
+        except gitlab.exceptions.GitlabError as e:
+            # The listing stopped early: keep what was fetched, but never
+            # mark a partial index as complete.
+            is_completed = False
+            outcome = " (incomplete: GitLab API error)"
+            self.logger.error("Gitlab API error. The project list wasn't complete.")
+            self.logger.error(e)
+
+        except KeyboardInterrupt:
+            is_completed = False
+            outcome = " (interrupted)"
+            self.logger.error("Interrupted by user (Ctrl+C).")
+            raise
+
+        except Exception:
+            is_completed = False
+            outcome = " (failed)"
+            self.logger.exception("Fatal error while loading projects.")
+            raise
+
+        finally:
+            elapsed = round(time.perf_counter() - start, 2)
+            progress.finish(
+                f"Indexed {terminal_utils.plural(pr_counter, 'project')} from {self._display_host()} in "
+                f"{terminal_utils.format_duration(elapsed)}{outcome}"
+            )
+
+            if fp is not None:
+                fp.close()
+
+            if filename:
+                meta = {
+                    "type": "meta",
+                    "source": host,
+                    "timestamp_utc": datetime.now(UTC).isoformat(),
+                    "projects_count": pr_counter,
+                    "elapsed_seconds": elapsed,
+                    "order_by": order_by,
+                    "sort": sort,
+                    "per_page": per_page,
+                    "is_completed": is_completed,
+                }
+                with open(filename, "w", encoding="utf-8") as out_fp:
+                    self._write_jsonl_line(out_fp, meta)
+                    with open(tmp_filename, "r", encoding="utf-8") as in_fp:
+                        for line in in_fp:
+                            out_fp.write(line)
+
+                os.remove(tmp_filename)
 
         self.logger.info("Loaded %s projects in %s seconds.", pr_counter, elapsed)
         return projects
@@ -376,46 +378,42 @@ class GitlabHarvester:
             self,
             project_id: int,
             per_page: int = 100,
-            position: int = 1,
+            *,
             limit: int | None = None,
     ) -> list[str]:
         """
         Retrieve branch names for a specific GitLab project.
+
+        Args:
+            project_id: GitLab project id.
+            per_page: Branches API page size.
+            limit: Stop after this many branches (None = all).
+
+        Returns:
+            Branch names in API order (GitLab sorts them by name). On an API
+            error the branches fetched so far are returned and the error is logged.
         """
         branches: list[str] = []
-        lay = terminal_utils.layout()
+        page = 1
+        try:
+            while True:
+                batch = self._gl.projects.get(project_id, lazy=True).branches.list(page=page, per_page=per_page)
+                if not batch:
+                    break
 
-        with terminal_utils.mk_tqdm(
-                total=None,
-                position=position,
-                leave=False,
-                layout_=lay,
-                unit="branches",
-        ) as pbar:
-            terminal_utils.set_desc(pbar, f"Listing branches for ID [{project_id}]", lay)
+                for b in batch:
+                    branches.append(b.name)
+                    if limit is not None and len(branches) >= limit:
+                        return branches
 
-            page = 1
-            try:
-                while True:
-                    batch = self._gl.projects.get(project_id, lazy=True).branches.list(page=page, per_page=per_page)
-                    if not batch:
-                        break
+                page += 1
 
-                    for b in batch:
-                        branches.append(b.name)
-                        if limit is not None and len(branches) >= limit:
-                            pbar.update(1)
-                            return branches
-
-                    pbar.update(len(batch))
-                    page += 1
-
-            except (gitlab.exceptions.GitlabError, requests.exceptions.RequestException) as e:
-                self.logger.error(
-                    "Gitlab API error. The branch list wasn't complete for project with ID: %s.",
-                    project_id,
-                )
-                self.logger.error(e)
+        except (gitlab.exceptions.GitlabError, requests.exceptions.RequestException) as e:
+            self.logger.error(
+                "Gitlab API error. The branch list wasn't complete for project with ID: %s.",
+                project_id,
+            )
+            self.logger.error(e)
 
         self.logger.debug("Loaded %s branches for project with ID: %s.", len(branches), project_id)
         return branches
@@ -494,7 +492,11 @@ class GitlabHarvester:
             self.logger.info("Branches mode: limit=%s (slow-ish).", branches)
 
         tmp_out = f"{filename}.branches.tmp"
-        lay = terminal_utils.layout()
+        uses_api = branches != "default"
+        # Only non-empty repositories cost API calls, so only they are counted.
+        to_list = self._count_nonempty_projects(filename) if uses_api else 0
+        progress = terminal_utils.Progress("Listing branches", total=to_list, unit="projects")
+        listed_branches = 0
 
         with open(filename, "r", encoding="utf-8") as in_fp, open(tmp_out, "w", encoding="utf-8") as out_fp:
             first_line = in_fp.readline()
@@ -506,18 +508,9 @@ class GitlabHarvester:
             meta["timestamp_utc"] = datetime.now(UTC).isoformat()
             self._write_jsonl_line(out_fp, meta)
 
-            total = meta.get("projects_count")
-
-            with terminal_utils.mk_tqdm(
-                    total=total,
-                    position=0,
-                    leave=False,
-                    layout_=lay,
-                    unit="projects",
-                    delay=2,
-            ) as pbar:
-                terminal_utils.set_desc(pbar, "Enriching projects with branches", lay)
-
+            if uses_api:
+                progress.start()
+            try:
                 for line in in_fp:
                     line = line.strip()
                     if not line:
@@ -533,25 +526,50 @@ class GitlabHarvester:
                         if branches == "default":
                             project["branches"] = [default_branch] if default_branch else []
                         else:
+                            progress.set_detail(str(project.get("path_with_namespace", project["id"])))
                             limit = None if branches == "all" else int(branches)
                             project["branches"] = self.get_branches(
                                 project_id=int(project["id"]),
                                 per_page=branches_per_page,
                                 limit=limit,
-                                position=1,
                             )
-
-                    desc = terminal_utils.animate_desc("Enriching projects with branches",
-                                                       terminal_utils.GET_BRANCHES_ANIM_FRAMES, pbar.n)
-                    terminal_utils.set_desc(pbar, desc, lay)
+                            listed_branches += len(project["branches"])
+                            progress.advance()
 
                     self._emit_record(out_fp, record=project)
-                    pbar.update(1)
+            except BaseException:
+                if uses_api:
+                    progress.finish(f"{progress.render()} | stopped")
+                raise
+
+        if uses_api:
+            progress.finish(
+                f"Listed {terminal_utils.plural(listed_branches, 'branch', 'branches')} of "
+                f"{terminal_utils.plural(progress.done, 'project')} in "
+                f"{terminal_utils.format_duration(progress.elapsed)}"
+            )
 
         os.replace(tmp_out, filename)
         if branches != "default":
             self.logger.info("Project index enriched with branches (mode=%s): %s", branches, filename)
         return filename
+
+    @staticmethod
+    def _count_nonempty_projects(filename: str) -> int:
+        """Count non-empty repositories in an index file without loading it into memory."""
+        count = 0
+        with open(filename, "r", encoding="utf-8") as fp:
+            fp.readline()  # meta
+            for line in fp:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    if not json.loads(line).get("empty_repo", False):
+                        count += 1
+                except json.JSONDecodeError:
+                    continue
+        return count
 
     def download_projects(
             self,
@@ -608,39 +626,27 @@ class GitlabHarvester:
     def add_branches_to_projects(self, projects: list[dict], per_page: int = 50) -> list[dict]:
         """
         Enrich a list of project dictionaries with branch information.
+
+        Empty repositories get an empty branch list without API calls and are
+        not counted in the progress.
         """
-        lay = terminal_utils.layout()
+        to_list = sum(1 for p in projects if not p.get("empty_repo", False))
 
-        with terminal_utils.mk_tqdm(
-                total=len(projects),
-                position=0,
-                leave=True,
-                layout_=lay,
-                unit="projects",
-                delay=0.5,
-        ) as pbar:
-            terminal_utils.set_desc(pbar, "Listing branches", lay)
-
+        with terminal_utils.Progress("Listing branches", total=to_list, unit="projects") as progress:
             for project in projects:
-                empty = project.get("empty_repo", False)
-
-                terminal_utils.set_desc(pbar, "Loading branches", lay)
-
-                if not empty:
-                    project["branches"] = self.get_branches(project_id=project["id"], per_page=per_page)
-                    postfix = f'{project["web_url"]}: {len(project["branches"])} branch(es)'
-                else:
+                if project.get("empty_repo", False):
                     project["branches"] = []
-                    postfix = f'{project["web_url"]}: empty'
+                    continue
+                progress.set_detail(str(project.get("path_with_namespace") or project.get("web_url", "")))
+                project["branches"] = self.get_branches(project_id=project["id"], per_page=per_page)
+                progress.advance()
 
-                terminal_utils.set_postfix(pbar, postfix, lay)
-                pbar.update(1)
-
-            self.logger.info(
-                "Loaded branches for %s projects in %s seconds.",
-                len(projects),
-                round(pbar.format_dict.get("elapsed", 0.0), 2),
+            elapsed = progress.finish(
+                f"Listed branches of {terminal_utils.plural(progress.done, 'project')} in "
+                f"{terminal_utils.format_duration(progress.elapsed)}"
             )
+
+        self.logger.info("Loaded branches for %s projects in %s seconds.", len(projects), round(elapsed, 2))
 
         return projects
 
@@ -764,64 +770,52 @@ class GitlabHarvester:
             keywords: list[str],
             *,
             options: ScanOptions,
-            position: int = 0,
             hit_counter: int = 0,
             session_file: IO | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         """
         Execute term search across a list of projects.
+
+        The scan plan (which projects and branches pass the filters) is built
+        once and printed. Progress counts only planned projects, so projects
+        excluded by --forks skip, --started-from or empty repositories never
+        inflate the totals.
+
+        Args:
+            projects: The whole project index.
+            keywords: Search terms.
+            options: Scan options (branches, forks, activity filter).
+            hit_counter: Initial hit counter.
+            session_file: Open session JSONL to stream hits and checkpoints to.
+
+        Returns:
+            ([{"term", "result"}, ...], total hit counter).
         """
         res: list[dict[str, Any]] = []
-        lay = terminal_utils.layout()
+        plan = build_scan_plan(projects, options)
+        n_terms = len(keywords)
+        terms_text = terminal_utils.plural(n_terms, "term")
+        hits_before = hit_counter
 
-        if len(keywords) <= 1:
-            with terminal_utils.mk_header(position=position, leave=True, layout_=lay) as hdr:
-                for term in keywords:
-                    terminal_utils.set_desc(hdr, f"Searching term: '{term}' | Hit Counter: {hit_counter}", lay)
+        terminal_utils.STATUS.write_line(f"Search plan: {terms_text}, {plan.describe()}")
 
-                    s_res, hit_counter = self.search_keyword(
-                        projects=projects,
-                        term=term,
-                        options=options,
-                        ext_pbar=hdr,
-                        hit_counter=hit_counter,
-                        session_file=session_file,
-                        position=position + 1,
-                    )
-                    res.append({"term": term, "result": s_res})
+        with terminal_utils.Progress(
+                "Searching", total=plan.project_count, unit="projects", rounds=n_terms,
+        ) as progress:
+            for number, term in enumerate(keywords, 1):
+                label = f"Searching '{term}'" + (f" ({number}/{n_terms})" if n_terms > 1 else "")
+                progress.start_round(number, label)
+                term_started = progress.elapsed
+                term_hits_before = hit_counter
 
-                    if session_file is not None:
-                        self._emit_record(
-                            session_file,
-                            record={
-                                "type": "keyword_done",
-                                "term": term,
-                                "hit_counter": hit_counter,
-                                "timestamp_utc": datetime.now(UTC).isoformat(),
-                            },
-                        )
-                        # Resume checkpoint: make it durable even if the process is killed.
-                        session_file.flush()
-
-                terminal_utils.set_desc(hdr, f"Done | Hit Counter: {hit_counter}", lay)
-
-            return res, hit_counter
-
-        with terminal_utils.mk_tqdm(
-                total=len(keywords),
-                position=position,
-                leave=False,
-                layout_=lay,
-        ) as pbar:
-            for term in keywords:
                 s_res, hit_counter = self.search_keyword(
                     projects=projects,
                     term=term,
                     options=options,
-                    ext_pbar=pbar,
                     hit_counter=hit_counter,
                     session_file=session_file,
-                    position=position + 1,
+                    plan=plan,
+                    progress=progress,
                 )
                 res.append({"term": term, "result": s_res})
 
@@ -838,7 +832,18 @@ class GitlabHarvester:
                     # Resume checkpoint: make it durable even if the process is killed.
                     session_file.flush()
 
-                pbar.update(1)
+                if n_terms > 1:
+                    progress.note(
+                        f"Term {number}/{n_terms} '{term}': "
+                        f"{terminal_utils.plural(hit_counter - term_hits_before, 'hit')} in "
+                        f"{terminal_utils.format_duration(progress.elapsed - term_started)}"
+                    )
+
+            progress.finish(
+                f"Search finished: {terms_text} x {terminal_utils.plural(plan.project_count, 'project')}, "
+                f"{terminal_utils.plural(hit_counter - hits_before, 'hit')} in "
+                f"{terminal_utils.format_duration(progress.elapsed)}"
+            )
 
         return res, hit_counter
 
@@ -848,44 +853,43 @@ class GitlabHarvester:
             term: str,
             *,
             options: ScanOptions,
-            position: int = 1,
             hit_counter: int = 0,
-            ext_pbar: tqdm | None = None,
             session_file: IO | None = None,
+            plan: ScanPlan | None = None,
+            progress: terminal_utils.Progress | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         """
-        Search a single term across all provided projects.
+        Search a single term across the planned projects.
+
+        Args:
+            projects: The whole project index (used to build the plan if not given).
+            term: Search term.
+            options: Scan options.
+            hit_counter: Initial hit counter.
+            session_file: Open session JSONL to stream hits to.
+            plan: Precomputed scan plan (see build_scan_plan()).
+            progress: Progress of the enclosing run; a standalone one is shown if None.
+
+        Returns:
+            (per-project results, updated hit counter).
         """
-        projects_by_id = {int(p["id"]): p for p in projects}
-        lay = terminal_utils.layout()
+        plan = plan or build_scan_plan(projects, options)
+        own_progress = progress is None
+        if progress is None:
+            progress = terminal_utils.Progress(f"Searching '{term}'", total=plan.project_count).start()
 
-        with terminal_utils.mk_tqdm(
-                total=len(projects),
-                position=position,
-                leave=False,
-                layout_=lay,
-                delay=2,
-        ) as pbar:
-            terminal_utils.set_desc(pbar, term, lay)
-            res: list[dict[str, Any]] = []
-
-            for pr in projects:
-                raw_desc = pr.get("path_with_namespace", "unknown")
-                terminal_utils.set_desc(pbar, raw_desc, lay)
-
-                if ext_pbar is not None:
-                    terminal_utils.set_desc(ext_pbar, f"'{term}' • hits: {human_int(hit_counter)}", lay)
-
-                if not should_scan_project(pr, options):
-                    pbar.update(1)
-                    continue
+        res: list[dict[str, Any]] = []
+        try:
+            for pr, branches in plan.targets:
+                progress.set_info(f"{human_int(hit_counter)} hits")
 
                 s_res, hit_counter = self.scan_project(
                     project=pr,
                     term=term,
                     options=options,
-                    projects_by_id=projects_by_id,
-                    ext_pbar=pbar,
+                    projects_by_id=plan.projects_by_id,
+                    branches=branches,
+                    progress=progress,
                     hit_counter=hit_counter,
                 )
 
@@ -902,7 +906,11 @@ class GitlabHarvester:
                     if session_file:
                         self._emit_record(session_file, record={"term": term, "result": out})
 
-                pbar.update(1)
+                progress.advance()
+            progress.set_info(f"{human_int(hit_counter)} hits")
+        finally:
+            if own_progress:
+                progress.finish()
 
         return res, hit_counter
 
@@ -913,32 +921,42 @@ class GitlabHarvester:
             *,
             options: ScanOptions,
             projects_by_id: dict[int, dict[str, Any]] | None = None,
-            ext_pbar: tqdm | None = None,
+            branches: list[str] | tuple[str, ...] | None = None,
+            progress: terminal_utils.Progress | None = None,
             hit_counter: int = 0,
     ) -> tuple[list[dict[str, Any]], int]:
         """
         Scan a single project for a term across the selected branches.
+
+        Args:
+            project: Project entry from the index.
+            term: Search term.
+            options: Scan options (used to select branches when not given).
+            projects_by_id: Index lookup for fork upstreams.
+            branches: Branches to scan; computed with branches_to_scan() if None.
+            progress: Progress whose detail shows the current project and branch.
+            hit_counter: Initial hit counter.
+
+        Returns:
+            ([{"branch", "branch_search_result"}, ...], updated hit counter).
         """
         res: list[dict[str, Any]] = []
-        orig_desc = ''
 
         project_obj: Project = self._gl.projects.get(project["id"], lazy=True)
         project_url: str = project["web_url"]
 
-        branches = branches_to_scan(project, options, projects_by_id=projects_by_id)
+        if branches is None:
+            branches = branches_to_scan(project, options, projects_by_id=projects_by_id)
         if not branches:
             return [], hit_counter
 
         br_len: int = len(branches)
-        lay = terminal_utils.layout()
-
-        if ext_pbar is not None:
-            orig_desc = ext_pbar.desc
+        name = project.get("path_with_namespace", project_url)
 
         for num, b in enumerate(branches):
-            if ext_pbar is not None:
+            if progress is not None:
                 branch_info = b if br_len == 1 else f"{b} [{num + 1}/{br_len}]"
-                terminal_utils.set_desc(ext_pbar, f"{orig_desc} • {branch_info}", lay)
+                progress.set_detail(f"{name} @ {branch_info}")
 
             try:
                 s_res, hit_counter = self.scan_branch(

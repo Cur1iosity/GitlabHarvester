@@ -1,149 +1,36 @@
-#glh/terminal_utils.py
+# glh/utils/terminal_utils.py
+"""
+Console progress output without third-party dependencies.
+
+There is one status line at a time, written to stderr:
+
+- On an interactive terminal the line is redrawn in place with ``\\r`` and
+  space padding (no ANSI escape sequences, so it works in any Windows console).
+  Every redraw re-reads the terminal width and truncates the text to it,
+  counting wide (CJK, emoji) and zero-width characters, so the line never wraps.
+  While a phase runs, the line is refreshed once per second, so the elapsed
+  time keeps moving during slow API calls.
+- Otherwise (pipes, files, CI) nothing is redrawn. Only permanent lines are
+  written: phase summaries, and a heartbeat line every minute while a long
+  phase runs.
+
+Console log records go through :meth:`StatusLine.write_line` (see
+``logging_utils.ConsoleHandler``), so they never get mixed with the status line.
+"""
+
 from __future__ import annotations
 
 import shutil
-import textwrap
-from collections.abc import Iterable
-from dataclasses import dataclass
-from typing import Any
+import sys
+import threading
+import time
+import unicodedata
+from typing import Callable, TextIO
 
-from tqdm import tqdm
-
-GET_PROJECTS_ANIM_FRAMES: list[str] = ["🤔", "🐕❓", "📄❓", "🐒❓", "🌳‼️", "🌳🌳🌳", "🕺🌳", "💸🧙", "🍶", "🫠"]
-GET_BRANCHES_ANIM_FRAMES: list[str] = ["🍌", "🍌", "🍌💃", "💃🍌", "🕺🍌", "🍌🕺"]
+ELLIPSIS = "…"
 
 
-def term_cols(fallback: int = 120) -> int:
-    """Return current terminal width in columns (best-effort)."""
-    return shutil.get_terminal_size(fallback=(fallback, 20)).columns
-
-
-def shorten(text: str, width: int) -> str:
-    """Shorten text to fit `width` using an ellipsis placeholder."""
-    if width <= 0:
-        return ""
-    return textwrap.shorten(str(text), width=width, placeholder="…")
-
-
-def calc_tqdm_widths(*, cols: int) -> tuple[int, int]:
-    """
-    Compute (desc_width, postfix_width) budgets for tqdm.
-    Goal: keep progress bar wide and stable.
-    """
-    # desc_w = max(18, min(42, int(cols * 0.28)))   # ~28% of terminal
-    # desc_w = max(24, min(80, int(cols * 0.5)))
-    desc_w = max(30, min(120, int(cols * 0.7)))
-    post_w = max(12, min(28, int(cols * 0.18)))   # ~18% of terminal
-    return desc_w, post_w
-
-
-def animate_desc(base: str, frames: Iterable[str], i: int) -> str:
-    """Return animated description string for iteration index `i`."""
-    frames_list = list(frames)
-    if not frames_list:
-        return base
-    return f"{frames_list[i % len(frames_list)]} {base}"
-
-
-@dataclass(frozen=True, slots=True)
-class TqdmLayout:
-    """Computed layout budgets for a single terminal width."""
-    cols: int
-    desc_w: int
-    post_w: int
-
-
-def layout(fallback_cols: int = 120) -> TqdmLayout:
-    """Compute stable tqdm layout budgets from terminal width."""
-    cols = term_cols(fallback=fallback_cols)
-    desc_w, post_w = calc_tqdm_widths(cols=cols)
-    return TqdmLayout(cols=cols, desc_w=desc_w, post_w=post_w)
-
-
-def bar_format_default() -> str:
-    """Stable tqdm format with left+bar+right sections."""
-    return "{l_bar}{bar}{r_bar}"
-
-
-def bar_format_stable(lay: TqdmLayout) -> str:
-    """
-    Stable tqdm format where desc and postfix have fixed width.
-
-    This prevents the progress bar from expanding/shrinking when desc/postfix length changes.
-    """
-    return (
-        f"{{desc:<{lay.desc_w}}} "
-        f"{{percentage:3.0f}}% "
-        f"{{bar}} "
-        f"[{{elapsed}}<{{remaining}}]"
-        f"[{{n_fmt}}/{{total_fmt}}] "
-        f"{{postfix}}"
-    )
-
-
-def mk_tqdm(
-        *,
-        total: int | None,
-        position: int = 0,
-        leave: bool = False,
-        layout_: TqdmLayout | None = None,
-        bar_format: str | None = None,
-        **kwargs: Any,
-) -> tqdm:
-    """
-    Create a tqdm progress bar with stable width.
-
-    - Uses fixed ncols and disables dynamic_ncols to prevent jitter.
-    - Uses a stable bar_format by default.
-    """
-    lay = layout_ or layout()
-    return tqdm(
-        total=total,
-        position=position,
-        leave=leave,
-        ncols=lay.cols,
-        dynamic_ncols=False,
-        bar_format=bar_format or bar_format_stable(lay),
-        **kwargs,
-    )
-
-
-def layout_header(fallback_cols: int = 120) -> TqdmLayout:
-    cols = term_cols(fallback=fallback_cols)
-    desc_w = max(40, cols - 2)
-    return TqdmLayout(cols=cols, desc_w=desc_w, post_w=0)
-
-
-def mk_header(
-        *,
-        position: int = 0,
-        leave: bool = True,
-        layout_: TqdmLayout | None = None,
-) -> tqdm:
-    """
-    Create a one-line pinned header tqdm (no bar/counters).
-
-    Useful for single-term outer “status” line without jitter.
-    """
-    lay = layout_ or layout_header()
-    return tqdm(
-        total=1,
-        position=position,
-        leave=leave,
-        ncols=lay.cols,
-        dynamic_ncols=False,
-        bar_format=f"{{desc:<{lay.cols}}}",
-    )
-
-
-def set_desc(pbar: tqdm, text: str, lay: TqdmLayout) -> None:
-    """Set shortened description respecting computed layout width."""
-    pbar.set_description_str(shorten(text, lay.desc_w), refresh=True)
-
-
-def set_postfix(pbar: tqdm, text: str, lay: TqdmLayout) -> None:
-    """Set shortened postfix respecting computed layout width."""
-    pbar.set_postfix_str(shorten(text, lay.post_w), refresh=True)
+# --------------------------------------------------------------------------- formatting
 
 
 def human_int(n: int) -> str:
@@ -171,3 +58,349 @@ def human_int(n: int) -> str:
             return f"{val:.1f}{unit}" if val < 10 else f"{val:.0f}{unit}"
 
     return f"{n:.0e}"
+
+
+def plural(n: int, word: str, plural_form: str | None = None) -> str:
+    """'1 hit', '2 hits', '1,234 branches' (plural_form overrides the '+s' rule)."""
+    form = word if n == 1 else (plural_form or f"{word}s")
+    return f"{n:,} {form}"
+
+
+def format_clock(seconds: float) -> str:
+    """Format a duration as a clock: '0:07', '12:34', '1:02:03'."""
+    total = max(0, int(seconds))
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
+def format_duration(seconds: float) -> str:
+    """Format a finished phase duration: '0.4s', '12.3s', '1:05', '1:02:03'."""
+    if seconds < 60:
+        return f"{max(seconds, 0.0):.1f}s"
+    return format_clock(seconds)
+
+
+def _char_width(ch: str) -> int:
+    """Terminal cell width of one character (0, 1 or 2)."""
+    if unicodedata.category(ch) in ("Mn", "Me", "Cf"):
+        return 0  # combining marks, variation selectors, zero-width joiners
+    if unicodedata.east_asian_width(ch) in ("W", "F"):
+        return 2
+    return 1
+
+
+def display_width(text: str) -> int:
+    """Number of terminal cells needed to print ``text``."""
+    return sum(_char_width(ch) for ch in text)
+
+
+def fit_width(text: str, width: int) -> str:
+    """Truncate ``text`` to at most ``width`` terminal cells, ending with an ellipsis."""
+    if width <= 0:
+        return ""
+    if display_width(text) <= width:
+        return text
+    out: list[str] = []
+    used = 0
+    for ch in text:
+        w = _char_width(ch)
+        if used + w > width - 1:  # keep one cell for the ellipsis
+            break
+        out.append(ch)
+        used += w
+    return "".join(out) + ELLIPSIS
+
+
+def _single_line(text: str) -> str:
+    """Replace control characters (newlines, tabs, ...) so the text stays on one line."""
+    return "".join(" " if unicodedata.category(ch) == "Cc" else ch for ch in text)
+
+
+# --------------------------------------------------------------------------- status line
+
+
+class StatusLine:
+    """
+    A single in-place status line plus permanent lines on the same terminal.
+
+    Text comes from a *provider* callable (see :class:`Progress`), so the
+    background ticker can redraw it without knowing what it shows.
+    """
+
+    def __init__(
+            self,
+            stream: TextIO | None = None,
+            *,
+            interactive: bool | None = None,
+            columns: Callable[[], int] | None = None,
+            refresh_interval: float = 0.1,
+            tick_interval: float = 1.0,
+            heartbeat_interval: float = 60.0,
+            ticker: bool = True,
+            clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._stream = stream
+        self._interactive = interactive
+        self._columns = columns
+        self._refresh_interval = refresh_interval
+        self._tick_interval = tick_interval
+        self._heartbeat_interval = heartbeat_interval
+        self._ticker_enabled = ticker
+        self._clock = clock
+
+        self._lock = threading.RLock()
+        self._provider: Callable[[], str] | None = None
+        self._shown_width = 0
+        self._last_refresh = 0.0
+        self._last_heartbeat = 0.0
+        self._ticker: threading.Thread | None = None
+
+    # ----------------------------------------------------------------- environment
+
+    @property
+    def stream(self) -> TextIO:
+        """Target stream (resolved lazily, so redirected sys.stderr is honored)."""
+        return self._stream if self._stream is not None else sys.stderr
+
+    @property
+    def interactive(self) -> bool:
+        """True when the line can be redrawn in place (a terminal)."""
+        if self._interactive is not None:
+            return self._interactive
+        try:
+            return bool(self.stream.isatty())
+        except (AttributeError, ValueError, OSError):
+            return False
+
+    def _width(self) -> int:
+        cols = self._columns() if self._columns else shutil.get_terminal_size(fallback=(80, 24)).columns
+        # Writing into the last column makes some terminals wrap; stay one cell short.
+        return max(cols - 1, 1)
+
+    # --------------------------------------------------------------------- drawing
+
+    def _write(self, stream: TextIO, text: str) -> None:
+        try:
+            stream.write(text)
+            stream.flush()
+        except (OSError, ValueError):
+            pass  # closed or broken stream: progress output is best-effort
+
+    def _erase(self) -> None:
+        if self._shown_width:
+            self._write(self.stream, "\r" + " " * self._shown_width + "\r")
+            self._shown_width = 0
+
+    def _draw(self) -> None:
+        if self._provider is None:
+            return
+        text = fit_width(_single_line(self._provider()), self._width())
+        width = display_width(text)
+        # Pad with spaces to overwrite the remainder of a longer previous line.
+        self._write(self.stream, "\r" + text + " " * max(self._shown_width - width, 0))
+        self._shown_width = width
+        self._last_refresh = self._clock()
+
+    # ------------------------------------------------------------------ public API
+
+    def attach(self, provider: Callable[[], str]) -> None:
+        """Show ``provider()`` as the status line until :meth:`detach`."""
+        with self._lock:
+            self._provider = provider
+            self._last_heartbeat = self._clock()
+            if self.interactive:
+                self._draw()
+        self._ensure_ticker()
+
+    def detach(self) -> None:
+        """Remove the status line."""
+        with self._lock:
+            if self.interactive:
+                self._erase()
+            self._provider = None
+
+    def refresh(self, *, force: bool = False) -> None:
+        """Redraw the status line (throttled unless ``force``)."""
+        with self._lock:
+            if self._provider is None or not self.interactive:
+                return
+            if force or self._clock() - self._last_refresh >= self._refresh_interval:
+                self._draw()
+
+    def write_line(self, text: str, stream: TextIO | None = None) -> None:
+        """
+        Print a permanent line without breaking the status line.
+
+        The status line is erased, ``text`` is written to ``stream`` (default:
+        the status stream, i.e. stderr), and the status line is drawn again.
+        """
+        with self._lock:
+            interactive = self.interactive
+            if interactive:
+                self._erase()
+            self._write(stream if stream is not None else self.stream, text + "\n")
+            if interactive:
+                self._draw()
+
+    # ---------------------------------------------------------------------- ticker
+
+    def _ensure_ticker(self) -> None:
+        if not self._ticker_enabled or self._ticker is not None:
+            return
+        with self._lock:
+            if self._ticker is None:
+                self._ticker = threading.Thread(target=self._tick_loop, name="glh-status", daemon=True)
+                self._ticker.start()
+
+    def _tick_loop(self) -> None:
+        # Event.wait instead of time.sleep: tests patch time.sleep to skip
+        # python-gitlab's retry pauses, and the ticker must not depend on it.
+        never_set = threading.Event()
+        while not never_set.wait(self._tick_interval):
+            self.tick()
+
+    def tick(self) -> None:
+        """Periodic update: redraw on a terminal, heartbeat line otherwise."""
+        with self._lock:
+            if self._provider is None:
+                return
+            if self.interactive:
+                self._draw()
+            elif self._clock() - self._last_heartbeat >= self._heartbeat_interval:
+                self._last_heartbeat = self._clock()
+                self._write(self.stream, _single_line(self._provider()) + "\n")
+
+
+STATUS = StatusLine()
+"""Process-wide status line used by the harvester and its console log handler."""
+
+
+# ---------------------------------------------------------------------- progress
+
+
+class Progress:
+    """
+    Count the work of one phase and show it on a :class:`StatusLine`.
+
+    Rendered as ``label | 3/8 projects | info | 0:05 | ETA 0:09 | detail``.
+    ``rounds`` repeats the same total several times (one round per search
+    term): the count shown is per round, the ETA covers all rounds.
+    """
+
+    def __init__(
+            self,
+            label: str,
+            *,
+            total: int | None = None,
+            unit: str = "projects",
+            rounds: int = 1,
+            status: StatusLine | None = None,
+            clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.label = label
+        self.total = total
+        self.unit = unit
+        self.rounds = max(rounds, 1)
+        self.round = 1
+        self.done = 0
+        self.info = ""
+        self.detail = ""
+        self._status = status if status is not None else STATUS
+        self._clock = clock
+        self._started: float | None = None
+        self._finished = False
+
+    # ------------------------------------------------------------------ lifecycle
+
+    def __enter__(self) -> "Progress":
+        return self.start()
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        if not self._finished:
+            # Leave a trace of how far the phase got (Ctrl+C, fatal errors).
+            self.finish(f"{self.render()} | stopped" if exc_type is not None else None)
+
+    def start(self) -> "Progress":
+        """Start the clock and show the status line."""
+        self._started = self._clock()
+        self._status.attach(self.render)
+        return self
+
+    def finish(self, summary: str | None = None) -> float:
+        """Remove the status line, print ``summary`` (if any) and return the elapsed time."""
+        elapsed = self.elapsed
+        if not self._finished:
+            self._finished = True
+            self._status.detach()
+            if summary:
+                self._status.write_line(summary)
+        return elapsed
+
+    def note(self, text: str) -> None:
+        """Print a permanent line while the phase keeps running."""
+        self._status.write_line(text)
+
+    # -------------------------------------------------------------------- updates
+
+    def advance(self, n: int = 1, *, detail: str | None = None) -> None:
+        """Count ``n`` finished items."""
+        self.done += n
+        if detail is not None:
+            self.detail = detail
+        self._status.refresh()
+
+    def set_detail(self, detail: str) -> None:
+        """Describe the item being processed right now."""
+        self.detail = detail
+        self._status.refresh()
+
+    def set_info(self, info: str) -> None:
+        """Set the extra counter shown after the item count (e.g. hits)."""
+        self.info = info
+        self._status.refresh()
+
+    def start_round(self, number: int, label: str | None = None) -> None:
+        """Begin round ``number`` (1-based) of ``rounds``."""
+        self.round = min(max(number, 1), self.rounds)
+        self.done = 0
+        if label is not None:
+            self.label = label
+        self.detail = ""
+        self._status.refresh(force=True)
+
+    # ------------------------------------------------------------------- metrics
+
+    @property
+    def elapsed(self) -> float:
+        """Seconds since :meth:`start`."""
+        return 0.0 if self._started is None else self._clock() - self._started
+
+    def eta(self) -> float | None:
+        """Estimated seconds left for all rounds, or None if unknown."""
+        if not self.total or self.elapsed < 1.0:  # sub-second rates are noise
+            return None
+        units_total = self.total * self.rounds
+        units_done = self.total * (self.round - 1) + self.done
+        if units_done <= 0 or units_done >= units_total:
+            return None
+        return self.elapsed / units_done * (units_total - units_done)
+
+    def render(self) -> str:
+        """Status line text."""
+        parts = [self.label]
+        if self.total is not None:
+            parts.append(f"{self.done:,}/{self.total:,} {self.unit}")
+        else:
+            parts.append(f"{self.done:,} {self.unit}")
+        if self.info:
+            parts.append(self.info)
+        parts.append(format_clock(self.elapsed))
+        eta = self.eta()
+        if eta is not None:
+            parts.append(f"ETA {format_clock(eta)}")
+        if self.detail:
+            parts.append(self.detail)
+        return " | ".join(parts)

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gitlab-harvester"
-version = "0.2.15"
+version = "0.2.16"
 description = "Build a GitLab instance project index and search repositories for sensitive keywords (API-only, no cloning)."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -53,7 +53,6 @@ classifiers = [
 
 dependencies = [
   "python-gitlab>=8.0.0",
-  "tqdm>=4.66.0",
   "requests>=2.32.0",  # python-gitlab 8.x requires it
 ]
 
