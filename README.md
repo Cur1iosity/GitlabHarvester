@@ -1,8 +1,18 @@
+<div align="center">
+
+<pre>
+┏┓• ┓  ┓ ┓┏              
+┃┓┓╋┃┏┓┣┓┣┫┏┓┏┓┓┏┏┓┏╋┏┓┏┓
+┗┛┗┗┗┗┻┗┛┛┗┗┻┛ ┗┛┗ ┛┗┗ ┛ 
+</pre>
+
 # GitlabHarvester
 
 [![PyPI](https://img.shields.io/pypi/v/gitlab-harvester)](https://pypi.org/project/gitlab-harvester/)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License](https://img.shields.io/github/license/Cur1iosity/GitlabHarvester)
+
+</div>
 
 Search for keywords and secrets across every repository of a GitLab instance through the API,
 without cloning. Useful on GitLab CE, which has no instance-wide code search.
@@ -56,7 +66,8 @@ Common options:
 |---|---|
 | `-b, --branches default\|all\|N` | branches to index and search |
 | `--forks include\|skip\|branch-diff\|all-branches` | how forks are handled |
-| `--started-from 2024-06-01` | search only projects with activity since the date |
+| `--time-after DATE`, `--time-before DATE` | limit the index, its projects and the files with hits to a time window |
+| `--started-from 2024-06-01` | search only indexed projects with activity since the date |
 | `-w, --workers N` | parallel API requests, for instances without rate limits |
 | `-m dump-index`, `--dump-projects` | build or rebuild the project index |
 | `--session NAME`, `--resume` | name a session and continue it later |

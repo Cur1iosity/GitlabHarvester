@@ -8,7 +8,7 @@ Complete reference for the CLI. For a short introduction see the [README](../REA
 - [Project index](#project-index)
 - [Branches](#branches)
 - [Forks](#forks)
-- [Activity filter](#activity-filter)
+- [Time filters](#time-filters)
 - [Search terms](#search-terms)
 - [Parallel requests](#parallel-requests)
 - [Sessions and resume](#sessions-and-resume)
@@ -147,25 +147,53 @@ gitlab-harvester -u ... -t ... -s password -b all --forks branch-diff
 - If the upstream isn't in the index (for example, it isn't visible to the
   token), the fork is scanned with the regular `--scan-branches` rules.
 
-## Activity filter
+## Time filters
+
+Three levels can be limited to a time window. `DATE` is an ISO 8601 date or datetime
+(`2024-06-01`, `2024-06-01T12:00`, `2024-06-01T12:00:00+03:00`); without an offset it
+means UTC. Every bound is optional.
+
+| Level | After | Before | How it works |
+|---|---|---|---|
+| Index build | `--index-active-after` | `--index-active-before` | GitLab API filter on `/projects` (`last_activity_after/before`): projects outside the window are not even listed, so a smaller index is built faster |
+| Projects of the index | `--active-after` (alias `--started-from`) | `--active-before` | indexed projects whose `last_activity_at` is outside the window are skipped without API calls |
+| Files with hits | `--file-changed-after` | `--file-changed-before` | a hit is kept only if a commit in that branch changed its file inside the window (commits API) |
+| **All three** | `--time-after` | `--time-before` | shortcuts that set the bound on every level |
 
 ```bash
-gitlab-harvester -u ... -t ... -f words.txt --started-from 2024-06-01
-gitlab-harvester -u ... -t ... -f words.txt --started-from 2024-06-01T12:00:00+03:00
+# One window for everything: index, projects and files
+gitlab-harvester -u ... -t ... -f words.txt --time-after 2024-06-01 --time-before 2024-06-30 --dump-projects
+
+# A full index once, then searches of different periods over it
+gitlab-harvester -u ... -t ... -m dump-index
+gitlab-harvester -u ... -t ... -f words.txt --active-after 2024-06-01
+gitlab-harvester -u ... -t ... -f words.txt --active-after 2024-06-01 --file-changed-after 2024-06-01
+
+# Inventory of projects untouched since 2023 (index only)
+gitlab-harvester -u ... -t ... -m dump-index --index-active-before 2023-01-01 --index-file stale.jsonl
 ```
 
-- Projects whose `last_activity_at` is earlier than the given date are skipped
-  without API calls. GitLab updates this field on pushes and other project
-  activity, so a skipped project normally has no repository changes since that date.
-- GitLab updates `last_activity_at` at most once per hour, and some events (for
-  example, creating a branch or tag in the web UI) may not update it. Set the
-  date with a margin, e.g. a day before the previous scan.
-- The value is an ISO 8601 date or datetime. Without an offset it means UTC. The bound is inclusive.
-- The index isn't filtered: build it once, then search it with different dates.
-- Projects without `last_activity_at` (for example, from an old index) are always scanned.
-- GitLab's blob search has no date filter. Inside an active project, every file
-  of the selected branches is still searched.
-- Secrets committed before the date in skipped projects are **not** reported.
+- A specific option overrides `--time-after/--time-before`; a command-line option
+  overrides the config file. The start must not be later than the end.
+- **Index build.** The window is stored in the index `meta` record
+  (`last_activity_after`, `last_activity_before`). An existing index is reused as is,
+  so a run that asks for another window (or none) gets a warning: the index may miss
+  projects. Rebuild it with `--dump-projects`. GitLab compares strictly (`>`/`<`).
+- **Projects of the index.** Bounds are inclusive. Projects without `last_activity_at`
+  (for example, from an old index) are always scanned. GitLab updates
+  `last_activity_at` on pushes and other project activity, at most once per hour, and
+  some events (for example, creating a branch or tag in the web UI) may not update it:
+  take the dates with a margin. Secrets in skipped projects are **not** reported.
+- **Files with hits.** GitLab's blob search has no date filter, so after a branch
+  search every file with hits is checked with
+  `GET /projects/:id/repository/commits?ref_name=BRANCH&path=FILE&since=…&until=…`
+  (one request per project, branch and file, cached across terms; `Search finished`
+  shows the number of file checks). "Changed in the window" means at least one commit
+  in that branch touched the file then; the matched line itself may be older. If a
+  check fails, the hits are kept and a warning is logged.
+- The `Search plan` line reports both directions, e.g.
+  `(skipped: 1 empty, 1 inactive since 2024-05-01, 5 active after 2024-06-02)` and
+  `files changed 2024-03-01..2024-06-04`. The session `meta` record stores the windows.
 
 ## Search terms
 
@@ -334,6 +362,10 @@ are URL-encoded.
 | `-p, --proxy URL` | — | HTTP(S) proxy |
 | `--timeout SEC` | 60 | per-request timeout |
 | `-w, --workers N` | 1 | parallel API requests (1-64); only for instances without rate limits |
+| `--time-after DATE`, `--time-before DATE` | — | window for the index, its projects and the files with hits |
+| `--index-active-after/--index-active-before DATE` | — | index only projects active in the window (API filter) |
+| `--active-after DATE` (`--started-from`), `--active-before DATE` | — | search only indexed projects active in the window |
+| `--file-changed-after/--file-changed-before DATE` | — | keep hits only in files changed in the window (commits API) |
 | `-m, --mode` | `search` | `search`, `dump-index`, `dedup`, `convert` |
 | `-s, --search TERM` | — | single term |
 | `-f, --terms-file FILE` | — | file with one term per line |

@@ -312,3 +312,46 @@ def test_fault_rule_delay_only_and_raw_body():
     assert d.delay == 0.25
     assert d.response.status_code == 200 and d.response.get_data(as_text=True) == "{not json"
     assert len(d.applied) == 2
+
+
+# --------------------------------------------------------------------------- time filters
+
+
+def test_projects_activity_filters_are_strict_like_gitlab(api: GitLabApi):
+    def ids(**q):
+        status, body, _, _ = call(api, "/api/v4/projects", {"order_by": "id", "sort": "asc", "per_page": 100, **q})
+        assert status == 200
+        return [p["id"] for p in body]
+
+    assert ids(last_activity_after="2024-06-02T00:00:00Z") == [103, 201, 202, 203, 301]
+    assert ids(last_activity_before="2024-02-03T09:00:00Z") == [104]  # 105 is exactly at the bound: excluded
+    assert ids(last_activity_after="2024-06-01T00:00:00Z", last_activity_before="2024-06-03T00:00:00Z") == [101, 201]
+    assert call(api, "/api/v4/projects", {"last_activity_after": "yesterday"})[0] == 400
+
+
+def test_commits_endpoint_filters_by_path_and_time(api: GitLabApi):
+    def commits(**q):
+        status, body, _, endpoint = call(api, "/api/v4/projects/101/repository/commits", q)
+        assert status == 200 and endpoint == "commits"
+        return [c["committed_date"] for c in body]
+
+    assert commits(ref_name="main", path="config/settings.py") == ["2024-03-15T10:00:00.000Z"]
+    assert commits(ref_name="main", path="config/settings.py", since="2024-03-01T00:00:00Z") == \
+        ["2024-03-15T10:00:00.000Z"]
+    assert commits(ref_name="main", path="config/settings.py", until="2024-03-01T00:00:00Z") == []
+    # Files without an explicit date changed at the project's last activity.
+    assert commits(ref_name="main", path="README.md") == ["2024-06-01T12:00:00.000Z"]
+    assert commits(ref_name="main", path="no/such/file") == []
+    # Newest first, one commit per file, when no path is given.
+    assert commits(ref_name="main") == sorted(commits(ref_name="main"), reverse=True) and len(commits(ref_name="main")) == 3
+    assert call(api, "/api/v4/projects/101/repository/commits", {"ref_name": "nope"})[0] == 404
+    assert call(api, "/api/v4/projects/104/repository/commits", {})[1] == []
+
+
+def test_file_dates_are_inherited_with_the_files(api: GitLabApi):
+    # develop inherits main; the fork 201 inherits 101:main.
+    for pid, ref in ((101, "develop"), (201, "main")):
+        _, body, _, _ = call(api, f"/api/v4/projects/{pid}/repository/commits", {"ref_name": ref, "path": "deploy/env.example"})
+        assert [c["committed_date"] for c in body] == ["2024-01-20T10:00:00.000Z"]
+    _, body, _, _ = call(api, "/api/v4/projects/101/repository/commits", {"ref_name": "develop", "path": "scripts/debug.sh"})
+    assert [c["committed_date"] for c in body] == ["2024-06-01T12:00:00.000Z"]

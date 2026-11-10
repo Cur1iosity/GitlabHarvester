@@ -143,6 +143,9 @@ def load_config(path: str | os.PathLike[str], parser: argparse.ArgumentParser) -
             if not raw.strip():
                 continue  # empty placeholder = not set
 
+            if action.dest in values:  # e.g. both started-from and its alias active-after
+                raise ConfigError(f"{where}: duplicate key (same option as another key in the file)")
+
             if name == "token" and raw.strip().startswith(ENV_PREFIX):
                 raw = _resolve_env(raw.strip(), where)
 

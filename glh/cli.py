@@ -80,8 +80,24 @@ def parse_workers(value: str) -> int:
     raise argparse.ArgumentTypeError(f"Use an integer from 1 to {MAX_WORKERS}.")
 
 
+# (specific dest, group dest) for every time bound; see CliParser.parse().
+TIME_BOUNDS: tuple[tuple[str, str], ...] = (
+    ("index_active_after", "time_after"),
+    ("index_active_before", "time_before"),
+    ("started_from", "time_after"),
+    ("active_before", "time_before"),
+    ("file_changed_after", "time_after"),
+    ("file_changed_before", "time_before"),
+)
+TIME_WINDOWS: tuple[tuple[str, str, str], ...] = (
+    ("index_active_after", "index_active_before", "--index-active-after/--index-active-before"),
+    ("started_from", "active_before", "--active-after/--active-before"),
+    ("file_changed_after", "file_changed_before", "--file-changed-after/--file-changed-before"),
+)
+
+
 def parse_started_from(value: str) -> datetime:
-    """Parse --started-from into a timezone-aware datetime.
+    """Parse a time filter value (e.g. --started-from) into a timezone-aware datetime.
 
     Allowed values:
       - date: '2024-06-01' (midnight UTC)
@@ -126,6 +142,11 @@ class CliArgs:
     forks: str
     fork_diff_bases: str
     started_from: datetime | None
+    active_before: datetime | None
+    index_active_after: datetime | None
+    index_active_before: datetime | None
+    file_changed_after: datetime | None
+    file_changed_before: datetime | None
     search: str | None
     terms_file: str | None
     terms: tuple[str, ...]
@@ -227,17 +248,33 @@ class CliParser:
         )
         parser.add_argument("--fork-diff-bases", default="main,master,develop,dev", help="Comma-separated base branches.")
 
-        # Activity filter (search only; the index is not affected)
-        parser.add_argument(
-            "--started-from",
-            type=parse_started_from,
-            default=None,
-            metavar="DATE",
-            help="Search only projects with activity (last_activity_at) on or after DATE "
-                 "(ISO 8601, e.g. 2024-06-01 or 2024-06-01T12:00:00+03:00; without offset = UTC). "
-                 "Older projects are skipped without API calls. Note: secrets committed earlier "
-                 "but still present in skipped projects are not reported.",
+        # Time filters
+        tf = parser.add_argument_group(
+            "time filters",
+            "DATE is ISO 8601: 2024-06-01, 2024-06-01T12:00, 2024-06-01T12:00:00+03:00 (no offset = UTC). "
+            "A specific option overrides --time-after/--time-before.",
         )
+
+        def time_option(*flags: str, dest: str | None = None, help_text: str) -> None:
+            kwargs: dict[str, object] = {"type": parse_started_from, "default": None, "metavar": "DATE", "help": help_text}
+            if dest:
+                kwargs["dest"] = dest
+            tf.add_argument(*flags, **kwargs)
+
+        time_option("--time-after", help_text="Shortcut for --index-active-after, --active-after and --file-changed-after.")
+        time_option("--time-before", help_text="Shortcut for --index-active-before, --active-before and --file-changed-before.")
+        time_option("--index-active-after",
+                    help_text="Index only projects with activity after DATE (GitLab API filter: fewer pages to list).")
+        time_option("--index-active-before", help_text="Index only projects with activity before DATE (GitLab API filter).")
+        time_option("--active-after", "--started-from", dest="started_from",
+                    help_text="Search only indexed projects with activity (last_activity_at) on or after DATE; "
+                              "others are skipped without API calls. Secrets committed earlier but still present "
+                              "in skipped projects are not reported.")
+        time_option("--active-before", help_text="Search only indexed projects with activity on or before DATE.")
+        time_option("--file-changed-after",
+                    help_text="Keep only hits in files changed (by a commit in that branch) on or after DATE. "
+                              "Costs one commits API request per file with hits.")
+        time_option("--file-changed-before", help_text="Keep only hits in files changed on or before DATE.")
 
         # Search
         group = parser.add_mutually_exclusive_group()
@@ -282,6 +319,31 @@ class CliParser:
             action.default = argparse.SUPPRESS
         return set(vars(probe.parse_args(argv)))
 
+    @staticmethod
+    def _resolve_time_bounds(ns: argparse.Namespace, given: set[str], config: dict) -> None:
+        """
+        Resolve every time bound in place and drop time keys from ``config``.
+
+        Order: specific option on the CLI > --time-after/--time-before on the CLI >
+        specific key in the config file > time-after/time-before in the config file.
+        """
+        resolved: dict[str, object] = {}
+        for specific, group in TIME_BOUNDS:
+            if specific in given:
+                resolved[specific] = getattr(ns, specific)
+            elif group in given:
+                resolved[specific] = getattr(ns, group)
+            elif specific in config:
+                resolved[specific] = config[specific]
+            elif group in config:
+                resolved[specific] = config[group]
+            else:
+                resolved[specific] = None
+        for dest in {d for pair in TIME_BOUNDS for d in pair}:
+            config.pop(dest, None)
+        for dest, value in resolved.items():
+            setattr(ns, dest, value)
+
     @classmethod
     def parse(cls, argv: list[str] | None = None) -> CliArgs:
         """
@@ -315,9 +377,19 @@ class CliParser:
                     if dest not in given:
                         config.pop(dest, None)
 
+            cls._resolve_time_bounds(ns, given, config)
+
             for dest, value in config.items():
                 if dest not in given:
                     setattr(ns, dest, value)
+        else:
+            cls._resolve_time_bounds(ns, {d for d, _ in TIME_BOUNDS + (("time_after", ""), ("time_before", ""))
+                                          if getattr(ns, d) is not None}, {})
+
+        for after, before, names in TIME_WINDOWS:
+            low, high = getattr(ns, after), getattr(ns, before)
+            if low is not None and high is not None and low > high:
+                parser.error(f"{names}: the start ({low.isoformat()}) is later than the end ({high.isoformat()}).")
 
         if ns.debug:
             ns.log_level = "DEBUG"
@@ -352,6 +424,11 @@ class CliParser:
             forks=ns.forks,
             fork_diff_bases=ns.fork_diff_bases,
             started_from=ns.started_from,
+            active_before=ns.active_before,
+            index_active_after=ns.index_active_after,
+            index_active_before=ns.index_active_before,
+            file_changed_after=ns.file_changed_after,
+            file_changed_before=ns.file_changed_before,
             search=ns.search,
             terms_file=ns.terms_file,
             terms=tuple(ns.terms),

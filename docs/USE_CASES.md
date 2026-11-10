@@ -5,7 +5,7 @@ Typical scenarios and which options fit them. For the full option reference see
 
 - [1. Export the project inventory only](#1-export-the-project-inventory-only)
 - [2. Forks: scan them or not](#2-forks-scan-them-or-not)
-- [3. Only fresh findings: --started-from](#3-only-fresh-findings---started-from)
+- [3. Only fresh findings: time filters](#3-only-fresh-findings-time-filters)
 - [4. Parallel requests: --workers](#4-parallel-requests---workers)
 - [5. Baseline and re-scans](#5-baseline-and-re-scans)
 - [6. Optional: options from a config file](#6-optional-options-from-a-config-file)
@@ -74,9 +74,9 @@ only the fork's default branch. `--fork-diff-bases` (default
 because a fork often changes exactly those. Deduplication afterwards
 (`-m dedup`) removes hits that still repeat across forks and branches.
 
-## 3. Only fresh findings: --started-from
+## 3. Only fresh findings: time filters
 
-Use `--started-from DATE` when only recent changes matter: a regular re-scan after
+Use `--started-from DATE` (alias of `--active-after`) when only recent changes matter: a regular re-scan after
 a full baseline, a check after an incident, or a review of what changed during a
 sprint. Projects without activity since the date are skipped without any API
 request, which on large instances with many abandoned repositories saves most of
@@ -93,11 +93,34 @@ gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -f words.txt -
 The `Search plan` line shows how many projects were left out:
 `5 of 9 projects ... (skipped: 1 empty, 3 inactive since 2024-06-02)`.
 
+A closed time range and the other levels:
+
+```bash
+# Index only projects active in June (GitLab filters the listing: a smaller, faster index)
+gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -m dump-index \
+  --index-active-after 2024-06-01 --index-active-before 2024-06-30 --index-file june.jsonl
+
+# Search a full index for projects active in June only
+gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -f words.txt --active-after 2024-06-01 --active-before 2024-06-30
+
+# Only hits in files that were changed in June (one commits API request per file with hits)
+gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -f words.txt --file-changed-after 2024-06-01 --file-changed-before 2024-06-30
+
+# All three at once
+gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -f words.txt --time-after 2024-06-01 --time-before 2024-06-30 --dump-projects
+```
+
+The file filter narrows the report to files touched in the period, which is usually
+what a "what leaked this month" review needs; the matched line itself may be older
+than the change. An index built with a window holds only those projects: later runs
+reuse it with a warning, so rebuild it (`--dump-projects`) before a full scan.
+See [usage.md](usage.md#time-filters) for all details.
+
 Keep in mind:
 
-- The filter works per **project**, by `last_activity_at`. Inside an active project
-  every file of the selected branches is searched, including old ones, because
-  GitLab search has no date filter.
+- `--started-from` works per **project**, by `last_activity_at`. Inside an active project
+  every file of the selected branches is searched, including old ones; add
+  `--file-changed-after` to keep only hits in files changed since the date.
 - A secret committed long ago into a project that has been quiet since then is
   **not** reported. Run a full scan once as a baseline, then use `--started-from`
   for the re-scans.

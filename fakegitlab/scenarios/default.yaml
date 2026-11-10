@@ -47,13 +47,19 @@ projects:
           README.md: |
             # API service
             Internal service, see config/settings.py.
-          config/settings.py: |
-            DEBUG = False
-            DB_HOST = "db.internal.example"
-            DB_PASSWORD = "FAKE-db-password-0001"
-            API_KEY = "FAKE-api-key-0001"
-          deploy/env.example: |
-            DB_PASSWORD=change-me
+          # Explicit last change dates for the file time filter (--file-changed-*);
+          # other files changed at the project's last_activity_at.
+          config/settings.py:
+            updated_at: "2024-03-15T10:00:00.000Z"
+            content: |
+              DEBUG = False
+              DB_HOST = "db.internal.example"
+              DB_PASSWORD = "FAKE-db-password-0001"
+              API_KEY = "FAKE-api-key-0001"
+          deploy/env.example:
+            updated_at: "2024-01-20T10:00:00.000Z"
+            content: |
+              DB_PASSWORD=change-me
       develop:
         inherit: main
         files:

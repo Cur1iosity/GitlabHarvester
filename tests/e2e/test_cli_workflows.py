@@ -336,3 +336,40 @@ def test_invalid_workers_value(run_cli, value):
     proc = run_cli("-u", "http://127.0.0.1:9", "-t", "x", "-s", "password", "-w", value)
     assert proc.returncode == 2
     assert "integer from 1 to 64" in proc.stderr
+
+
+# --------------------------------------------------------------------------- time filters
+
+
+def test_dump_index_for_an_activity_window(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
+    proc = run_cli(*gl_args(fake_gitlab), "-m", "dump-index", "--index-file", "idx.jsonl",
+                   "--index-active-after", "2024-06-01", "--index-active-before", "2024-06-04", check=True)
+    meta, projects = load_index(tmp_path / "idx.jsonl")
+    assert [p["id"] for p in projects] == [202, 201, 101]
+    assert meta["last_activity_after"] == "2024-06-01T00:00:00Z"
+    assert "Indexed 3 projects (active 2024-06-01..2024-06-04)" in proc.stderr
+
+
+def test_group_time_options_filter_index_projects_and_files(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
+    proc = run_cli(*gl_args(fake_gitlab), "-s", "password", "--index-file", "idx.jsonl", "--session-file", "s.jsonl",
+                   "--time-after", "2024-03-01", "--time-before", "2024-06-04T00:00:00Z", check=True)
+
+    # Index: only projects active inside the window (API filter): 102 (05-20), 101 (06-01), 201 (06-02), 202 (06-03).
+    meta, projects = load_index(tmp_path / "idx.jsonl")
+    assert {p["id"] for p in projects} == {101, 102, 201, 202}
+    # Files: deploy/env.example (2024-01-20) is dropped, config/settings.py (2024-03-15) kept.
+    urls = [h["url"] for h in Session.load(tmp_path / "s.jsonl").hits()]
+    assert not any("env.example" in u for u in urls)
+    assert any(u.endswith("config/settings.py#L1") for u in urls)
+    assert "files changed 2024-03-01..2024-06-04" in proc.stderr
+    meta_rec = Session.load(tmp_path / "s.jsonl").records[0]
+    assert meta_rec["file_changed_after"].startswith("2024-03-01") and meta_rec["active_before"].startswith("2024-06-04")
+
+
+def test_done_line_reports_search_time(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
+    proc = run_cli(*gl_args(fake_gitlab), "-s", "token", "--index-file", "idx.jsonl", "--session-file", "s.jsonl",
+                   check=True)
+    import re
+    assert re.search(r"Done\. Keywords: 1 \| Hits: \d+ \| Search time: \d+\.\ds", proc.stdout), proc.stdout
+    summary = Session.load(tmp_path / "s.jsonl").of_type("summary")[0]
+    assert summary["elapsed_seconds"] >= 0

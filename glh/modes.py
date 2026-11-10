@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, IO
@@ -26,6 +27,7 @@ from glh.planner import ScanOptions
 from glh.postprocess.convert import convert_jsonl_to_json
 from glh.postprocess.dedup import dedup_session_file
 from glh.session import load_done_keywords
+from glh.utils.terminal_utils import format_duration
 
 # datetime.UTC exists only on Python 3.11+, while the package supports 3.10.
 UTC = timezone.utc
@@ -121,6 +123,8 @@ def _run_dump_index(args: CliArgs) -> None:
         enforce_dump=True,
         branches=args.index_branches,
         branches_per_page=args.branches_per_page,
+        last_activity_after=args.index_active_after,
+        last_activity_before=args.index_active_before,
     )
     print(f"Project index saved to: {index_file}")
 
@@ -139,6 +143,8 @@ def _run_search(args: CliArgs) -> None:
         enforce_dump=args.dump_projects,
         branches=args.index_branches,
         branches_per_page=args.branches_per_page,
+        last_activity_after=args.index_active_after,
+        last_activity_before=args.index_active_before,
     )
 
     data = glh.load_projects_from_file(index_file)
@@ -151,6 +157,9 @@ def _run_search(args: CliArgs) -> None:
         forks_mode=args.forks,
         fork_diff_bases=tuple(x.strip() for x in args.fork_diff_bases.split(",") if x.strip()),
         started_from=args.started_from,
+        active_before=args.active_before,
+        file_changed_after=args.file_changed_after,
+        file_changed_before=args.file_changed_before,
     )
 
     session_path = _resolve_session_path(glh.get_instance_id(), args.session, args.session_file)
@@ -194,24 +203,34 @@ def _run_search(args: CliArgs) -> None:
                     "forks": args.forks,
                     "fork_diff_bases": args.fork_diff_bases,
                     "started_from": args.started_from.isoformat() if args.started_from else None,
+                    "active_before": args.active_before.isoformat() if args.active_before else None,
+                    "file_changed_after": args.file_changed_after.isoformat() if args.file_changed_after else None,
+                    "file_changed_before": args.file_changed_before.isoformat() if args.file_changed_before else None,
                     "keywords_count": len(keywords),
                 },
             )
 
+        search_started = time.perf_counter()
         _, hits = glh.search_keywords(
             projects=projects,
             keywords=keywords,
             options=options,
             session_file=sess_fp,
         )
+        search_elapsed = time.perf_counter() - search_started
 
         _write_jsonl_line(
             sess_fp,
-            {"type": "summary", "hits": hits, "timestamp_utc": datetime.now(UTC).isoformat()},
+            {
+                "type": "summary",
+                "hits": hits,
+                "elapsed_seconds": round(search_elapsed, 2),
+                "timestamp_utc": datetime.now(UTC).isoformat(),
+            },
         )
 
     print(f"Session saved to: {session_path}")
-    print(f"Done. Keywords: {len(keywords)} | Hits: {hits}")
+    print(f"Done. Keywords: {len(keywords)} | Hits: {hits} | Search time: {format_duration(search_elapsed)}")
 
 
 def _require_path(value: str | None, *, name: str) -> Path:

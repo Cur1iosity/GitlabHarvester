@@ -66,6 +66,13 @@ class Project:
     forked_from: int | dict[str, Any] | None
     # branch name -> {file path -> file content}; insertion order is preserved.
     branches: dict[str, dict[str, str]] = field(default_factory=dict)
+    # branch name -> {file path -> last change timestamp}; files without an
+    # explicit `updated_at` changed at the project's last_activity_at.
+    file_updated: dict[str, dict[str, str]] = field(default_factory=dict)
+
+    def file_updated_at(self, branch: str, path: str) -> str:
+        """Timestamp of the last commit that touched ``path`` in ``branch``."""
+        return self.file_updated.get(branch, {}).get(path) or self.last_activity_at
 
     @property
     def path(self) -> str:
@@ -304,14 +311,20 @@ def _format_template(value: Any, **ctx: Any) -> Any:
     return value
 
 
-def _resolve_branches(projects_raw: dict[int, dict[str, Any]]) -> dict[int, dict[str, dict[str, str]]]:
+def _resolve_branches(
+        projects_raw: dict[int, dict[str, Any]],
+) -> tuple[dict[int, dict[str, dict[str, str]]], dict[int, dict[str, dict[str, str]]]]:
     """
     Resolve branch file trees, following ``inherit`` references.
 
     Branch spec forms::
 
         main:                        # plain files
-          files: {path: content}
+          files:
+            path: content
+            other/path:                # or a mapping with the last change time
+              content: ...
+              updated_at: "2024-05-01T00:00:00.000Z"
         develop:
           inherit: main              # same project branch
           files: {...}               # added/overridden files
@@ -320,6 +333,7 @@ def _resolve_branches(projects_raw: dict[int, dict[str, Any]]) -> dict[int, dict
           inherit: "101:main"        # branch of another project (forks)
     """
     resolved: dict[tuple[int, str], dict[str, str]] = {}
+    dates: dict[tuple[int, str], dict[str, str]] = {}
     in_progress: set[tuple[int, str]] = set()
 
     def spec_of(pid: int, branch: str) -> dict[str, Any]:
@@ -341,28 +355,44 @@ def _resolve_branches(projects_raw: dict[int, dict[str, Any]]) -> dict[int, dict
 
         spec = spec_of(pid, branch)
         files: dict[str, str] = {}
+        updated: dict[str, str] = {}
         parent = spec.get("inherit")
         if parent:
             parent = str(parent)
             if ":" in parent and parent.split(":", 1)[0].isdigit():
                 ppid_s, pbranch = parent.split(":", 1)
-                files.update(resolve(int(ppid_s), pbranch))
+                parent_key = (int(ppid_s), pbranch)
             else:
-                files.update(resolve(pid, parent))
+                parent_key = (pid, parent)
+            files.update(resolve(*parent_key))
+            updated.update(dates[parent_key])
 
         for path, content in (spec.get("files") or {}).items():
-            files[str(path)] = "" if content is None else str(content)
+            path = str(path)
+            if isinstance(content, dict):
+                files[path] = str(content.get("content") or "")
+                if content.get("updated_at"):
+                    updated[path] = str(content["updated_at"])
+                else:
+                    updated.pop(path, None)
+            else:
+                files[path] = "" if content is None else str(content)
+                updated.pop(path, None)
         for path in spec.get("delete") or []:
             files.pop(str(path), None)
+            updated.pop(str(path), None)
 
         in_progress.discard(key)
         resolved[key] = files
+        dates[key] = updated
         return files
 
     out: dict[int, dict[str, dict[str, str]]] = {}
+    out_dates: dict[int, dict[str, dict[str, str]]] = {}
     for pid, proj in projects_raw.items():
         out[pid] = {str(b): resolve(pid, str(b)) for b in (proj.get("branches") or {})}
-    return out
+        out_dates[pid] = {str(b): dates[(pid, str(b))] for b in (proj.get("branches") or {})}
+    return out, out_dates
 
 
 def build_scenario(doc: dict[str, Any], *, source: str | None = None) -> Scenario:
@@ -397,7 +427,7 @@ def build_scenario(doc: dict[str, Any], *, source: str | None = None) -> Scenari
             raise ScenarioError(f"Project {pid} has no path_with_namespace.")
         projects_raw[pid] = p
 
-    branch_trees = _resolve_branches(projects_raw)
+    branch_trees, branch_dates = _resolve_branches(projects_raw)
 
     projects: list[Project] = []
     for pid, p in projects_raw.items():
@@ -439,6 +469,7 @@ def build_scenario(doc: dict[str, Any], *, source: str | None = None) -> Scenari
                 last_activity_at=str(p.get("last_activity_at") or created_at),
                 forked_from=forked_from,
                 branches=branches,
+                file_updated=branch_dates[pid],
             )
         )
 

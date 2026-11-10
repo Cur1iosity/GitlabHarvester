@@ -27,16 +27,70 @@ class ScanOptions:
             - "all-branches": scan every branch of forks (potentially slow).
         fork_diff_bases: Branch names always considered for scanning in forks when
             forks_mode="branch-diff" (e.g., main/master/develop/dev).
-        started_from: Optional timezone-aware lower bound for project activity.
-            Projects whose indexed ``last_activity_at`` is earlier are skipped
-            (GitLab updates it on pushes and other activity, at most once per
-            hour, so such repositories normally have no changes since that
-            moment). None disables the filter.
+        started_from: Optional timezone-aware lower bound for project activity
+            (--active-after, alias --started-from). Projects whose indexed
+            ``last_activity_at`` is earlier are skipped (GitLab updates it on
+            pushes and other activity, at most once per hour, so such
+            repositories normally have no changes since that moment).
+        active_before: Optional upper bound for project activity (--active-before).
+            Projects whose ``last_activity_at`` is later are skipped.
+        file_changed_after / file_changed_before: Optional window for the files
+            with hits (--file-changed-after/--file-changed-before). A hit is kept
+            only if a commit touched its file in the branch inside the window
+            (checked with the commits API, one request per file).
+        None disables a bound; bounds are inclusive.
     """
     scan_branches: BranchesMode = "default"  # default|all|N
     forks_mode: str = "include"  # skip|include|branch-diff|all-branches
     fork_diff_bases: tuple[str, ...] = ("main", "master", "develop", "dev")
     started_from: datetime | None = None
+    active_before: datetime | None = None
+    file_changed_after: datetime | None = None
+    file_changed_before: datetime | None = None
+
+    @property
+    def file_window(self) -> "TimeWindow":
+        """Time window for files with hits."""
+        return TimeWindow(self.file_changed_after, self.file_changed_before)
+
+
+@dataclass(frozen=True, slots=True)
+class TimeWindow:
+    """An optional [after, before] time range (both bounds inclusive, either may be None)."""
+
+    after: datetime | None = None
+    before: datetime | None = None
+
+    def __bool__(self) -> bool:
+        return self.after is not None or self.before is not None
+
+    def contains(self, moment: datetime) -> bool:
+        """True if ``moment`` lies inside the window."""
+        return (self.after is None or moment >= self.after) and (self.before is None or moment <= self.before)
+
+    def describe(self) -> str:
+        """'since 2024-06-01', 'until 2024-07-01' or '2024-06-01..2024-07-01'."""
+        if self.after is not None and self.before is not None:
+            return f"{format_bound(self.after)}..{format_bound(self.before)}"
+        if self.after is not None:
+            return f"since {format_bound(self.after)}"
+        if self.before is not None:
+            return f"until {format_bound(self.before)}"
+        return "any time"
+
+
+def format_bound(value: datetime | None) -> str:
+    """Show midnight UTC as a plain date, anything else as full ISO 8601."""
+    if value is None:
+        return "?"
+    if value.utcoffset() == timedelta(0) and (value.hour, value.minute, value.second) == (0, 0, 0):
+        return value.date().isoformat()
+    return value.isoformat()
+
+
+def format_api_time(value: datetime) -> str:
+    """ISO 8601 in UTC with a Z suffix, as accepted by GitLab API time parameters."""
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def parse_timestamp(value: Any) -> datetime | None:
@@ -75,6 +129,20 @@ def is_active_since(project: dict[str, Any], started_from: datetime | None) -> b
     if last_activity is None:
         return True
     return last_activity >= started_from
+
+
+def is_active_before(project: dict[str, Any], active_before: datetime | None) -> bool:
+    """
+    Check whether a project's last activity is at or before ``active_before``.
+
+    Projects without a parsable ``last_activity_at`` pass, like in is_active_since().
+    """
+    if active_before is None:
+        return True
+    last_activity = parse_timestamp(project.get("last_activity_at"))
+    if last_activity is None:
+        return True
+    return last_activity <= active_before
 
 
 def is_fork_project(project: dict[str, Any]) -> bool:
@@ -133,6 +201,7 @@ def get_upstream_id(project: dict[str, Any]) -> int | None:
 SKIP_EMPTY = "empty"
 SKIP_FORK = "fork"
 SKIP_INACTIVE = "inactive"
+SKIP_TOO_RECENT = "too-recent"
 SKIP_NO_BRANCHES = "no-branches"
 
 
@@ -145,6 +214,7 @@ def skip_reason(project: dict[str, Any], options: ScanOptions) -> str | None:
     - SKIP_EMPTY: empty repositories are always skipped.
     - SKIP_FORK: forked projects are skipped when forks_mode is "skip".
     - SKIP_INACTIVE: projects inactive since options.started_from are skipped.
+    - SKIP_TOO_RECENT: projects active after options.active_before are skipped.
 
     Args:
         project: Project dictionary from the project index.
@@ -159,6 +229,8 @@ def skip_reason(project: dict[str, Any], options: ScanOptions) -> str | None:
         return SKIP_FORK
     if not is_active_since(project, options.started_from):
         return SKIP_INACTIVE
+    if not is_active_before(project, options.active_before):
+        return SKIP_TOO_RECENT
     return None
 
 
@@ -347,12 +419,14 @@ class ScanPlan:
         total_projects: Number of projects in the index.
         skipped: Excluded project count per SKIP_* reason.
         started_from: Activity bound used for SKIP_INACTIVE (for messages).
+        active_before: Activity bound used for SKIP_TOO_RECENT (for messages).
         projects_by_id: Index lookup used for fork/upstream resolution.
     """
     targets: tuple[tuple[dict[str, Any], tuple[str, ...]], ...]
     total_projects: int
     skipped: dict[str, int] = field(default_factory=dict)
     started_from: datetime | None = None
+    active_before: datetime | None = None
     projects_by_id: dict[int, dict[str, Any]] = field(default_factory=dict, repr=False)
 
     @property
@@ -376,21 +450,14 @@ class ScanPlan:
         if n := self.skipped.get(SKIP_FORK, 0):
             reasons.append(f"{n:,} fork{'s' if n != 1 else ''}")
         if n := self.skipped.get(SKIP_INACTIVE, 0):
-            reasons.append(f"{n:,} inactive since {_format_bound(self.started_from)}")
+            reasons.append(f"{n:,} inactive since {format_bound(self.started_from)}")
+        if n := self.skipped.get(SKIP_TOO_RECENT, 0):
+            reasons.append(f"{n:,} active after {format_bound(self.active_before)}")
         if n := self.skipped.get(SKIP_NO_BRANCHES, 0):
             reasons.append(f"{n:,} without branches to scan")
         if reasons:
             text += f" (skipped: {', '.join(reasons)})"
         return text
-
-
-def _format_bound(value: datetime | None) -> str:
-    """Show midnight UTC as a plain date, anything else as full ISO 8601."""
-    if value is None:
-        return "?"
-    if value.utcoffset() == timedelta(0) and (value.hour, value.minute, value.second) == (0, 0, 0):
-        return value.date().isoformat()
-    return value.isoformat()
 
 
 def build_scan_plan(projects: list[dict[str, Any]], options: ScanOptions) -> ScanPlan:
@@ -430,5 +497,6 @@ def build_scan_plan(projects: list[dict[str, Any]], options: ScanOptions) -> Sca
         total_projects=len(projects),
         skipped=dict(skipped),
         started_from=options.started_from,
+        active_before=options.active_before,
         projects_by_id=projects_by_id,
     )

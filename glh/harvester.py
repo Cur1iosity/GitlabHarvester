@@ -20,7 +20,15 @@ from gitlab.v4.objects import Project
 from requests import Session
 
 from glh.exceptions import GitlabHarvesterError
-from glh.planner import ScanOptions, ScanPlan, branches_to_scan, build_scan_plan
+from glh.planner import (
+    ScanOptions,
+    ScanPlan,
+    TimeWindow,
+    branches_to_scan,
+    build_scan_plan,
+    format_api_time,
+    parse_timestamp,
+)
 from glh import workers as pool
 from glh.utils import logging_utils, terminal_utils
 from glh.utils.terminal_utils import human_int
@@ -67,6 +75,7 @@ class _BranchTask:
     project: dict[str, Any]
     branches: tuple[str, ...]
     branch_no: int
+    file_window: TimeWindow | None = None
 
     @property
     def branch(self) -> str:
@@ -101,6 +110,9 @@ class GitlabHarvester:
         self._local = threading.local()
         self._gl_main: Gitlab | None = None
         self._client_kwargs: dict[str, Any] | None = None
+        # (project id, branch, path, window) -> changed inside the window; shared by workers.
+        self._file_change_cache: dict[tuple[Any, ...], bool] = {}
+        self._file_change_lock = threading.Lock()
 
         self.log_level: int = logging_utils.coerce_log_level(log_level)
         self.log_file: str | None = log_file
@@ -329,9 +341,14 @@ class GitlabHarvester:
             filename: str | None = None,
             order_by: str = "id",
             sort: str = "desc",
+            last_activity_after: datetime | None = None,
+            last_activity_before: datetime | None = None,
     ) -> list[dict[str, Any]]:
         """
         Retrieve projects from the GitLab instance with a reduced set of key fields.
+
+        last_activity_after/last_activity_before are passed to GitLab as API
+        filters, so projects outside the window are not even listed.
 
         Projects can be either collected in memory and returned as a list, or streamed
         directly to a file in NDJSON (JSONL) format to minimize memory usage. When
@@ -364,10 +381,18 @@ class GitlabHarvester:
         fp = open(tmp_filename, "w", encoding="utf-8") if tmp_filename else None
 
         host = self.get_host()
-        progress = terminal_utils.Progress(f"Indexing {self._display_host()}", unit="projects").start()
+
+        activity: dict[str, str] = {}
+        if last_activity_after is not None:
+            activity["last_activity_after"] = format_api_time(last_activity_after)
+        if last_activity_before is not None:
+            activity["last_activity_before"] = format_api_time(last_activity_before)
+        window = TimeWindow(last_activity_after, last_activity_before)
+        window_text = f" (active {window.describe()})" if window else ""
+        progress = terminal_utils.Progress(f"Indexing {self._display_host()}{window_text}", unit="projects").start()
 
         def fetch_page(number: int) -> list[Project]:
-            return self._gl.projects.list(page=number, per_page=per_page, order_by=order_by, sort=sort)
+            return self._gl.projects.list(page=number, per_page=per_page, order_by=order_by, sort=sort, **activity)
 
         try:
             # Pages are fetched up to 2 x workers ahead but processed in order; the
@@ -410,7 +435,7 @@ class GitlabHarvester:
         finally:
             elapsed = round(time.perf_counter() - start, 2)
             progress.finish(
-                f"Indexed {terminal_utils.plural(pr_counter, 'project')} from {self._display_host()} in "
+                f"Indexed {terminal_utils.plural(pr_counter, 'project')}{window_text} from {self._display_host()} in "
                 f"{terminal_utils.format_duration(elapsed)}{outcome}"
             )
 
@@ -427,6 +452,8 @@ class GitlabHarvester:
                     "order_by": order_by,
                     "sort": sort,
                     "per_page": per_page,
+                    "last_activity_after": activity.get("last_activity_after"),
+                    "last_activity_before": activity.get("last_activity_before"),
                     "is_completed": is_completed,
                 }
                 with open(filename, "w", encoding="utf-8") as out_fp:
@@ -495,9 +522,15 @@ class GitlabHarvester:
             enforce_dump: bool = False,
             branches: str | int = "default",  # "default" | "all" | int
             branches_per_page: int = 100,
+            last_activity_after: datetime | None = None,
+            last_activity_before: datetime | None = None,
     ) -> str:
         """
         Build (or rebuild) the Instance Project Index file (JSONL/NDJSON) and optionally enrich it with branches.
+
+        last_activity_after/last_activity_before limit the index to projects
+        active in that window (GitLab API filter). An existing index built
+        with a different window is reused with a warning.
 
         branches:
             - "default": store only default branch (no GitLab branch API calls)
@@ -518,7 +551,8 @@ class GitlabHarvester:
                 filename,
             )
             # Base index (meta + projects without branches)
-            self.fetch_projects(per_page=per_page, filename=filename, order_by=order_by, sort=sort)
+            self.fetch_projects(per_page=per_page, filename=filename, order_by=order_by, sort=sort,
+                                last_activity_after=last_activity_after, last_activity_before=last_activity_before)
 
             if branches is not None:
                 self.enrich_project_index_with_branches(
@@ -539,6 +573,16 @@ class GitlabHarvester:
                     "Use --dump-projects to rebuild it.",
                     filename,
                 )
+            if isinstance(meta, dict):
+                built = (meta.get("last_activity_after"), meta.get("last_activity_before"))
+                wanted = tuple(format_api_time(v) if v is not None else None
+                               for v in (last_activity_after, last_activity_before))
+                if built != wanted:
+                    self.logger.warning(
+                        "Existing project index %s was built for projects active %s, this run asks for %s. "
+                        "It is reused as is; use --dump-projects to rebuild it.",
+                        filename, self._window_text(*built), self._window_text(*wanted),
+                    )
         return filename
 
     def enrich_project_index_with_branches(
@@ -621,6 +665,11 @@ class GitlabHarvester:
         if branches != "default":
             self.logger.info("Project index enriched with branches (mode=%s): %s", branches, filename)
         return filename
+
+    @staticmethod
+    def _window_text(after: str | None, before: str | None) -> str:
+        """Describe an activity window stored as API strings (None = unbounded)."""
+        return TimeWindow(parse_timestamp(after), parse_timestamp(before)).describe()
 
     @staticmethod
     def _count_nonempty_projects(filename: str) -> int:
@@ -869,18 +918,21 @@ class GitlabHarvester:
         hits_before = hit_counter
         parallel = f", {self.workers} workers" if self.workers > 1 else ""
 
-        terminal_utils.STATUS.write_line(f"Search plan: {terms_text}, {plan.describe()}{parallel}")
+        files = f", files changed {options.file_window.describe()}" if options.file_window else ""
+        terminal_utils.STATUS.write_line(f"Search plan: {terms_text}, {plan.describe()}{files}{parallel}")
 
         with terminal_utils.Progress(
                 "Searching", total=plan.project_count, unit="projects", rounds=n_terms,
         ) as progress:
             res, hit_counter = self._run_search(
                 keywords, plan, hit_counter=hit_counter, session_file=session_file,
-                progress=progress, checkpoints=True,
+                progress=progress, checkpoints=True, file_window=options.file_window or None,
             )
+            checks = (f", {terminal_utils.plural(len(self._file_change_cache), 'file check')}"
+                      if options.file_window else "")
             progress.finish(
                 f"Search finished: {terms_text} x {terminal_utils.plural(plan.project_count, 'project')}, "
-                f"{terminal_utils.plural(hit_counter - hits_before, 'hit')} in "
+                f"{terminal_utils.plural(hit_counter - hits_before, 'hit')}{checks} in "
                 f"{terminal_utils.format_duration(progress.elapsed)}"
             )
 
@@ -917,7 +969,8 @@ class GitlabHarvester:
         progress = progress or terminal_utils.Progress(f"Searching '{term}'", total=plan.project_count).start()
         try:
             res, hit_counter = self._run_search([term], plan, hit_counter=hit_counter, session_file=session_file,
-                                                progress=progress, checkpoints=False)
+                                                progress=progress, checkpoints=False,
+                                                file_window=options.file_window or None)
         finally:
             if own:
                 progress.finish()
@@ -927,13 +980,50 @@ class GitlabHarvester:
         """Worker: search one term in one branch of one project (all result pages)."""
         project_url = task.project["web_url"]
         project_obj: Project = self._gl.projects.get(task.project["id"], lazy=True)
+        path_filter = None
+        if task.file_window:
+            def path_filter(path: str) -> bool:
+                return self._file_changed_in_window(task.project["id"], task.branch, path, task.file_window)
         try:
             hits, _ = self.scan_branch(project=project_obj, branch=task.branch, term=task.term,
-                                       project_url=project_url)
+                                       project_url=project_url, path_filter=path_filter)
         except (gitlab.exceptions.GitlabError, requests.exceptions.RequestException) as e:
             self.logger.warning("%s | %s Branch: %s", e, project_url, task.branch)
             hits = []
         return hits
+
+    def _file_changed_in_window(self, project_id: Any, branch: str, path: str, window: TimeWindow) -> bool:
+        """
+        True if a commit touched ``path`` in ``branch`` inside ``window``.
+
+        Uses GET /projects/:id/repository/commits with ref_name, path, since and
+        until (one request per file, cached across terms and workers). On an
+        API error the hit is kept and a warning is logged.
+        """
+        key = (project_id, branch, path, window.after, window.before)
+        with self._file_change_lock:
+            if key in self._file_change_cache:
+                return self._file_change_cache[key]
+
+        params: dict[str, Any] = {"ref_name": branch, "path": path}
+        if window.after is not None:
+            params["since"] = format_api_time(window.after)
+        if window.before is not None:
+            params["until"] = format_api_time(window.before)
+        try:
+            # `path` is reserved by python-gitlab's list() (it overrides the URL),
+            # so the API filters go through query_parameters.
+            commits = self._gl.projects.get(project_id, lazy=True).commits.list(
+                query_parameters=params, page=1, per_page=1)
+            changed = bool(commits)
+        except (gitlab.exceptions.GitlabError, requests.exceptions.RequestException) as e:
+            self.logger.warning("Cannot check changes of %s in branch %s of project %s, keeping its hits: %s",
+                                path, branch, project_id, e)
+            changed = True
+
+        with self._file_change_lock:
+            self._file_change_cache[key] = changed
+        return changed
 
     def _run_search(
             self,
@@ -944,6 +1034,7 @@ class GitlabHarvester:
             session_file: IO | None,
             progress: terminal_utils.Progress,
             checkpoints: bool,
+            file_window: TimeWindow | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         """
         Search ``terms`` over ``plan`` with ``self.workers`` threads.
@@ -1009,7 +1100,7 @@ class GitlabHarvester:
                         if self.workers <= 1:
                             info = branch if len(branches) == 1 else f"{branch} [{branch_no + 1}/{len(branches)}]"
                             progress.set_detail(f"{project.get('path_with_namespace', project['web_url'])} @ {info}")
-                        yield _BranchTask(term_no, term, project_no, project, branches, branch_no)
+                        yield _BranchTask(term_no, term, project_no, project, branches, branch_no, file_window)
 
         if n_terms:
             progress.start_round(1, label(0))
@@ -1128,6 +1219,7 @@ class GitlabHarvester:
             project_url: str,
             hit_counter: int = 0,
             per_page: int = 100,
+            path_filter: Callable[[str], bool] | None = None,
             **kwargs,
     ) -> tuple[list[dict], int]:
         """
@@ -1144,6 +1236,8 @@ class GitlabHarvester:
             project_url: Base web URL of the project.
             per_page: Number of results per page.
             hit_counter: Global hit counter to be incremented.
+            path_filter: Optional predicate on the file path; hits in files for
+                which it returns False are dropped (used by the file time filter).
             **kwargs: Additional parameters passed to GitLab search API.
 
         Returns:
@@ -1174,6 +1268,12 @@ class GitlabHarvester:
         except (gitlab.exceptions.GitlabError, requests.exceptions.RequestException) as e:
             # Keep results of already fetched pages; a timeout must not abort the whole scan.
             self.logger.warning("[%s] %s: %s", project.id, project_url, e)
+
+        if path_filter is not None and search_results:
+            verdict: dict[str, bool] = {}
+            search_results = [x for x in search_results
+                              if verdict.setdefault(x["path"], path_filter(x["path"]) if x["path"] not in verdict
+                                                    else verdict[x["path"]])]
 
         # Branch names and paths may contain '#', '?', '%', spaces, etc.
         branch_url: str = f"{project_url}/-/tree/{quote(branch, safe='/')}"
