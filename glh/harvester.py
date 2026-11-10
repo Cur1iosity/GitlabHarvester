@@ -1061,6 +1061,8 @@ class GitlabHarvester:
         results: list[list[tuple[int, dict[str, Any]]]] = [[] for _ in terms]
         partial: dict[tuple[int, int], dict[int, list[dict[str, Any]]]] = {}
         state = {"next_term": 0, "term_started": progress.elapsed}
+        # When the first task of each term was handed out (feeder thread with workers > 1).
+        term_begun: dict[int, float] = {}
 
         def label(number: int) -> str:
             term = terms[number]
@@ -1084,17 +1086,20 @@ class GitlabHarvester:
                 if checkpoints and n_terms > 1:
                     progress.note(
                         f"Term {number + 1}/{n_terms} '{terms[number]}': "
+                        f"{terminal_utils.plural(plan.project_count, 'project')}, "
                         f"{terminal_utils.plural(term_hits[number], 'hit')} in "
                         f"{terminal_utils.format_duration(progress.elapsed - state['term_started'])}"
                     )
                 state["term_started"] = progress.elapsed
                 state["next_term"] += 1
                 if state["next_term"] < n_terms:
-                    progress.start_round(state["next_term"] + 1, label(state["next_term"]))
+                    progress.start_round(state["next_term"] + 1, label(state["next_term"]),
+                                         started=term_begun.get(state["next_term"]))
                     progress.done = plan.project_count - projects_left[state["next_term"]]
 
         def tasks():
             for term_no, term in enumerate(terms):
+                term_begun.setdefault(term_no, progress.clock())
                 for project_no, (project, branches) in enumerate(plan.targets):
                     for branch_no, branch in enumerate(branches):
                         if self.workers <= 1:

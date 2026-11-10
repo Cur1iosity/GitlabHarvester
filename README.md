@@ -1,11 +1,5 @@
 <div align="center">
 
-<pre>
-┏┓• ┓  ┓ ┓┏              
-┃┓┓╋┃┏┓┣┓┣┫┏┓┏┓┓┏┏┓┏╋┏┓┏┓
-┗┛┗┗┗┗┻┗┛┛┗┗┻┛ ┗┛┗ ┛┗┗ ┛ 
-</pre>
-
 # GitlabHarvester
 
 [![PyPI](https://img.shields.io/pypi/v/gitlab-harvester)](https://pypi.org/project/gitlab-harvester/)
@@ -71,6 +65,7 @@ Common options:
 | `-w, --workers N` | parallel API requests, for instances without rate limits |
 | `-m dump-index`, `--dump-projects` | build or rebuild the project index |
 | `--session NAME`, `--resume` | name a session and continue it later |
+| `--post-process dedup,convert`, `--final-only` | deduplicate and convert the session right after the search |
 | `-c, --config FILE` | read options from an INI file ([config.example.ini](config.example.ini)) |
 
 See [docs/usage.md](docs/usage.md) for every option, branch and fork strategies, and the output formats,

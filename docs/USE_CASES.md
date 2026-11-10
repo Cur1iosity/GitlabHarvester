@@ -8,7 +8,9 @@ Typical scenarios and which options fit them. For the full option reference see
 - [3. Only fresh findings: time filters](#3-only-fresh-findings-time-filters)
 - [4. Parallel requests: --workers](#4-parallel-requests---workers)
 - [5. Baseline and re-scans](#5-baseline-and-re-scans)
-- [6. Optional: options from a config file](#6-optional-options-from-a-config-file)
+- [6. Deduplicated JSON report in one run: --post-process](#6-deduplicated-json-report-in-one-run---post-process)
+- [7. History of runs in a log file](#7-history-of-runs-in-a-log-file)
+- [8. Optional: options from a config file](#8-optional-options-from-a-config-file)
 
 All examples pass the options on the command line; that is the main way to run the tool.
 
@@ -172,7 +174,60 @@ gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -f words.txt \
   --index-file gitlab_index.jsonl -b all --forks branch-diff --started-from 2024-06-24 --session week-26 --resume
 ```
 
-## 6. Optional: options from a config file
+## 6. Deduplicated JSON report in one run: --post-process
+
+The same secret usually shows up many times: in every branch, in every fork, for
+several terms. Instead of running `-m dedup` and `-m convert` after the search, ask
+for them in the search command:
+
+```bash
+# Keep everything: the raw session, the deduplicated JSONL and the JSON report
+gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -f words.txt -b all --forks branch-diff \
+  --session audit --post-process dedup,convert
+# -> audit.jsonl, audit.deduped.jsonl, audit.deduped.converted.json
+
+# Keep only the final JSON report (saves space)
+gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -f words.txt -b all --forks branch-diff \
+  --session audit --post-process dedup,convert --final-only
+# -> audit.deduped.converted.json
+```
+
+When to keep all files (the default):
+
+- the raw session is the evidence: every place where a secret occurs, including
+  duplicates in other branches and forks, is what has to be cleaned up;
+- the session can still be resumed (`--resume`) or post-processed again with other
+  options (`--no-normalize-hits`, another `--hash-algo`).
+
+When `--final-only` fits: large scans where only the report matters, automated runs
+that hand one file to another tool, or little disk space. The original JSONL is
+deleted, so the run can't be resumed or deduplicated differently later. Nothing is
+deleted if the search is interrupted or a step fails.
+
+Only one step is fine too: `--post-process dedup` (JSONL without duplicates) or
+`--post-process convert` (a JSON array of the raw session).
+
+## 7. History of runs in a log file
+
+Pass the same `--log-file` to every run. Whatever `--log-level` is, each run appends
+a summary: options, index file and its build time, search plan, projects, hits and
+time per term, written files, total duration and outcome.
+
+```bash
+gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -f words.txt -b all \
+  --started-from 2024-06-01 --session june --log-file audits.log
+
+# Later: how long did the searches take, with which options, and what did they find?
+grep -E "Options:|Search plan:|Search finished:|Run (finished|failed)" audits.log
+grep "Term " audits.log            # hits and time per term over all runs
+grep "run 2f3724f3" audits.log     # everything about one run
+```
+
+The run id (`[run 2f3724f3]`) ties together the lines of one run. Use it to compare
+filters (`--forks`, time windows, `--workers`) against duration and number of hits.
+Details: [usage.md](usage.md#run-journal).
+
+## 8. Optional: options from a config file
 
 Any of the options above can also be put into an INI file and passed with
 `-c/--config FILE`. Options given on the command line override the values from the file:

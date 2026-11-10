@@ -12,12 +12,14 @@ This module provides:
 from __future__ import annotations
 
 import argparse
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from importlib.metadata import version, PackageNotFoundError
 
 from glh.config import TERMS_DEST, ConfigError, load_config
 from glh.planner import parse_timestamp
+from glh.postprocess.pipeline import normalize_steps
 
 
 BranchesMode = str | int  # "default" | "all" | int
@@ -39,8 +41,26 @@ def _get_version() -> str:
         return "unknown"
 
 
-def get_banner() -> str:
-    """Return the CLI banner with version suffix."""
+def _can_encode(text: str, stream: object) -> bool:
+    """True if ``stream``'s encoding can represent ``text`` (no encoding attribute = assume UTF-8)."""
+    encoding = getattr(stream, "encoding", None) or "utf-8"
+    try:
+        text.encode(encoding)
+    except (UnicodeEncodeError, LookupError):
+        return False
+    return True
+
+
+def get_banner(stream: object | None = None) -> str:
+    """
+    Return the CLI banner with version suffix.
+
+    The box-drawing banner needs a Unicode-capable stream. If ``stream`` uses
+    an encoding without those characters (e.g. cp1252 or cp866 in a redirected
+    Windows console), a plain-text banner is returned instead.
+    """
+    if stream is not None and not _can_encode(_BANNER, stream):
+        return f"GitlabHarvester v{_get_version()}"
     return f"{_BANNER} v{_get_version()}"
 
 
@@ -70,6 +90,14 @@ def parse_branches(value: str) -> BranchesMode:
 
 
 MAX_WORKERS = 64
+
+
+def parse_post_process(value: str) -> tuple[str, ...]:
+    """Parse --post-process: comma-separated steps (dedup, convert), returned in run order."""
+    try:
+        return normalize_steps(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(f"{e}. Use dedup, convert or dedup,convert.") from None
 
 
 def parse_workers(value: str) -> int:
@@ -156,6 +184,8 @@ class CliArgs:
 
     input_file: str | None
     output_file: str | None
+    post_process: tuple[str, ...]
+    final_only: bool
 
     sqlite_path: str | None
     hash_algo: str
@@ -173,7 +203,8 @@ class CliParser:
         parser = argparse.ArgumentParser(
             prog="gitlab-harvester",
             formatter_class=argparse.RawDescriptionHelpFormatter,
-            description=f"{get_banner()}\nSearch GitLab instances for sensitive data, secrets, and patterns "
+            # Help goes to stdout: the banner must be encodable there.
+            description=f"{get_banner(sys.stdout)}\nSearch GitLab instances for sensitive data, secrets, and patterns "
                         f"across projects and branches using a local project index.",
         )
 
@@ -289,6 +320,22 @@ class CliParser:
                             help="Resume from existing session file.")
 
         # Postprocess
+        parser.add_argument(
+            "--post-process",
+            type=parse_post_process,
+            default=(),
+            metavar="STEPS",
+            help="After a finished search, run these steps on the session file: dedup, convert or "
+                 "dedup,convert (always in this order). Writes <session>.deduped.jsonl and "
+                 "<session>[.deduped].converted.json; the dedup/convert options below apply.",
+        )
+        parser.add_argument(
+            "--final-only",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help="With --post-process: keep only the last file and delete the session JSONL and "
+                 "intermediate files (saves space; the session can't be resumed afterwards).",
+        )
         parser.add_argument("--input-file", default=None, help="Input file for postprocess modes.")
         parser.add_argument("--output-file", default=None, help="Output file for postprocess modes.")
 
@@ -437,6 +484,8 @@ class CliParser:
             resume=ns.resume,
             input_file=ns.input_file,
             output_file=ns.output_file,
+            post_process=tuple(ns.post_process),
+            final_only=ns.final_only,
             sqlite_path=ns.sqlite_path,
             hash_algo=ns.hash_algo,
             normalize_hits=ns.normalize_hits,

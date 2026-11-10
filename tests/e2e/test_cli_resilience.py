@@ -252,3 +252,37 @@ def test_flaky_scenario_completes(fake_gitlab: FakeGitLab, run_cli, tmp_path: Pa
     assert applied == {"projects-rate-limited", "payments-branches-unavailable", "terraform-search-slow",
                        "web-app-search-garbage"}
     assert "Done." in proc.stdout
+
+
+# --------------------------------------------------------------------------- legacy console encodings (Windows)
+
+
+def _legacy_console_env(encoding: str) -> dict[str, str]:
+    env = cli_env()
+    env.pop("PYTHONUTF8", None)
+    env["PYTHONIOENCODING"] = encoding  # what a redirected cmd.exe/PowerShell console uses
+    return env
+
+
+@pytest.mark.parametrize("encoding", ["cp1252", "cp866"])
+def test_help_works_on_legacy_code_pages(encoding, tmp_path):
+    proc = subprocess.run([sys.executable, "-m", "gitlab_harvester", "--help"], cwd=str(tmp_path),
+                          env=_legacy_console_env(encoding), capture_output=True)
+    assert proc.returncode == 0, proc.stderr.decode(encoding, "replace")
+    out = proc.stdout.decode(encoding)
+    assert "GitlabHarvester v" in out and "--time-after" in out
+
+
+@pytest.mark.parametrize("encoding", ["cp1252", "cp866"])
+def test_search_output_survives_legacy_code_pages(fake_gitlab, encoding, tmp_path):
+    """Banner, progress and log lines with non-encodable branch names must not crash."""
+    proc = subprocess.run(
+        [sys.executable, "-m", "gitlab_harvester", "-u", fake_gitlab.url, "-t", fake_gitlab.token,
+         "-s", "ключ", "-b", "all", "--log-level", "INFO", "--index-file", "idx.jsonl", "--session-file", "s.jsonl"],
+        cwd=str(tmp_path), env=_legacy_console_env(encoding), capture_output=True, timeout=90,
+    )
+    out, err = proc.stdout.decode(encoding, "strict"), proc.stderr.decode(encoding, "strict")
+    assert proc.returncode == 0, err
+    assert "Logging error" not in out + err and "UnicodeEncodeError" not in out + err
+    assert err.lstrip().startswith("GitlabHarvester v")  # plain banner instead of escaped box characters
+    assert "Done. Keywords: 1 | Hits: 1" in out

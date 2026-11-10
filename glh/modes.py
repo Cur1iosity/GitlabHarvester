@@ -22,11 +22,14 @@ from typing import Any, IO
 from urllib.parse import urlparse
 
 from glh import GitlabHarvester
-from glh.cli import CliArgs
-from glh.planner import ScanOptions
+from glh.cli import CliArgs, _get_version
+from glh.planner import ScanOptions, TimeWindow, parse_timestamp
 from glh.postprocess.convert import convert_jsonl_to_json
 from glh.postprocess.dedup import dedup_session_file
+from glh.postprocess.pipeline import run_pipeline
 from glh.session import load_done_keywords
+from glh.utils import terminal_utils
+from glh.utils.logging_utils import JOURNAL
 from glh.utils.terminal_utils import format_duration
 
 # datetime.UTC exists only on Python 3.11+, while the package supports 3.10.
@@ -75,24 +78,140 @@ def _resolve_session_path(url: str, session: str | None, session_file: str | Non
     return Path(f"results{os.sep}{_default_session_name(url)}.jsonl")
 
 
+def _format_age(seconds: float) -> str:
+    """'just now', '5 min ago', '3 h ago', '2 days ago'."""
+    if seconds < 60:
+        return "just now"
+    if seconds < 3600:
+        return f"{int(seconds // 60)} min ago"
+    if seconds < 2 * 86400:
+        return f"{int(seconds // 3600)} h ago"
+    return f"{int(seconds // 86400)} days ago"
+
+
+def describe_index(path: str | Path, meta: dict[str, Any], projects: int, now: datetime | None = None) -> str:
+    """
+    One line about the index a search uses, so the user can judge how current it is.
+
+    Example: "Index: idx.jsonl (built 2024-06-01 12:00:00 UTC, 3 h ago; 9 projects, branches: all)".
+    """
+    built = parse_timestamp(meta.get("timestamp_utc"))
+    if built is None:
+        when = "build time unknown"
+    else:
+        now = now or datetime.now(UTC)
+        built_utc = built.astimezone(UTC)
+        when = f"built {built_utc:%Y-%m-%d %H:%M:%S} UTC, {_format_age((now - built_utc).total_seconds())}"
+
+    details = [terminal_utils.plural(projects, "project")]
+    if meta.get("branches") is not None:
+        details.append(f"branches: {meta['branches']}")
+    window = TimeWindow(parse_timestamp(meta.get("last_activity_after")),
+                        parse_timestamp(meta.get("last_activity_before")))
+    if window:
+        details.append(f"projects active {window.describe()}")
+    if meta.get("is_completed") is False:
+        details.append("INCOMPLETE (listing failed; rebuild with --dump-projects)")
+    return f"Index: {path} ({when}; {', '.join(details)})"
+
+
 def _write_jsonl_line(fp: IO[str], record: dict[str, Any]) -> None:
     """Write a JSONL record to an open file."""
     fp.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def _report(message: str) -> None:
+    """Print a final summary line and add it to the run journal (log file)."""
+    print(message)
+    JOURNAL.write(message)
+
+
+def _when(after: datetime | None, before: datetime | None) -> str | None:
+    window = TimeWindow(after, before)
+    return window.describe() if window else None
+
+
+def _describe_options(args: CliArgs) -> str:
+    """The settings that shape a run, for the run journal (never the token)."""
+    opts: dict[str, Any] = {}
+    if args.mode in ("search", "dump-index"):
+        opts.update({
+            "index-file": args.index_file or "(default)",
+            "index-branches": args.index_branches,
+            "batch-size": args.batch_size,
+            "workers": args.workers,
+            "index-active": _when(args.index_active_after, args.index_active_before),
+        })
+    if args.mode == "search":
+        if args.search:
+            terms = f"search {args.search!r}"
+        elif args.terms_file:
+            terms = f"terms-file {args.terms_file}"
+        else:
+            terms = f"{len(args.terms)} from the config file"
+        opts.update({
+            "dump-projects": args.dump_projects,
+            "scan-branches": args.scan_branches,
+            "forks": args.forks,
+            "fork-diff-bases": args.fork_diff_bases if args.forks == "branch-diff" else None,
+            "terms": terms,
+            "active": _when(args.started_from, args.active_before),
+            "file-changed": _when(args.file_changed_after, args.file_changed_before),
+            "session": args.session_file or args.session or "(default)",
+            "resume": args.resume,
+            "post-process": ",".join(args.post_process) or None,
+            "final-only": args.final_only if args.post_process else None,
+        })
+    if args.mode in ("dedup", "convert"):
+        opts.update({"input-file": args.input_file, "output-file": args.output_file})
+    return "Options: " + ", ".join(f"{k}={v}" for k, v in opts.items() if v is not None)
+
+
 def run_mode(args: CliArgs) -> None:
-    """Dispatch execution based on args.mode."""
-    match args.mode:
-        case "search":
-            _run_search(args)
-        case "dump-index":
-            _run_dump_index(args)
-        case "dedup":
-            _run_dedup(args)
-        case "convert":
-            _run_convert(args)
-        case _:
-            raise SystemExit(f"Unknown mode: {args.mode}")
+    """
+    Dispatch execution based on args.mode.
+
+    With --log-file, a summary of the run (options, index, search plan, per-term
+    results, output files, duration, outcome) is appended to the log file
+    whatever the log level, see logging_utils.RunJournal.
+    """
+    started = time.perf_counter()
+    if args.log_file:
+        JOURNAL.open(args.log_file)
+        url = f", url={args.url}" if args.url and args.mode in ("search", "dump-index") else ""
+        config = f", config={args.config}" if args.config else ""
+        JOURNAL.write(f"Run started: gitlab-harvester {_get_version()}, mode={args.mode}{url}{config}, "
+                      f"cwd={Path.cwd()}")
+        options = _describe_options(args)
+        if options != "Options: ":
+            JOURNAL.write(options)
+    try:
+        match args.mode:
+            case "search":
+                _run_search(args)
+            case "dump-index":
+                _run_dump_index(args)
+            case "dedup":
+                _run_dedup(args)
+            case "convert":
+                _run_convert(args)
+            case _:
+                raise SystemExit(f"Unknown mode: {args.mode}")
+    except SystemExit as e:
+        if e.code not in (None, 0):
+            reason = f"exit code {e.code}" if isinstance(e.code, int) else str(e.code)
+            JOURNAL.write(f"Run failed after {format_duration(time.perf_counter() - started)}: {reason}")
+        else:
+            JOURNAL.write(f"Run finished in {format_duration(time.perf_counter() - started)}")
+        raise
+    except BaseException as e:
+        reason = "interrupted" if isinstance(e, KeyboardInterrupt) else f"{type(e).__name__}: {e}"
+        JOURNAL.write(f"Run failed after {format_duration(time.perf_counter() - started)}: {reason}")
+        raise
+    else:
+        JOURNAL.write(f"Run finished in {format_duration(time.perf_counter() - started)}")
+    finally:
+        JOURNAL.close()
 
 
 def _mk_harvester(args: CliArgs) -> GitlabHarvester:
@@ -126,7 +245,7 @@ def _run_dump_index(args: CliArgs) -> None:
         last_activity_after=args.index_active_after,
         last_activity_before=args.index_active_before,
     )
-    print(f"Project index saved to: {index_file}")
+    _report(f"Project index saved to: {index_file}")
 
 
 def _run_search(args: CliArgs) -> None:
@@ -149,6 +268,7 @@ def _run_search(args: CliArgs) -> None:
 
     data = glh.load_projects_from_file(index_file)
     projects = data.get("projects", [])
+    terminal_utils.STATUS.write_line(describe_index(index_file, data.get("meta") or {}, len(projects)))
     if not projects:
         raise SystemExit(f"Project index is empty: {index_file}")
 
@@ -171,7 +291,7 @@ def _run_search(args: CliArgs) -> None:
         if done_keywords:
             keywords = [k for k in keywords if k not in done_keywords]
         if not keywords:
-            print(f"Nothing to resume: all keywords already completed in {session_path}")
+            _report(f"Nothing to resume: all keywords already completed in {session_path}")
             return
 
     mode = "a" if args.resume else "w"
@@ -207,6 +327,8 @@ def _run_search(args: CliArgs) -> None:
                     "file_changed_after": args.file_changed_after.isoformat() if args.file_changed_after else None,
                     "file_changed_before": args.file_changed_before.isoformat() if args.file_changed_before else None,
                     "keywords_count": len(keywords),
+                    "post_process": list(args.post_process),
+                    "final_only": args.final_only,
                 },
             )
 
@@ -229,8 +351,30 @@ def _run_search(args: CliArgs) -> None:
             },
         )
 
-    print(f"Session saved to: {session_path}")
-    print(f"Done. Keywords: {len(keywords)} | Hits: {hits} | Search time: {format_duration(search_elapsed)}")
+    _report(f"Session saved to: {session_path}")
+    _report(f"Done. Keywords: {len(keywords)} | Hits: {hits} | Search time: {format_duration(search_elapsed)}")
+
+    if args.post_process:
+        _post_process(args, session_path)
+
+
+def _post_process(args: CliArgs, session_path: Path) -> None:
+    """Run --post-process steps on a finished session (files are deleted only if all steps succeed)."""
+    result = run_pipeline(
+        session_path,
+        args.post_process,
+        final_only=args.final_only,
+        sqlite_path=Path(args.sqlite_path) if args.sqlite_path else None,
+        hash_algo=args.hash_algo,
+        normalize=args.normalize_hits,
+        sort_keys=args.sort_keys,
+    )
+    for note in result.notes:
+        JOURNAL.write(f"Post-processing {note}")
+    _report(f"Post-processing: {' -> '.join(str(p) for p in [session_path, *result.outputs])}")
+    if result.removed:
+        _report(f"Removed (--final-only): {', '.join(str(p) for p in result.removed)}")
+    _report(f"Final result: {result.final}")
 
 
 def _require_path(value: str | None, *, name: str) -> Path:
@@ -247,13 +391,15 @@ def _run_dedup(args: CliArgs) -> None:
 
     sqlite_path = Path(args.sqlite_path) if args.sqlite_path else None
 
-    dedup_session_file(
+    stats = dedup_session_file(
         input_path=input_path,
         output_path=output_path,
         sqlite_path=sqlite_path,
         hash_algo=args.hash_algo,
         normalize=args.normalize_hits,
     )
+    JOURNAL.write(f"Dedup: {input_path} -> {output_path} (kept {stats['kept']} records, "
+                  f"dropped {stats['dropped']} duplicate-only hit records)")
 
 
 def _run_convert(args: CliArgs) -> None:
@@ -261,8 +407,9 @@ def _run_convert(args: CliArgs) -> None:
     input_path = _require_path(args.input_file, name="--input-file")
     output_path = _require_path(args.output_file, name="--output-file")
 
-    convert_jsonl_to_json(
+    count = convert_jsonl_to_json(
         input_path=input_path,
         output_path=output_path,
         sort_keys=args.sort_keys,
     )
+    JOURNAL.write(f"Convert: {input_path} -> {output_path} ({count} objects)")

@@ -219,20 +219,54 @@ def test_progress_render_with_and_without_total():
     q.advance(2, detail="acme/api")
     q.set_info("3 hits")
     # 2 of 8 done in 10 s -> 30 s left.
-    assert q.render() == "Listing branches | 2/8 projects | 3 hits | 0:10 | ETA 0:30 | acme/api"
+    assert q.render() == "Listing branches | 2/8 projects (25%) | 3 hits | 0:10 | ETA 0:30 | acme/api"
 
 
-def test_progress_eta_covers_all_rounds():
+def test_progress_with_several_rounds_shows_term_and_total():
     clock = FakeClock()
     status, _ = make_status(clock=clock)
-    p = Progress("Searching", total=5, rounds=2, status=status, clock=clock).start()
-    p.start_round(1, "Searching 'a' (1/2)")
-    p.advance(5)
+    p = Progress("Searching", total=5, rounds=3, status=status, clock=clock).start()
+    p.start_round(1, "Searching 'a' (1/3)")
     clock.now += 10
-    p.start_round(2, "Searching 'b' (2/2)")
-    assert p.done == 0 and p.label == "Searching 'b' (2/2)"
-    # Count is per round, ETA is for the 5 remaining units of 10.
-    assert p.render() == "Searching 'b' (2/2) | 0/5 projects | 0:10 | ETA 0:10"
+    p.advance(5)
+    p.start_round(2, "Searching 'b' (2/3)")
+    assert p.done == 0 and p.label == "Searching 'b' (2/3)"
+    clock.now += 4
+    p.advance(2)
+    p.set_info("7 hits")
+    # Term: 2 of 5 in 4 s -> 6 s left. Total: 7 of 15 in 14 s -> 16 s left.
+    assert p.render() == ("Searching 'b' (2/3) | term 2/5 projects (40%) 0:04 ETA 0:06 | "
+                          "total 7/15 (46%) 0:14 ETA 0:16 | 7 hits")
+
+
+def test_round_start_can_be_backdated_for_overlapping_rounds():
+    clock = FakeClock()
+    status, _ = make_status(clock=clock)
+    p = Progress("Searching", total=4, rounds=2, status=status, clock=clock).start()
+    begun = p.clock()
+    clock.now += 3
+    p.start_round(2, "Searching 'b' (2/2)", started=begun)  # its tasks began 3 s ago
+    assert p.round_elapsed == 3
+
+
+def test_single_round_has_no_duplicated_counters():
+    clock = FakeClock()
+    status, _ = make_status(clock=clock)
+    p = Progress("Searching 'a'", total=4, status=status, clock=clock).start()
+    clock.now += 2
+    p.advance(1)
+    text = p.render()
+    assert text == "Searching 'a' | 1/4 projects (25%) | 0:02 | ETA 0:06"
+    assert "term" not in text and "total" not in text
+
+
+def test_percent_is_rounded_down():
+    status, _ = make_status()
+    p = Progress("x", total=3, status=status).start()
+    p.advance(2)
+    assert "2/3 projects (66%)" in p.render()
+    p.advance(1)
+    assert "3/3 projects (100%)" in p.render()
 
 
 def test_progress_without_work_has_no_eta():
@@ -260,7 +294,7 @@ def test_progress_context_manager_reports_where_it_stopped():
         with Progress("Searching", total=6, status=status, clock=clock) as p:
             p.advance(2, detail="acme/api @ main")
             raise KeyboardInterrupt
-    assert stream.getvalue() == "Searching | 2/6 projects | 0:00 | acme/api @ main | stopped\n"
+    assert stream.getvalue() == "Searching | 2/6 projects (33%) | 0:00 | acme/api @ main | stopped\n"
 
 
 def test_progress_context_manager_is_silent_on_success_without_summary():
@@ -293,3 +327,25 @@ def test_console_log_handler_goes_to_stdout_around_the_status_line(monkeypatch):
     assert err.getvalue() == (
         "\rSearching | 1/2 projects" + f"\r{blank}\r" + "\rSearching | 1/2 projects" + f"\r{blank}\r"
     )
+
+
+# --------------------------------------------------------------------------- listeners (run journal)
+
+
+def test_permanent_lines_reach_listeners_but_log_records_do_not():
+    status, _ = make_status(tty=False)
+    seen: list[str] = []
+    status.add_listener(seen.append)
+    status.add_listener(seen.append)  # registered once
+    status.write_line("Search plan: 1 term")
+    status.write_line("[WARNING] slow", stream=FakeStream(False))  # console log record
+    status.remove_listener(seen.append)
+    status.write_line("after removal")
+    assert seen == ["Search plan: 1 term"]
+
+
+def test_broken_listener_does_not_break_output():
+    status, stream = make_status(tty=False)
+    status.add_listener(lambda text: 1 / 0)
+    status.write_line("still printed")
+    assert stream.getvalue() == "still printed\n"
