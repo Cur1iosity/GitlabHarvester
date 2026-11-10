@@ -22,6 +22,7 @@ from typing import Any, IO
 from urllib.parse import urlparse
 
 from glh import GitlabHarvester
+from glh.exceptions import GitlabHarvesterError
 from glh.cli import CliArgs, _get_version
 from glh.planner import ScanOptions, TimeWindow, parse_timestamp
 from glh.postprocess.convert import convert_jsonl_to_json
@@ -136,6 +137,7 @@ def _describe_options(args: CliArgs) -> str:
     opts: dict[str, Any] = {}
     if args.mode in ("search", "dump-index"):
         opts.update({
+            "tls": "UNVERIFIED (--insecure)" if args.insecure else (f"ca-bundle {args.ca_bundle}" if args.ca_bundle else "verified"),
             "index-file": args.index_file or "(default)",
             "index-branches": args.index_branches,
             "batch-size": args.batch_size,
@@ -225,11 +227,15 @@ def _mk_harvester(args: CliArgs) -> GitlabHarvester:
         "workers": args.workers,
         "log_level": args.log_level,
         "log_file": args.log_file,
+        "ssl_verify": False if args.insecure else (args.ca_bundle or True),
     }
     if args.proxy:
         kwargs["proxy"] = args.proxy
 
-    return GitlabHarvester(**kwargs)
+    try:
+        return GitlabHarvester(**kwargs)
+    except GitlabHarvesterError as e:
+        raise SystemExit(str(e)) from None
 
 
 def _run_dump_index(args: CliArgs) -> None:
@@ -340,12 +346,15 @@ def _run_search(args: CliArgs) -> None:
             session_file=sess_fp,
         )
         search_elapsed = time.perf_counter() - search_started
+        incomplete = list(glh.incomplete_terms)
 
         _write_jsonl_line(
             sess_fp,
             {
                 "type": "summary",
                 "hits": hits,
+                "completed": not incomplete,
+                "incomplete_terms": incomplete,
                 "elapsed_seconds": round(search_elapsed, 2),
                 "timestamp_utc": datetime.now(UTC).isoformat(),
             },
@@ -353,17 +362,26 @@ def _run_search(args: CliArgs) -> None:
 
     _report(f"Session saved to: {session_path}")
     _report(f"Done. Keywords: {len(keywords)} | Hits: {hits} | Search time: {format_duration(search_elapsed)}")
+    if incomplete:
+        _report(
+            f"INCOMPLETE: searches failed for {len(incomplete)} of {len(keywords)} terms "
+            f"({', '.join(repr(t) for t in incomplete)}); they are not marked done. "
+            f"Repeat the command with --resume to search them again."
+        )
 
     if args.post_process:
-        _post_process(args, session_path)
+        _post_process(args, session_path, keep_session=bool(incomplete))
 
 
-def _post_process(args: CliArgs, session_path: Path) -> None:
+def _post_process(args: CliArgs, session_path: Path, keep_session: bool = False) -> None:
     """Run --post-process steps on a finished session (files are deleted only if all steps succeed)."""
+    final_only = args.final_only and not keep_session
+    if args.final_only and keep_session:
+        _report("--final-only ignored: the search is incomplete, the session is kept for --resume.")
     result = run_pipeline(
         session_path,
         args.post_process,
-        final_only=args.final_only,
+        final_only=final_only,
         sqlite_path=Path(args.sqlite_path) if args.sqlite_path else None,
         hash_algo=args.hash_algo,
         normalize=args.normalize_hits,

@@ -11,6 +11,8 @@ def load_done_keywords(session_path: Path) -> set[str]:
 
     Recognizes records of type="keyword_done". The harvester writes the
     keyword under "term"; "keyword" is accepted for backward compatibility.
+    Terms with failed searches get type="keyword_incomplete" instead, so a
+    resumed run searches them again.
     """
     done: set[str] = set()
 

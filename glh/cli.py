@@ -152,6 +152,8 @@ class CliArgs:
     token: str | None
     proxy: str | None
     timeout: int
+    insecure: bool
+    ca_bundle: str | None
     workers: int
 
     log_file: str | None
@@ -227,6 +229,19 @@ class CliParser:
         parser.add_argument("-t", "--token", default=None, help="GitLab token (required for search/dump-index).",)
         parser.add_argument("-p", "--proxy", default=None, help="HTTP(S) proxy URL for GitLab API traffic.",)
         parser.add_argument("--timeout", default=60, type=int, help="Timeout in seconds for GitLab API request.",)
+        parser.add_argument(
+            "--ca-bundle",
+            default=None,
+            metavar="FILE",
+            help="CA bundle (PEM) to verify the GitLab TLS certificate, e.g. for a private CA.",
+        )
+        parser.add_argument(
+            "--insecure",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help="Disable TLS certificate verification (not recommended: the token is sent to an "
+                 "unverified server). Verification is never disabled automatically.",
+        )
         parser.add_argument(
             "-w", "--workers",
             type=parse_workers,
@@ -433,6 +448,9 @@ class CliParser:
             cls._resolve_time_bounds(ns, {d for d, _ in TIME_BOUNDS + (("time_after", ""), ("time_before", ""))
                                           if getattr(ns, d) is not None}, {})
 
+        if ns.insecure and ns.ca_bundle:
+            parser.error("--insecure and --ca-bundle exclude each other.")
+
         for after, before, names in TIME_WINDOWS:
             low, high = getattr(ns, after), getattr(ns, before)
             if low is not None and high is not None and low > high:
@@ -457,6 +475,8 @@ class CliParser:
             token=ns.token,
             proxy=ns.proxy,
             timeout=ns.timeout,
+            insecure=ns.insecure,
+            ca_bundle=ns.ca_bundle,
             workers=ns.workers,
             log_file=ns.log_file,
             log_level=ns.log_level,

@@ -177,7 +177,7 @@ def dedup_session_file(
 
                 # passthrough control records
                 t = obj.get("type")
-                if t in {"meta", "resume", "summary", "keyword_done"}:
+                if t in {"meta", "resume", "summary", "keyword_done", "keyword_incomplete"}:
                     fout.write(json.dumps(obj, ensure_ascii=False) + "\n")
                     kept += 1
                     continue
