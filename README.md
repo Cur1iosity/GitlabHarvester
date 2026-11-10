@@ -2,9 +2,12 @@
 
 # GitlabHarvester
 
+[![Tests](https://img.shields.io/github/actions/workflow/status/Cur1iosity/GitlabHarvester/tests.yml?branch=main&event=push&label=tests)](https://github.com/Cur1iosity/GitlabHarvester/actions/workflows/tests.yml)
 [![PyPI](https://img.shields.io/pypi/v/gitlab-harvester)](https://pypi.org/project/gitlab-harvester/)
-![Python](https://img.shields.io/badge/python-3.10%2B-blue)
-![License](https://img.shields.io/github/license/Cur1iosity/GitlabHarvester)
+[![Python](https://img.shields.io/pypi/pyversions/gitlab-harvester)](https://pypi.org/project/gitlab-harvester/)
+[![License](https://img.shields.io/github/license/Cur1iosity/GitlabHarvester)](LICENSE)
+[![Downloads](https://static.pepy.tech/badge/gitlab-harvester)](https://pepy.tech/projects/gitlab-harvester)
+[![Last commit](https://img.shields.io/github/last-commit/Cur1iosity/GitlabHarvester/main)](https://github.com/Cur1iosity/GitlabHarvester/commits/main/)
 
 </div>
 
