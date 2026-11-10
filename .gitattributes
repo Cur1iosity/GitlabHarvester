@@ -1,0 +1,8 @@
+# Files used inside Linux containers keep LF on every platform (core.autocrlf
+# would turn them into CRLF on Windows checkouts).
+docs/demo/* text eol=lf
+docker/* text eol=lf
+*.sh text eol=lf
+
+# Binary assets.
+*.gif binary
