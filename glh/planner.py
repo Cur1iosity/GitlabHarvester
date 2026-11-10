@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 BranchesMode = str | int  # "default" | "all" | int
@@ -25,10 +26,53 @@ class ScanOptions:
             - "all-branches": scan every branch of forks (potentially slow).
         fork_diff_bases: Branch names always considered for scanning in forks when
             forks_mode="branch-diff" (e.g., main/master/develop/dev).
+        started_from: Optional timezone-aware lower bound for project activity.
+            Projects whose indexed ``last_activity_at`` is earlier are skipped
+            (GitLab updates it on every push, so such repositories have no
+            changes since that moment). None disables the filter.
     """
     scan_branches: BranchesMode = "default"  # default|all|N
     forks_mode: str = "include"  # skip|include|branch-diff|all-branches
     fork_diff_bases: tuple[str, ...] = ("main", "master", "develop", "dev")
+    started_from: datetime | None = None
+
+
+def parse_timestamp(value: Any) -> datetime | None:
+    """
+    Parse an ISO 8601 timestamp as stored in the project index.
+
+    Accepts the GitLab form ``2024-06-01T12:00:00.000Z`` on every supported
+    Python version (``datetime.fromisoformat`` handles ``Z`` only since 3.11).
+    Naive values are interpreted as UTC.
+
+    Returns:
+        Timezone-aware datetime, or None if the value is missing or malformed.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def is_active_since(project: dict[str, Any], started_from: datetime | None) -> bool:
+    """
+    Check whether a project had activity at or after ``started_from``.
+
+    Projects without a parsable ``last_activity_at`` are treated as active, so
+    the filter never drops a repository it cannot reason about.
+    """
+    if started_from is None:
+        return True
+    last_activity = parse_timestamp(project.get("last_activity_at"))
+    if last_activity is None:
+        return True
+    return last_activity >= started_from
 
 
 def is_fork_project(project: dict[str, Any]) -> bool:
@@ -91,6 +135,7 @@ def should_scan_project(project: dict[str, Any], options: ScanOptions) -> bool:
 
     - Empty repositories are always skipped.
     - Forked projects are skipped when forks_mode is set to "skip".
+    - Projects inactive since options.started_from are skipped.
     - All other projects are eligible for scanning.
 
     Args:
@@ -103,6 +148,8 @@ def should_scan_project(project: dict[str, Any], options: ScanOptions) -> bool:
     if project.get("empty_repo", False):
         return False
     if is_fork_project(project) and options.forks_mode == "skip":
+        return False
+    if not is_active_since(project, options.started_from):
         return False
     return True
 
@@ -117,8 +164,9 @@ def select_branches_from_index(project: dict[str, Any], mode: BranchesMode) -> l
     Selection rules:
 
     - "all" → return all indexed branches as-is.
-    - "default" → return only the default branch (first indexed branch or
-      explicit default_branch field).
+    - "default" → return only the default branch (explicit default_branch
+      field, falling back to the first indexed branch). GitLab lists branches
+      sorted by name, so the first indexed branch is not necessarily the default.
     - int (N) → return up to N branches, ensuring the default branch is included
       when available (default + N-1 others).
 
@@ -138,9 +186,9 @@ def select_branches_from_index(project: dict[str, Any], mode: BranchesMode) -> l
         return list(branches)
 
     if mode == "default":
-        if branches:
-            return branches[:1]
-        return [default_branch] if default_branch else []
+        if default_branch:
+            return [default_branch]
+        return branches[:1]
 
     n = int(mode)
     if n <= 0:

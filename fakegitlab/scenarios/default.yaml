@@ -1,0 +1,225 @@
+# Default Fake GitLab scenario: a small but complete instance.
+#
+# All data is artificial. "Secrets" are fake markers (FAKE-...) chosen so they
+# do not match real credential formats (no glpat-/AKIA/ghp_ prefixes).
+#
+# Coverage map (see docs/testing.md#default-scenario for the full table):
+#   101  regular project, 4 branches, same finding in every branch
+#   102  regular project, single branch, matches only "token"
+#   103  special characters in branch names and file paths, master default
+#   104  empty repository (no branches)
+#   105  no matches for any test term
+#   201  fork of 101 with a fork-unique branch
+#   202  fork of 103 with a fork-unique branch
+#   203  fork whose upstream is not visible (not in the instance)
+#   301  deeply nested namespace, several matches in one file
+name: default
+description: Small coherent instance covering regular projects, forks, empty repos and special characters.
+
+instance:
+  default_per_page: 20
+  max_per_page: 100
+  # Blob search behaves like GitLab basic search: 2 context lines, path matches on.
+  search_context_lines: 2
+  search_path_matches: true
+
+users:
+  - id: 1
+    username: harvester-bot
+    name: Harvester Bot
+    tokens: [dev-token]
+  - id: 2
+    username: readonly-auditor
+    name: Read-only Auditor
+    tokens: [readonly-token]
+
+projects:
+  - id: 101
+    path_with_namespace: acme/backend/api-service
+    description: Core API service
+    default_branch: main
+    visibility: internal
+    created_at: "2024-01-10T09:00:00.000Z"
+    last_activity_at: "2024-06-01T12:00:00.000Z"
+    branches:
+      main:
+        files:
+          README.md: |
+            # API service
+            Internal service, see config/settings.py.
+          config/settings.py: |
+            DEBUG = False
+            DB_HOST = "db.internal.example"
+            DB_PASSWORD = "FAKE-db-password-0001"
+            API_KEY = "FAKE-api-key-0001"
+          deploy/env.example: |
+            DB_PASSWORD=change-me
+      develop:
+        inherit: main
+        files:
+          scripts/debug.sh: |
+            #!/bin/sh
+            export API_KEY=FAKE-api-key-0002
+      feature/login-v2:
+        inherit: main
+        files:
+          auth/login.py: |
+            def login(user, password):
+                # never log the password
+                return check(user, password)
+      release/1.0+hotfix:
+        inherit: main
+
+  - id: 102
+    path_with_namespace: acme/backend/payments
+    description: Payments gateway
+    default_branch: main
+    visibility: private
+    created_at: "2024-01-11T09:00:00.000Z"
+    last_activity_at: "2024-05-20T08:30:00.000Z"
+    branches:
+      main:
+        files:
+          src/client.go: |
+            package client
+
+            const token = "FAKE-token-payments-0001"
+          README.md: |
+            Payments gateway client.
+
+  - id: 103
+    path_with_namespace: acme/frontend/web-app
+    description: Customer web application
+    default_branch: master
+    visibility: public
+    created_at: "2024-01-12T09:00:00.000Z"
+    last_activity_at: "2024-06-15T16:45:00.000Z"
+    branches:
+      master:
+        files:
+          src/config.js: |
+            export default {
+              apiKey: "FAKE-api-key-web-0001",
+            };
+          "docs/setup guide.md": |
+            Ask the admin for the staging password.
+            Login with p@ss w0rd! only on staging.
+      "fix/#42-login":
+        inherit: master
+        files:
+          src/login.js: |
+            const query = "$SECRET_VAR";
+            const label = '"quoted" secret';
+      "ünïcode-ветка":
+        inherit: master
+        files:
+          i18n/ru.txt: |
+            ключ доступа: FAKE-unicode-0001
+
+  - id: 104
+    path_with_namespace: acme/empty-repo
+    description: Repository without commits
+    visibility: private
+    created_at: "2024-02-01T09:00:00.000Z"
+    branches: {}
+
+  - id: 105
+    path_with_namespace: sandbox/notes
+    description: Harmless notes
+    default_branch: main
+    visibility: internal
+    created_at: "2024-02-02T09:00:00.000Z"
+    last_activity_at: "2024-02-03T09:00:00.000Z"
+    branches:
+      main:
+        files:
+          notes.md: |
+            Hello world.
+            Nothing interesting here.
+
+  - id: 201
+    path_with_namespace: alice/api-service
+    description: Alice's fork of api-service
+    default_branch: main
+    visibility: private
+    forked_from: 101
+    created_at: "2024-03-01T09:00:00.000Z"
+    last_activity_at: "2024-06-02T10:00:00.000Z"
+    branches:
+      main:
+        inherit: "101:main"
+      develop:
+        inherit: "101:develop"
+      # Identical to upstream: skipped by --forks branch-diff (not a base branch).
+      feature/login-v2:
+        inherit: "101:feature/login-v2"
+      alice/experiment:
+        inherit: "101:main"
+        files:
+          secrets.txt: |
+            password=FAKE-alice-password-0001
+
+  - id: 202
+    path_with_namespace: bob/web-app-fork
+    description: Bob's fork of web-app
+    default_branch: master
+    visibility: private
+    forked_from: 103
+    created_at: "2024-03-02T09:00:00.000Z"
+    last_activity_at: "2024-06-03T10:00:00.000Z"
+    branches:
+      master:
+        inherit: "103:master"
+      feature/bob:
+        inherit: "103:master"
+        files:
+          src/bob.js: |
+            const apiKey = "FAKE-api-key-bob-0001";
+
+  - id: 203
+    path_with_namespace: carol/orphan-fork
+    description: Fork of a project that is not visible to the token
+    default_branch: main
+    visibility: private
+    forked_from:
+      id: 999
+      path_with_namespace: hidden/upstream
+      name: upstream
+    created_at: "2024-03-03T09:00:00.000Z"
+    last_activity_at: "2024-06-04T10:00:00.000Z"
+    branches:
+      main:
+        files:
+          app.cfg: |
+            password = FAKE-carol-password-0001
+      develop:
+        inherit: main
+      carol/wip:
+        inherit: main
+        files:
+          wip.txt: |
+            work in progress
+
+  - id: 301
+    path_with_namespace: ops/infra/terraform/modules
+    description: Deeply nested namespace
+    default_branch: main
+    visibility: internal
+    created_at: "2024-04-01T09:00:00.000Z"
+    last_activity_at: "2024-06-05T10:00:00.000Z"
+    branches:
+      main:
+        files:
+          variables.tf: |
+            variable "db_password" {
+              type      = string
+              sensitive = true
+            }
+
+            # filler line 1
+            # filler line 2
+            # filler line 3
+
+            variable "admin_password" {
+              default = "FAKE-admin-password-0001"
+            }

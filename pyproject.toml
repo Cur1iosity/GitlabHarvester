@@ -1,14 +1,15 @@
 [build-system]
-requires = ["setuptools>=69", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "gitlab-harvester"
-version = "0.2.14"
+version = "0.2.15"
 description = "Build a GitLab instance project index and search repositories for sensitive keywords (API-only, no cloning)."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 
 authors = [
   { name = "Cur1iosity", email = "cur1iosity@protonmail.com" }
@@ -39,12 +40,12 @@ classifiers = [
   "Intended Audience :: Developers",
   "Intended Audience :: Information Technology",
   "Intended Audience :: System Administrators",
-  "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Topic :: Security",
   "Topic :: Utilities",
   "Topic :: Software Development :: Quality Assurance",
@@ -53,7 +54,15 @@ classifiers = [
 dependencies = [
   "python-gitlab>=8.0.0",
   "tqdm>=4.66.0",
-  "requests>=2.31.0",
+  "requests>=2.32.0",  # python-gitlab 8.x requires it
+]
+
+[project.optional-dependencies]
+# Development/test tooling. Exact versions used in CI live in requirements-dev.txt.
+test = [
+  "pytest>=8.0",
+  "pytest-httpserver>=1.1.0",
+  "PyYAML>=6.0",
 ]
 
 [project.urls]
@@ -74,3 +83,21 @@ include = ["glh*"]
 
 [project.scripts]
 gitlab-harvester = "gitlab_harvester:main"
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+# Repository root on sys.path so tests can import the fakegitlab dev package.
+pythonpath = ["."]
+# Contract tests talk to a real GitLab and are opt-in: pytest -m contract
+addopts = "-ra --strict-markers -m 'not contract'"
+markers = [
+  "unit: isolated tests without HTTP (tests/unit, tests/fakeserver)",
+  "integration: real python-gitlab against the Fake GitLab (tests/integration)",
+  "e2e: CLI subprocess against the Fake GitLab (tests/e2e)",
+  "contract: optional checks against a real GitLab instance (tests/contract)",
+  "scenario(name): Fake GitLab scenario to load for the test",
+]
+filterwarnings = [
+  "error::pytest.PytestUnraisableExceptionWarning",
+]

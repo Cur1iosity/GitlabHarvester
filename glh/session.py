@@ -9,7 +9,8 @@ def load_done_keywords(session_path: Path) -> set[str]:
     """
     Read session JSONL and return keywords that were already completed.
 
-    Recognizes records of type="keyword_done".
+    Recognizes records of type="keyword_done". The harvester writes the
+    keyword under "term"; "keyword" is accepted for backward compatibility.
     """
     done: set[str] = set()
 
@@ -27,8 +28,8 @@ def load_done_keywords(session_path: Path) -> set[str]:
             except json.JSONDecodeError:
                 continue
 
-            if rec.get("type") == "keyword_done":
-                kw = rec.get("keyword")
+            if isinstance(rec, dict) and rec.get("type") == "keyword_done":
+                kw = rec.get("term", rec.get("keyword"))
                 if isinstance(kw, str) and kw:
                     done.add(kw)
 

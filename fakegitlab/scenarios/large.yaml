@@ -1,0 +1,28 @@
+# Default data plus deterministically generated bulk projects.
+# Useful for pagination, progress output and performance experiments.
+#
+# Generator templates use Python str.format: {n} is the 1-based index
+# (format specs allowed, e.g. {n:03d}) and {id} is the project id.
+# Literal braces in file contents must be doubled: {{ and }}.
+name: large
+description: Default scenario plus 250 generated projects (3 branches each).
+extends: default
+
+generate:
+  - count: 250
+    start_id: 1001
+    project:
+      path_with_namespace: "bulk/team-{n:02d}/service-{n:03d}"
+      default_branch: main
+      created_at: "2024-05-01T00:00:00.000Z"
+      branches:
+        main:
+          files:
+            README.md: "Service {n:03d}\n"
+            config.ini: "[db]\nhost = db-{n:03d}.internal.example\n"
+        develop:
+          inherit: main
+          files:
+            debug.ini: "password = FAKE-bulk-password-{n:03d}\n"
+        release/v{n}:
+          inherit: main

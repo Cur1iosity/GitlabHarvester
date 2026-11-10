@@ -1,0 +1,120 @@
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main, dev]
+  workflow_dispatch:
+    inputs:
+      contract:
+        description: "Also run contract tests against the real GitLab configured in repository secrets"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONIOENCODING: utf-8
+
+jobs:
+  unit:
+    name: unit (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: Install
+        run: python -m pip install -r requirements-dev.txt -e .
+      - name: Unit tests
+        run: python -m pytest -m unit
+
+  integration:
+    name: integration + e2e (${{ matrix.os }}, py${{ matrix.python }})
+    needs: unit
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+        python: ["3.10", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: Install
+        run: python -m pip install -r requirements-dev.txt -e .
+      - name: Integration tests
+        run: python -m pytest -m integration
+      - name: End-to-end tests
+        run: python -m pytest -m e2e
+
+  docker:
+    name: docker compose smoke test
+    needs: unit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Start Fake GitLab
+        run: |
+          mkdir -p .dev/work .dev/scenarios
+          docker compose up -d --build --wait fake-gitlab
+      - name: Run the real CLI in a container against it
+        run: |
+          export DEV_UID=$(id -u) DEV_GID=$(id -g)
+          docker compose run --rm harvester -s password -b all --forks branch-diff --session-file s.jsonl
+          grep -q '"type": "summary", "hits": 26' .dev/work/s.jsonl
+          docker compose run --rm harvester -m dedup --input-file s.jsonl --output-file clean.jsonl
+          test "$(grep -c '"term"' .dev/work/clean.jsonl)" -gt 0
+      - name: Request journal (diagnostics)
+        if: always()
+        run: curl -fsS http://127.0.0.1:8080/__admin/requests | head -c 4000 || true
+      - name: Fake GitLab logs
+        if: failure()
+        run: docker compose logs fake-gitlab
+      - name: Tear down
+        if: always()
+        run: docker compose --profile cli down -v
+
+  contract:
+    name: contract (real GitLab, optional)
+    if: github.event_name == 'workflow_dispatch' && inputs.contract
+    needs: unit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # Informational only: never blocks the main pipeline.
+    continue-on-error: true
+    env:
+      GLH_CONTRACT_URL: ${{ secrets.GLH_CONTRACT_URL }}
+      GLH_CONTRACT_TOKEN: ${{ secrets.GLH_CONTRACT_TOKEN }}
+      GLH_CONTRACT_PROJECT: ${{ secrets.GLH_CONTRACT_PROJECT }}
+      GLH_CONTRACT_TERM: ${{ secrets.GLH_CONTRACT_TERM }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: python -m pip install -r requirements-dev.txt -e .
+      - run: python -m pytest -m contract tests/contract
