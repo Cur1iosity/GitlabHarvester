@@ -1,11 +1,5 @@
 <div align="center">
 
-<pre>
-┏┓• ┓  ┓ ┓┏              
-┃┓┓╋┃┏┓┣┓┣┫┏┓┏┓┓┏┏┓┏╋┏┓┏┓
-┗┛┗┗┗┗┻┗┛┛┗┗┻┛ ┗┛┗ ┛┗┗ ┛ 
-</pre>
-
 # GitlabHarvester
 
 [![PyPI](https://img.shields.io/pypi/v/gitlab-harvester)](https://pypi.org/project/gitlab-harvester/)
