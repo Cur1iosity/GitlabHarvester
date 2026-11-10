@@ -4,6 +4,7 @@ Complete reference for the CLI. For a short introduction see the [README](../REA
 
 - [How it works](#how-it-works)
 - [Connection](#connection)
+- [Configuration file](#configuration-file)
 - [Project index](#project-index)
 - [Branches](#branches)
 - [Forks](#forks)
@@ -41,6 +42,50 @@ gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -s password
 - `--log-level ERROR|WARN|INFO`, `--debug`, and `--log-file path.log` control logging.
 - Rate limiting (HTTP 429) is retried automatically according to `Retry-After`.
   Errors on a single project or branch are logged, and the run continues.
+
+## Configuration file
+
+Every option can be stored in an INI file and passed with `-c/--config`.
+[config.example.ini](../config.example.ini) lists all of them with their values and defaults:
+
+```bash
+cp config.example.ini config.ini        # config.ini is git-ignored
+gitlab-harvester -c config.ini
+gitlab-harvester -c config.ini -s token --forks skip --no-resume
+```
+
+```ini
+[connection]
+url = https://gitlab.example.com
+token = env:GITLAB_TOKEN
+
+[search]
+scan-branches = all
+forks = branch-diff
+started-from = 2024-06-01
+terms =
+    password
+    api_key
+```
+
+- Keys are the long option names (`index-branches` for `--index-branches`; `_` works too).
+  Sections only group keys, and each key may appear once.
+- Precedence: command-line argument, then the config file, then the built-in default.
+  - `-s` or `-f` on the command line replaces `search`, `terms-file` and `terms` from the file.
+  - `--session` or `--session-file` replaces the other one from the file.
+  - `-b` replaces `index-branches` and `scan-branches` from the file.
+  - On/off options have a `--no-` form (`--no-resume`, `--no-dump-projects`, `--no-debug`,
+    `--no-sort-keys`, `--no-normalize-hits`) to switch off a value set in the file.
+- `terms` lists search terms one per line, as an alternative to `terms-file`.
+- `token = env:NAME` reads the token from an environment variable, so the file holds no secret.
+- Relative paths in the file (`index-file`, `terms-file`, `session-file`, `log-file`,
+  `input-file`, `output-file`, `sqlite-path`) are resolved against the file's directory.
+  Paths given on the command line stay relative to the working directory.
+- An empty value means "not set". Comments go on their own lines: text after a value is
+  part of the value. `%` has no special meaning.
+- Values are validated like command-line arguments. An unknown key or an invalid value
+  stops the run before any API request, naming the file, the section and the key.
+- The session `meta` record stores the config path (`"config"`).
 
 ## Project index
 
@@ -249,6 +294,7 @@ are URL-encoded.
 
 | Option | Default | Description |
 |---|---|---|
+| `-c, --config FILE` | — | read options from an INI file; CLI arguments override it |
 | `-u, --url URL` | — | GitLab base URL (`-H/--host` is a deprecated alias) |
 | `-t, --token TOKEN` | — | API token (`read_api`) |
 | `-p, --proxy URL` | — | HTTP(S) proxy |
@@ -271,7 +317,7 @@ are URL-encoded.
 | `--resume` | off | continue a session, skipping completed terms |
 | `--input-file`, `--output-file` | — | files for `dedup` and `convert` |
 | `--hash-algo` | `blake2b` | dedup hash |
-| `--no-normalize-hits` | off | exact snippet comparison in dedup |
+| `--[no-]normalize-hits` | on | collapse whitespace before comparing hits in dedup (`--no-normalize-hits` = exact) |
 | `--sqlite-path FILE` | `<output>.seen.sqlite` | dedup hash store |
 | `--sort-keys` | off | sorted keys in `convert` output |
 | `--log-level`, `--debug`, `--log-file` | `WARN` | logging |

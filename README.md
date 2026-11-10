@@ -34,6 +34,11 @@ gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -f words.txt -
 # Continue after an interruption (reuses the index)
 gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -f words.txt -b all --forks branch-diff --session audit --resume
 
+# Keep the connection and the search strategy in a config file; CLI arguments override it
+cp config.example.ini config.ini   # fill in url, token, terms, ...
+gitlab-harvester -c config.ini
+gitlab-harvester -c config.ini -s token --forks skip
+
 # Remove duplicate hits and export as a JSON array
 gitlab-harvester -m dedup   --input-file audit.jsonl --output-file clean.jsonl
 gitlab-harvester -m convert --input-file clean.jsonl --output-file clean.json
@@ -52,6 +57,7 @@ Common options:
 | `--started-from 2024-06-01` | search only projects with activity since the date |
 | `-m dump-index`, `--dump-projects` | build or rebuild the project index |
 | `--session NAME`, `--resume` | name a session and continue it later |
+| `-c, --config FILE` | read options from an INI file ([config.example.ini](config.example.ini)) |
 
 See [docs/usage.md](docs/usage.md) for every option, branch and fork strategies, and the output formats.
 

@@ -38,8 +38,8 @@ def _require_gitlab(args: CliArgs) -> tuple[str, str]:
     return args.url, args.token
 
 
-def _load_keywords(*, search: str | None, terms_file: str | None) -> list[str]:
-    """Load keywords from either --search or --terms-file."""
+def _load_keywords(*, search: str | None, terms_file: str | None, terms: tuple[str, ...] = ()) -> list[str]:
+    """Load keywords from --search, --terms-file or the config file `terms` list (in that order)."""
     if search:
         s = search.strip()
         return [s] if s else []
@@ -53,7 +53,7 @@ def _load_keywords(*, search: str | None, terms_file: str | None) -> list[str]:
                 keywords.append(t)
         return keywords
 
-    return []
+    return [t.strip() for t in terms if t.strip()]
 
 
 def _default_session_name(url: str) -> str:
@@ -128,9 +128,9 @@ def _run_search(args: CliArgs) -> None:
     """Run term search workflow and write a session JSONL file."""
     glh = _mk_harvester(args)
 
-    keywords = _load_keywords(search=args.search, terms_file=args.terms_file)
+    keywords = _load_keywords(search=args.search, terms_file=args.terms_file, terms=args.terms)
     if not keywords:
-        raise SystemExit("Nothing to do: provide --search or --terms-file.")
+        raise SystemExit("Nothing to do: provide --search, --terms-file or `terms` in the config file.")
 
     index_file = glh.build_project_index(
         per_page=args.batch_size,
@@ -183,6 +183,7 @@ def _run_search(args: CliArgs) -> None:
                     "type": "meta",
                     "timestamp_utc": datetime.now(UTC).isoformat(),
                     "url": args.url,
+                    "config": args.config,
                     "index_file": str(index_file),
                     "batch_size": args.batch_size,
                     "branches_per_page": args.branches_per_page,

@@ -241,3 +241,69 @@ def test_search_started_from_invalid_value(run_cli):
     proc = run_cli("-u", "http://127.0.0.1:9", "-t", "x", "-s", "password", "--started-from", "last-week")
     assert proc.returncode == 2
     assert "ISO 8601" in proc.stderr
+
+
+# --------------------------------------------------------------------------- config file (-c/--config)
+
+
+def _config(fake: FakeGitLab, tmp_path: Path) -> Path:
+    cfg = tmp_path / "conf" / "glh.ini"
+    cfg.parent.mkdir()
+    cfg.write_text(
+        f"""
+[connection]
+url = {fake.url}
+token = env:GLH_E2E_TOKEN
+[index]
+index-file = idx.jsonl
+index-branches = all
+[search]
+scan-branches = all
+forks = skip
+terms =
+    password
+    api_key
+[session]
+session-file = s.jsonl
+""",
+        encoding="utf-8",
+    )
+    return cfg
+
+
+def test_search_from_config_file_only(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("GLH_E2E_TOKEN", fake_gitlab.token)
+    cfg = _config(fake_gitlab, tmp_path)
+    proc = run_cli("-c", str(cfg), cwd=tmp_path, check=True)
+
+    # Paths are relative to the config file, not to the working directory.
+    session = Session.load(tmp_path / "conf" / "s.jsonl")
+    assert (tmp_path / "conf" / "idx.jsonl").exists()
+    assert [r["term"] for r in session.of_type("keyword_done")] == ["password", "api_key"]
+    assert not {201, 202, 203} & set(session.project_ids())  # forks = skip
+    assert session.records[0]["config"] == str(cfg)
+    assert "Search plan: 2 terms, 5 of 9 projects" in proc.stderr
+    assert "Done. Keywords: 2" in proc.stdout
+
+
+def test_cli_arguments_override_config_file(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("GLH_E2E_TOKEN", fake_gitlab.token)
+    cfg = _config(fake_gitlab, tmp_path)
+    proc = run_cli("-c", str(cfg), "-s", "token", "--forks", "include", "--session-file", "cli.jsonl",
+                   cwd=tmp_path, check=True)
+
+    session = Session.load(tmp_path / "cli.jsonl")  # CLI path: relative to the working directory
+    assert [r["term"] for r in session.of_type("keyword_done")] == ["token"]  # -s replaces config terms
+    assert "Search plan: 1 term, 8 of 9 projects" in proc.stderr  # forks included again
+    searched = {int(r.path.split("/")[4]) for r in fake_gitlab.api_requests("project_search")}
+    assert {201, 202, 203} <= searched
+    assert not (tmp_path / "conf" / "s.jsonl").exists()
+
+
+def test_invalid_config_value_fails_before_any_request(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
+    cfg = tmp_path / "bad.ini"
+    cfg.write_text("[search]\nforks = sometimes\n", encoding="utf-8")
+    proc = run_cli("-c", str(cfg), *gl_args(fake_gitlab), "-s", "x")
+    assert proc.returncode == 2
+    assert "forks" in proc.stderr and "choose from" in proc.stderr
+    assert fake_gitlab.requests == []

@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from importlib.metadata import version, PackageNotFoundError
 
+from glh.config import TERMS_DEST, ConfigError, load_config
 from glh.planner import parse_timestamp
 
 
@@ -91,6 +92,7 @@ def parse_started_from(value: str) -> datetime:
 class CliArgs:
     """Typed container for parsed CLI arguments."""
 
+    config: str | None
     url: str | None
     token: str | None
     proxy: str | None
@@ -114,6 +116,7 @@ class CliArgs:
     started_from: datetime | None
     search: str | None
     terms_file: str | None
+    terms: tuple[str, ...]
     session: str | None
     session_file: str | None
     resume: bool
@@ -141,6 +144,14 @@ class CliParser:
                         f"across projects and branches using a local project index.",
         )
 
+        parser.add_argument(
+            "-c", "--config",
+            default=None,
+            metavar="FILE",
+            help="INI config file with any of these options (see config.example.ini). "
+                 "Command-line arguments override values from the file.",
+        )
+
         # Core connectivity
         # NOTE: -H/--host is kept for backward compatibility and maps to --url.
         parser.add_argument(
@@ -156,7 +167,8 @@ class CliParser:
         # Logging
         parser.add_argument("--log-file", default=None, help="Write logs to a file (in addition to stderr).")
         parser.add_argument("--log-level", choices=("ERROR", "WARN", "INFO"), default="WARN", help="Console log level.")
-        parser.add_argument("--debug", action="store_true", help="Enable debug logging (overrides --log-level).")
+        parser.add_argument("--debug", action=argparse.BooleanOptionalAction, default=False,
+                            help="Enable debug logging (overrides --log-level).")
 
         # Mode
         parser.add_argument(
@@ -170,7 +182,8 @@ class CliParser:
         # Index
         parser.add_argument("-bs", "--batch-size", type=int, default=100, help="API pagination batch size.")
         parser.add_argument("--index-file", default=None, help="Path to the Instance Project Index file (JSONL).")
-        parser.add_argument("--dump-projects", action="store_true", help="Force rebuilding the project index.")
+        parser.add_argument("--dump-projects", action=argparse.BooleanOptionalAction, default=False,
+                            help="Force rebuilding the project index.")
 
         # Branches
         parser.add_argument(
@@ -215,7 +228,8 @@ class CliParser:
         sess.add_argument("--session", default=None, help="Session name (creates <name>.jsonl in the current directory).")
         sess.add_argument("--session-file", default=None, help="Explicit session file path (JSONL).")
 
-        parser.add_argument("--resume", action="store_true", help="Resume from existing session file.")
+        parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=False,
+                            help="Resume from existing session file.")
 
         # Postprocess
         parser.add_argument("--input-file", default=None, help="Input file for postprocess modes.")
@@ -229,19 +243,61 @@ class CliParser:
             default="blake2b",
             help="Hash algorithm for deduplication.",
         )
-        parser.add_argument("--no-normalize-hits", action="store_true", help="Disable hit normalization.")
+        parser.add_argument("--normalize-hits", action=argparse.BooleanOptionalAction, default=True,
+                            help="Normalize whitespace before comparing hits in dedup.")
 
         # Convert
-        parser.add_argument("--sort-keys", action="store_true", help="Sort JSON keys in convert mode output.")
+        parser.add_argument("--sort-keys", action=argparse.BooleanOptionalAction, default=False,
+                            help="Sort JSON keys in convert mode output.")
 
         parser.add_argument("-V", "--version", action="version", version=f"%(prog)s {_get_version()}")
 
         return parser
 
     @classmethod
+    def _given_dests(cls, argv: list[str] | None) -> set[str]:
+        """Return the argparse dests that were set explicitly on the command line."""
+        probe = cls.build()
+        for action in probe._actions:  # noqa: SLF001 - argparse exposes no public accessor
+            action.default = argparse.SUPPRESS
+        return set(vars(probe.parse_args(argv)))
+
+    @classmethod
     def parse(cls, argv: list[str] | None = None) -> CliArgs:
-        """Parse argv into CliArgs."""
-        ns = cls.build().parse_args(argv)
+        """
+        Parse argv into CliArgs.
+
+        Precedence: command-line argument > config file (-c/--config) > built-in default.
+        A search source (-s/-f) or session option given on the command line replaces
+        the alternatives from the config file, and -b on the command line overrides
+        index-branches/scan-branches from the config file.
+        """
+        parser = cls.build()
+        ns = parser.parse_args(argv)
+        ns.terms = ()
+
+        if ns.config:
+            try:
+                config = load_config(ns.config, parser)
+            except ConfigError as e:
+                parser.error(str(e))
+            given = cls._given_dests(argv)
+
+            exclusive = (("search", "terms_file", TERMS_DEST), ("session", "session_file"))
+            for group in exclusive:
+                if given & set(group):
+                    for dest in group:
+                        config.pop(dest, None)
+
+            # -b on the command line beats branch modes from the file.
+            if "branches" in given:
+                for dest in ("index_branches", "scan_branches"):
+                    if dest not in given:
+                        config.pop(dest, None)
+
+            for dest, value in config.items():
+                if dest not in given:
+                    setattr(ns, dest, value)
 
         if ns.debug:
             ns.log_level = "DEBUG"
@@ -257,6 +313,7 @@ class CliParser:
             ns.scan_branches = DEFAULT_SCAN_BRANCHES
 
         return CliArgs(
+            config=ns.config,
             url=ns.url,
             token=ns.token,
             proxy=ns.proxy,
@@ -276,6 +333,7 @@ class CliParser:
             started_from=ns.started_from,
             search=ns.search,
             terms_file=ns.terms_file,
+            terms=tuple(ns.terms),
             session=ns.session,
             session_file=ns.session_file,
             resume=ns.resume,
@@ -283,6 +341,6 @@ class CliParser:
             output_file=ns.output_file,
             sqlite_path=ns.sqlite_path,
             hash_algo=ns.hash_algo,
-            normalize_hits=not ns.no_normalize_hits,
+            normalize_hits=ns.normalize_hits,
             sort_keys=ns.sort_keys,
         )
