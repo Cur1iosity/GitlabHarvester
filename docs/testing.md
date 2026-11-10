@@ -352,6 +352,7 @@ The contract job in CI runs only on manual dispatch with repository secrets
 | `integration` | Ubuntu + Windows × Python 3.10, 3.14 | `pytest -m integration`, `pytest -m e2e` |
 | `docker` | Ubuntu | `docker compose up --wait`, real CLI in the `harvester` container, check of the output files |
 | `contract` | manual only | `pytest -m contract` against secrets-configured GitLab (non-blocking) |
+| `debian` (`debian.yml`) | `kalilinux/kali-rolling`, `debian:testing` | tests, build, `pip check` and CLI smoke test with apt packages only, `--network none` (see [packaging.md](packaging.md)) |
 | `demo gif` (`demo-gif.yml`) | published release; manual | records the README demo GIF with VHS and force-pushes it to the `demo-assets` branch |
 
 Dependencies are pinned in `requirements-dev.txt`. Every job runs the same
