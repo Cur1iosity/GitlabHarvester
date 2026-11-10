@@ -1,8 +1,9 @@
-# VHS tape for docs/assets/demo.gif (see docs/demo/README.md).
+# VHS tape for the README demo GIF (see docs/demo/README.md).
+# Writes docs/demo/out/demo.gif (git-ignored); CI publishes it to the demo-assets branch.
 # Installs the CLI with pipx (from wheels of this checkout, see Dockerfile) and
 # runs it against the bundled Fake GitLab (artificial data only).
 
-Output assets/demo.gif
+Output demo/out/demo.gif
 
 Set Shell "bash"
 Set FontSize 16

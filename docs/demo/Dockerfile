@@ -1,4 +1,4 @@
-# Image that records docs/assets/demo.gif with VHS (https://github.com/charmbracelet/vhs).
+# Image that records the README demo GIF with VHS (https://github.com/charmbracelet/vhs).
 # Build context: repository root. See docs/demo/README.md.
 #
 # The recording shows `pipx install gitlab-harvester`. It installs the package
