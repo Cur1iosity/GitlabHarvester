@@ -220,3 +220,6 @@ results/
 
 # Local GitlabHarvester config (contains the token)
 config.ini
+
+# Local demo GIF recordings (CI publishes the README GIF to the demo-assets branch)
+docs/demo/out/
