@@ -426,3 +426,20 @@ def test_post_process_is_skipped_when_the_search_fails(fake_gitlab: FakeGitLab, 
                    "--post-process", "dedup,convert", "--final-only")
     assert proc.returncode != 0
     assert not list(tmp_path.glob("s.*.json*"))
+
+
+# --------------------------------------------------------------------------- index line before the search plan
+
+
+def test_index_file_and_build_time_are_shown_before_the_plan(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
+    import re
+
+    run_cli(*gl_args(fake_gitlab), "-m", "dump-index", "--index-file", "idx.jsonl", check=True)
+    built = load_index(tmp_path / "idx.jsonl")[0]["timestamp_utc"][:19].replace("T", " ")
+    proc = run_cli(*gl_args(fake_gitlab), "-s", "token", "--index-file", "idx.jsonl", "--session-file", "s.jsonl",
+                   check=True)
+    lines = proc.stderr.splitlines()
+    index_at = next(i for i, line in enumerate(lines) if line.startswith("Index: "))
+    assert lines[index_at + 1].startswith("Search plan: ")
+    assert re.fullmatch(rf"Index: idx\.jsonl \(built {built} UTC, just now; 9 projects, branches: default\)",
+                        lines[index_at])

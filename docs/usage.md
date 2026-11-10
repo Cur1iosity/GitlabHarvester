@@ -334,12 +334,17 @@ When a phase ends, the status line is replaced by a permanent summary:
 ```text
 Indexed 9 projects from gitlab.example.com in 0.4s
 Listed 19 branches of 8 projects in 1.2s
+Index: gitlab_example_com_project_index.jsonl (built 2024-06-30 09:12:44 UTC, 3 h ago; 9 projects, branches: all)
 Search plan: 2 terms, 5 of 9 projects, 13 branches (skipped: 1 empty, 3 inactive since 2024-06-02)
 Term 1/2 'password': 20 hits in 0.2s
 Term 2/2 'api_key': 5 hits in 0.1s
 Search finished: 2 terms x 5 projects, 25 hits in 0.3s
 ```
 
+- The `Index` line names the index file and when it was built (`timestamp_utc` of its
+  `meta` record, updated by branch listing), so a reused, possibly outdated index is
+  easy to spot; it also flags an incomplete index or an index limited to a time window.
+  Rebuild it with `--dump-projects`.
 - The search counts only projects that are actually scanned. Projects excluded by
   `--started-from`, `--forks skip`, empty repositories, and projects without a branch
   to scan are reported once in the `Search plan` line and never inflate the totals.

@@ -23,11 +23,12 @@ from urllib.parse import urlparse
 
 from glh import GitlabHarvester
 from glh.cli import CliArgs
-from glh.planner import ScanOptions
+from glh.planner import ScanOptions, TimeWindow, parse_timestamp
 from glh.postprocess.convert import convert_jsonl_to_json
 from glh.postprocess.dedup import dedup_session_file
 from glh.postprocess.pipeline import run_pipeline
 from glh.session import load_done_keywords
+from glh.utils import terminal_utils
 from glh.utils.terminal_utils import format_duration
 
 # datetime.UTC exists only on Python 3.11+, while the package supports 3.10.
@@ -74,6 +75,43 @@ def _resolve_session_path(url: str, session: str | None, session_file: str | Non
     if session:
         return Path(f"{session}.jsonl")
     return Path(f"results{os.sep}{_default_session_name(url)}.jsonl")
+
+
+def _format_age(seconds: float) -> str:
+    """'just now', '5 min ago', '3 h ago', '2 days ago'."""
+    if seconds < 60:
+        return "just now"
+    if seconds < 3600:
+        return f"{int(seconds // 60)} min ago"
+    if seconds < 2 * 86400:
+        return f"{int(seconds // 3600)} h ago"
+    return f"{int(seconds // 86400)} days ago"
+
+
+def describe_index(path: str | Path, meta: dict[str, Any], projects: int, now: datetime | None = None) -> str:
+    """
+    One line about the index a search uses, so the user can judge how current it is.
+
+    Example: "Index: idx.jsonl (built 2024-06-01 12:00:00 UTC, 3 h ago; 9 projects, branches: all)".
+    """
+    built = parse_timestamp(meta.get("timestamp_utc"))
+    if built is None:
+        when = "build time unknown"
+    else:
+        now = now or datetime.now(UTC)
+        built_utc = built.astimezone(UTC)
+        when = f"built {built_utc:%Y-%m-%d %H:%M:%S} UTC, {_format_age((now - built_utc).total_seconds())}"
+
+    details = [terminal_utils.plural(projects, "project")]
+    if meta.get("branches") is not None:
+        details.append(f"branches: {meta['branches']}")
+    window = TimeWindow(parse_timestamp(meta.get("last_activity_after")),
+                        parse_timestamp(meta.get("last_activity_before")))
+    if window:
+        details.append(f"projects active {window.describe()}")
+    if meta.get("is_completed") is False:
+        details.append("INCOMPLETE (listing failed; rebuild with --dump-projects)")
+    return f"Index: {path} ({when}; {', '.join(details)})"
 
 
 def _write_jsonl_line(fp: IO[str], record: dict[str, Any]) -> None:
@@ -150,6 +188,7 @@ def _run_search(args: CliArgs) -> None:
 
     data = glh.load_projects_from_file(index_file)
     projects = data.get("projects", [])
+    terminal_utils.STATUS.write_line(describe_index(index_file, data.get("meta") or {}, len(projects)))
     if not projects:
         raise SystemExit(f"Project index is empty: {index_file}")
 
