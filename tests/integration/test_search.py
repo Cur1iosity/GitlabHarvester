@@ -280,10 +280,12 @@ def test_progress_counts_only_projects_that_are_scanned(fake_gitlab: FakeGitLab,
     assert ("Search plan: 2 terms, 2 of 9 projects, 4 branches "
             "(skipped: 1 empty, 3 forks, 3 inactive since 2024-06-02)\n") in out
 
-    frames = [f.strip() for f in out.split("\r") if "projects |" in f]
+    frames = [f.strip() for f in out.split("\r") if "projects (" in f]
     counts = {m.group(2) for f in frames for m in re.finditer(r"(\d+)/(\d+) projects", f)}
     assert counts == {"2"}, frames
-    assert any(f.startswith("Searching 'token' (2/2) | 2/2 projects") for f in frames)
+    assert any(f.startswith("Searching 'token' (2/2) | term 2/2 projects (100%)") for f in frames)
+    # Two terms: per-term and overall counters ("total" counts projects x terms).
+    assert any(" | total 3/4 (75%) " in f for f in frames)
     assert any("ops/infra/terraform/modules @ main" in f for f in frames)
     assert re.search(r"Search finished: 2 terms x 2 projects, \d+ hits? in ", out)
     assert out.endswith("\n")  # the status line is erased, the summary stays

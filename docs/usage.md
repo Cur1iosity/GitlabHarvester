@@ -286,11 +286,22 @@ single JSON array. `--sort-keys` sorts object keys.
 
 Progress goes to stderr; results and final summaries go to stdout.
 
-On a terminal, one status line is redrawn in place and fitted to the window width:
+On a terminal, one status line is redrawn in place and fitted to the window width.
+With one term:
 
 ```text
-Searching 'api_key' (2/2) | 3/5 projects | 21 hits | 0:05 | ETA 0:04 | acme/web-app @ master [2/3]
+Searching 'password' | 3/5 projects (60%) | 21 hits | 0:05 | ETA 0:04 | acme/web-app @ master [2/3]
 ```
+
+With several terms, the current term (`term`: its projects, the time since it started,
+its ETA) and the whole list (`total`: projects x terms, the time since the search
+started, the overall ETA) are shown side by side:
+
+```text
+Searching 'api_key' (2/3) | term 3/5 projects (60%) 0:02 ETA 0:01 | total 8/15 (53%) 0:07 ETA 0:06 | 21 hits | acme/web-app @ master
+```
+
+Percentages are rounded down, so 100% means the work is really finished.
 
 When a phase ends, the status line is replaced by a permanent summary:
 
