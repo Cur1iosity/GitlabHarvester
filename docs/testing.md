@@ -352,6 +352,7 @@ The contract job in CI runs only on manual dispatch with repository secrets
 | `integration` | Ubuntu + Windows × Python 3.10, 3.14 | `pytest -m integration`, `pytest -m e2e` |
 | `docker` | Ubuntu | `docker compose up --wait`, real CLI in the `harvester` container, check of the output files |
 | `contract` | manual only | `pytest -m contract` against secrets-configured GitLab (non-blocking) |
+| `demo gif` (`demo-gif.yml`) | push to `dev` with a version bump or `docs/demo/` changes; manual | re-records `docs/assets/demo.gif` with VHS and commits it to `dev` |
 
 Dependencies are pinned in `requirements-dev.txt`. Every job runs the same
 commands documented above, so a CI failure reproduces locally with

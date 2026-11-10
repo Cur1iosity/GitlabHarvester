@@ -20,3 +20,16 @@ docker run --rm -v "$PWD/docs:/vhs" gitlab-harvester/demo demo/demo.tape
 
 The GIF is written to `docs/assets/demo.gif`. Aim for 10-15 seconds: tune the
 delays in `demo.yaml` and the final `Sleep` in `demo.tape`.
+
+## In CI
+
+`.github/workflows/demo-gif.yml` re-records the GIF automatically on pushes to `dev`
+when the version in `pyproject.toml` changed or `docs/demo/` changed
+(`needs-rebuild.sh` decides; other pushes finish in seconds). It commits the new
+GIF back to `dev` as `github-actions[bot]` (`docs: regenerate demo GIF for vX.Y.Z`),
+and it reaches `main` with the usual `dev -> main` pull request. The GIF is also kept
+as a run artifact. Run it by hand from the Actions tab (`workflow_dispatch`) after
+changing the console output without a version bump.
+
+After pushing a version bump, pull `dev` before the next commit: the bot's commit
+arrives a few minutes later.

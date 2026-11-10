@@ -81,7 +81,9 @@ jobs:
           docker compose up -d --build --wait fake-gitlab
       - name: Run the real CLI in a container against it
         run: |
-          export DEV_UID=$(id -u) DEV_GID=$(id -g)
+          DEV_UID="$(id -u)"
+          DEV_GID="$(id -g)"
+          export DEV_UID DEV_GID
           docker compose run --rm harvester -s password -b all --forks branch-diff --session-file s.jsonl
           grep -q '"type": "summary", "hits": 26' .dev/work/s.jsonl
           docker compose run --rm harvester -m dedup --input-file s.jsonl --output-file clean.jsonl
