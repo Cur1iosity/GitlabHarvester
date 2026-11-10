@@ -158,3 +158,28 @@ def test_config_alias_and_option_together_is_a_duplicate(tmp_path: Path, capsys)
     with pytest.raises(SystemExit):
         CliParser.parse(["-c", str(cfg)])
     assert "duplicate key" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- banner and console encodings
+
+import io  # noqa: E402
+
+from glh.cli import _BANNER, get_banner  # noqa: E402
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-16"])
+def test_banner_art_on_unicode_streams(encoding):
+    stream = io.TextIOWrapper(io.BytesIO(), encoding=encoding)
+    assert get_banner(stream).startswith(_BANNER)
+
+
+@pytest.mark.parametrize("encoding", ["cp1252", "cp866", "ascii", "latin-1"])
+def test_plain_banner_on_legacy_code_pages(encoding):
+    stream = io.TextIOWrapper(io.BytesIO(), encoding=encoding)
+    banner = get_banner(stream)
+    assert banner.startswith("GitlabHarvester v")
+    banner.encode(encoding)  # must not raise
+
+
+def test_banner_without_stream_keeps_the_art():
+    assert get_banner().startswith(_BANNER)

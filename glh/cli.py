@@ -12,6 +12,7 @@ This module provides:
 from __future__ import annotations
 
 import argparse
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from importlib.metadata import version, PackageNotFoundError
@@ -39,8 +40,26 @@ def _get_version() -> str:
         return "unknown"
 
 
-def get_banner() -> str:
-    """Return the CLI banner with version suffix."""
+def _can_encode(text: str, stream: object) -> bool:
+    """True if ``stream``'s encoding can represent ``text`` (no encoding attribute = assume UTF-8)."""
+    encoding = getattr(stream, "encoding", None) or "utf-8"
+    try:
+        text.encode(encoding)
+    except (UnicodeEncodeError, LookupError):
+        return False
+    return True
+
+
+def get_banner(stream: object | None = None) -> str:
+    """
+    Return the CLI banner with version suffix.
+
+    The box-drawing banner needs a Unicode-capable stream. If ``stream`` uses
+    an encoding without those characters (e.g. cp1252 or cp866 in a redirected
+    Windows console), a plain-text banner is returned instead.
+    """
+    if stream is not None and not _can_encode(_BANNER, stream):
+        return f"GitlabHarvester v{_get_version()}"
     return f"{_BANNER} v{_get_version()}"
 
 
@@ -173,7 +192,8 @@ class CliParser:
         parser = argparse.ArgumentParser(
             prog="gitlab-harvester",
             formatter_class=argparse.RawDescriptionHelpFormatter,
-            description=f"{get_banner()}\nSearch GitLab instances for sensitive data, secrets, and patterns "
+            # Help goes to stdout: the banner must be encodable there.
+            description=f"{get_banner(sys.stdout)}\nSearch GitLab instances for sensitive data, secrets, and patterns "
                         f"across projects and branches using a local project index.",
         )
 
