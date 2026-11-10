@@ -35,7 +35,14 @@ jobs:
         run: docker build -f docs/demo/Dockerfile -t gitlab-harvester/demo .
 
       - name: Record
-        run: docker run --rm -v "$PWD/docs:/vhs" gitlab-harvester/demo demo/demo.tape
+        # VHS runs as root in the container (the tape edits /etc/hosts, binds port 80,
+        # installs with pipx) and creates docs/demo/out as root with mode 0750, which
+        # the runner user can't read. Hand the output over to the runner afterwards.
+        run: |
+          docker run --rm -v "$PWD/docs:/vhs" -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+            --entrypoint sh gitlab-harvester/demo \
+            -c 'vhs demo/demo.tape && chown -R "$HOST_UID:$HOST_GID" demo/out'
+          ls -l docs/demo/out/demo.gif
 
       - name: Keep the GIF as a run artifact
         uses: actions/upload-artifact@v7
