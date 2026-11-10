@@ -1,0 +1,47 @@
+# Local development environment for GitlabHarvester.
+#
+#   docker compose up -d --wait fake-gitlab          # start Fake GitLab on :8080
+#   docker compose run --rm harvester -s password    # run the real CLI against it
+#   docker compose down                              # stop everything
+#
+# See docs/testing.md for scenarios, fault injection and diagnostics.
+name: gitlab-harvester-dev
+
+services:
+  fake-gitlab:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: fake-gitlab
+    image: gitlab-harvester/fake-gitlab:dev
+    environment:
+      FAKE_GITLAB_SCENARIO: ${FAKE_GITLAB_SCENARIO:-default}
+      FAKE_GITLAB_LOG_LEVEL: ${FAKE_GITLAB_LOG_LEVEL:-INFO}
+      # Extra scenario directory (mounted below) searched before built-ins.
+      FAKE_GITLAB_SCENARIO_PATH: /scenarios
+    ports:
+      - "${FAKE_GITLAB_PORT:-8080}:8080"
+    volumes:
+      # Edit built-in scenarios without rebuilding; switch with POST /__admin/scenario.
+      - ./fakegitlab/scenarios:/app/fakegitlab/scenarios:ro
+      # Put your own *.yaml scenarios here (git-ignored).
+      - ./.dev/scenarios:/scenarios:ro
+
+  harvester:
+    profiles: ["cli"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: harvester
+    image: gitlab-harvester/harvester:dev
+    # Linux/macOS: export DEV_UID=$(id -u) DEV_GID=$(id -g) to keep host file ownership.
+    user: "${DEV_UID:-0}:${DEV_GID:-0}"
+    depends_on:
+      fake-gitlab:
+        condition: service_healthy
+    environment:
+      GLH_URL: http://fake-gitlab:8080
+      GLH_TOKEN: ${GLH_TOKEN:-dev-token}
+    volumes:
+      # Index and session files land in ./.dev/work on the host.
+      - ./.dev/work:/work

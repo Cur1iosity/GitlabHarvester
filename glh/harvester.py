@@ -5,9 +5,9 @@ import json
 import logging
 import os
 import time
-from datetime import datetime, UTC
+from datetime import datetime, timezone
 from typing import Callable, IO, Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import gitlab.exceptions
 import requests.exceptions
@@ -21,6 +21,9 @@ from glh.exceptions import GitlabHarvesterError
 from glh.planner import ScanOptions, branches_to_scan, should_scan_project
 from glh.utils import logging_utils, terminal_utils
 from glh.utils.terminal_utils import human_int
+
+# datetime.UTC exists only on Python 3.11+, while the package supports 3.10.
+UTC = timezone.utc
 
 
 def client_required(func: Callable) -> Callable:
@@ -126,13 +129,16 @@ class GitlabHarvester:
         """Return a filesystem-safe identifier for the configured GitLab instance.
 
         Returns:
-            Instance identifier like 'gitlab_example_com', or 'undefined' if no client.
+            Instance identifier like 'gitlab_example_com' (a port becomes '_8080'),
+            or 'undefined' if no client.
         """
         if not self._gl:
             return "undefined"
         parsed = urlparse(self._gl.url)
         host = (parsed.netloc or parsed.path).strip("/")
-        return host.replace(".", "_")
+        # ':' (host:port) is not allowed in Windows file names and would create
+        # an NTFS alternate data stream instead of a regular file.
+        return host.replace(".", "_").replace(":", "_")
 
     def get_host(self) -> str:
         """Backward-compatible alias for get_instance_id()."""
@@ -320,6 +326,9 @@ class GitlabHarvester:
                     page += 1
 
             except gitlab.exceptions.GitlabError as e:
+                # The listing stopped early: keep what was fetched, but never
+                # mark a partial index as complete.
+                is_completed = False
                 self.logger.error("Gitlab API error. The project list wasn't complete.")
                 self.logger.error(e)
 
@@ -401,7 +410,7 @@ class GitlabHarvester:
                     pbar.update(len(batch))
                     page += 1
 
-            except gitlab.exceptions.GitlabError as e:
+            except (gitlab.exceptions.GitlabError, requests.exceptions.RequestException) as e:
                 self.logger.error(
                     "Gitlab API error. The branch list wasn't complete for project with ID: %s.",
                     project_id,
@@ -434,8 +443,7 @@ class GitlabHarvester:
             Output filename.
         """
         if not filename:
-            host = self._gl.url.split(":", 1)[1].strip("/").replace(".", "_")
-            filename = f"{host}_project_index.jsonl"
+            filename = f"{self.get_instance_id()}_project_index.jsonl"
 
         needs_build = enforce_dump or not os.path.exists(filename)
         if needs_build:
@@ -455,6 +463,17 @@ class GitlabHarvester:
                 )
         else:
             self.logger.info("Instance Project Index already exists: %s.", filename)
+            try:
+                with open(filename, encoding="utf-8") as fp:
+                    meta = json.loads(fp.readline() or "{}")
+            except (OSError, json.JSONDecodeError):
+                meta = {}
+            if isinstance(meta, dict) and meta.get("is_completed") is False:
+                self.logger.warning(
+                    "Existing project index %s is incomplete (previous build failed). "
+                    "Use --dump-projects to rebuild it.",
+                    filename,
+                )
         return filename
 
     def enrich_project_index_with_branches(
@@ -781,6 +800,8 @@ class GitlabHarvester:
                                 "timestamp_utc": datetime.now(UTC).isoformat(),
                             },
                         )
+                        # Resume checkpoint: make it durable even if the process is killed.
+                        session_file.flush()
 
                 terminal_utils.set_desc(hdr, f"Done | Hit Counter: {hit_counter}", lay)
 
@@ -814,6 +835,8 @@ class GitlabHarvester:
                             "timestamp_utc": datetime.now(UTC).isoformat(),
                         },
                     )
+                    # Resume checkpoint: make it durable even if the process is killed.
+                    session_file.flush()
 
                 pbar.update(1)
 
@@ -927,7 +950,7 @@ class GitlabHarvester:
                 )
                 if s_res:
                     res.append({"branch": b, "branch_search_result": s_res})
-            except gitlab.exceptions.GitlabError as e:
+            except (gitlab.exceptions.GitlabError, requests.exceptions.RequestException) as e:
                 self.logger.warning("%s | %s Branch: %s", e, project_url, b)
 
         return res, hit_counter
@@ -971,7 +994,6 @@ class GitlabHarvester:
         try:
             while True:
                 batch = project.search(scope=SearchScope.BLOBS,
-                                       project=project,
                                        ref=branch,
                                        search=term,
                                        page=page,
@@ -985,13 +1007,15 @@ class GitlabHarvester:
                 if len(batch) < per_page:
                     break
 
-        except gitlab.exceptions.GitlabError as e:
+        except (gitlab.exceptions.GitlabError, requests.exceptions.RequestException) as e:
+            # Keep results of already fetched pages; a timeout must not abort the whole scan.
             self.logger.warning("[%s] %s: %s", project.id, project_url, e)
 
-        branch_url: str = f"{project_url}/-/tree/{branch}"
+        # Branch names and paths may contain '#', '?', '%', spaces, etc.
+        branch_url: str = f"{project_url}/-/tree/{quote(branch, safe='/')}"
         if search_results:
-            res = [{'url': f'{branch_url}/{x["path"]}#L{x["startline"]}', 'data': x.get('data', '')} for x in
-                   search_results]
+            res = [{'url': f'{branch_url}/{quote(x["path"], safe="/")}#L{x["startline"]}', 'data': x.get('data', '')}
+                   for x in search_results]
 
             for x in res:
                 self.logger.info(f"[+] Hitted '{term}': {x['url']}")

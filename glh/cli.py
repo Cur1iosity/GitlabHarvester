@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from datetime import datetime
 from importlib.metadata import version, PackageNotFoundError
+
+from glh.planner import parse_timestamp
 
 
 BranchesMode = str | int  # "default" | "all" | int
@@ -65,6 +68,25 @@ def parse_branches(value: str) -> BranchesMode:
     raise argparse.ArgumentTypeError("Use 'default', 'all', or a positive integer (e.g., 10).")
 
 
+def parse_started_from(value: str) -> datetime:
+    """Parse --started-from into a timezone-aware datetime.
+
+    Allowed values:
+      - date: '2024-06-01' (midnight UTC)
+      - date and time: '2024-06-01T12:30', '2024-06-01 12:30:00'
+      - with offset: '2024-06-01T12:30:00+03:00', '2024-06-01T09:30:00Z'
+
+    Raises:
+        argparse.ArgumentTypeError: If value is not an ISO 8601 date/datetime.
+    """
+    dt = parse_timestamp(value)
+    if dt is None:
+        raise argparse.ArgumentTypeError(
+            "Use an ISO 8601 date or datetime, e.g. 2024-06-01 or 2024-06-01T12:00:00+00:00."
+        )
+    return dt
+
+
 @dataclass(frozen=True, slots=True)
 class CliArgs:
     """Typed container for parsed CLI arguments."""
@@ -89,6 +111,7 @@ class CliArgs:
     scan_branches: BranchesMode
     forks: str
     fork_diff_bases: str
+    started_from: datetime | None
     search: str | None
     terms_file: str | None
     session: str | None
@@ -171,13 +194,25 @@ class CliParser:
         )
         parser.add_argument("--fork-diff-bases", default="main,master,develop,dev", help="Comma-separated base branches.")
 
+        # Activity filter (search only; the index is not affected)
+        parser.add_argument(
+            "--started-from",
+            type=parse_started_from,
+            default=None,
+            metavar="DATE",
+            help="Search only projects with activity (last_activity_at) on or after DATE "
+                 "(ISO 8601, e.g. 2024-06-01 or 2024-06-01T12:00:00+03:00; without offset = UTC). "
+                 "Older projects are skipped without API calls. Note: secrets committed earlier "
+                 "but still present in skipped projects are not reported.",
+        )
+
         # Search
         group = parser.add_mutually_exclusive_group()
         group.add_argument("-s", "--search", default=None, help="Single search term.")
         group.add_argument("-f", "--terms-file", default=None, help="Path to file with one term per line.")
 
         sess = parser.add_mutually_exclusive_group()
-        sess.add_argument("--session", default=None, help="Session name (creates results/<name>.jsonl).")
+        sess.add_argument("--session", default=None, help="Session name (creates <name>.jsonl in the current directory).")
         sess.add_argument("--session-file", default=None, help="Explicit session file path (JSONL).")
 
         parser.add_argument("--resume", action="store_true", help="Resume from existing session file.")
@@ -238,6 +273,7 @@ class CliParser:
             scan_branches=ns.scan_branches,
             forks=ns.forks,
             fork_diff_bases=ns.fork_diff_bases,
+            started_from=ns.started_from,
             search=ns.search,
             terms_file=ns.terms_file,
             session=ns.session,

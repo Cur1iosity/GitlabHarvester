@@ -1,297 +1,77 @@
-# GitlabHarvester — Global GitLab Code & Secret Search Tool (Python)
+# GitlabHarvester
 
-![PyPI](https://img.shields.io/pypi/v/gitlab-harvester)
+[![PyPI](https://img.shields.io/pypi/v/gitlab-harvester)](https://pypi.org/project/gitlab-harvester/)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License](https://img.shields.io/github/license/Cur1iosity/GitlabHarvester)
-![Last Commit](https://img.shields.io/github/last-commit/Cur1iosity/GitlabHarvester)
 
-**GitlabHarvester** is a fast, scalable tool for searching keywords across an entire GitLab instance using the API — without cloning repositories.
-Built for **security audits, secret discovery, compliance checks, and large-scale code intelligence** across thousands of projects.
+Search for keywords and secrets across every repository of a GitLab instance through the API,
+without cloning. Useful on GitLab CE, which has no instance-wide code search.
 
-> Global term search across a full GitLab instance — especially valuable for GitLab CE environments.
-
----
-
-## ⚡ Quick Start
-
-Search a keyword:
+## Install
 
 ```bash
-gitlab-harvester -u https://gitlab.example.com -t $TOKEN --search password
+pipx install gitlab-harvester    # or: pip install gitlab-harvester
 ```
 
-Search from file:
+Requires Python 3.10+ and a GitLab token with the `read_api` scope.
+
+## Quick start
 
 ```bash
-gitlab-harvester -u https://gitlab.example.com -t $TOKEN --terms-file words.txt
+export GITLAB_TOKEN=...
+
+# Search one term in the default branch of every project
+gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -s password
+
+# Search a list of terms in all branches, skipping branches forks share with their upstream.
+# --dump-projects rebuilds the index so it includes all branch names.
+gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -f words.txt -b all --forks branch-diff --dump-projects --session audit
+
+# Search only repositories with activity on or after a date, e.g. a weekly re-scan.
+# Projects inactive since then are skipped without API calls; in active ones every file is searched.
+gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -f words.txt -b all --started-from 2024-06-01 --session since-june
+
+# Continue after an interruption (reuses the index)
+gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -f words.txt -b all --forks branch-diff --session audit --resume
+
+# Remove duplicate hits and export as a JSON array
+gitlab-harvester -m dedup   --input-file audit.jsonl --output-file clean.jsonl
+gitlab-harvester -m convert --input-file clean.jsonl --output-file clean.json
 ```
 
-Build project index only:
+The first run builds a project index (`<host>_project_index.jsonl`), and later runs reuse it.
+Branch options take effect when the index is built; add `--dump-projects` after changing them.
+Hits are written to a JSONL session file as they are found.
+
+Common options:
+
+| Option | Purpose |
+|---|---|
+| `-b, --branches default\|all\|N` | branches to index and search |
+| `--forks include\|skip\|branch-diff\|all-branches` | how forks are handled |
+| `--started-from 2024-06-01` | search only projects with activity since the date |
+| `-m dump-index`, `--dump-projects` | build or rebuild the project index |
+| `--session NAME`, `--resume` | name a session and continue it later |
+
+See [docs/usage.md](docs/usage.md) for every option, branch and fork strategies, and the output formats.
+
+## Development
 
 ```bash
-gitlab-harvester -u https://gitlab.example.com -t $TOKEN -m dump-index
+git clone https://github.com/Cur1iosity/GitlabHarvester.git && cd GitlabHarvester
+pip install -r requirements-dev.txt -e .
+pytest
 ```
 
-Deduplicate results:
+The tests and local runs use a bundled Fake GitLab API, so they need no real instance:
 
 ```bash
-gitlab-harvester -m dedup --input-file session.jsonl --output-file clean.jsonl
+python -m fakegitlab
+gitlab-harvester -u http://127.0.0.1:8080 -t dev-token -s password -b all
 ```
 
-Convert JSONL → JSON:
+Details: [docs/testing.md](docs/testing.md), [docs/architecture.md](docs/architecture.md).
 
-```bash
-gitlab-harvester -m convert --input-file session.jsonl --output-file result.json
-```
+## License
 
----
-
-## 🚀 Overview
-
-GitLab Community Edition does not provide full instance-wide code search like EE.
-GitlabHarvester fills this gap by:
-
-* building a lightweight instance project index
-* scanning repositories via API
-* streaming results in JSONL
-* supporting resumable sessions
-* keeping memory usage constant
-
-Designed to operate efficiently on environments with **10k–100k repositories**.
-
----
-
-## 🔍 Key Advantages
-
-| Problem                 | Solution               |
-| ----------------------- | ---------------------- |
-| No global search        | Instance-wide scan     |
-| Cloning thousands repos | API-only scanning      |
-| Large instances         | Streaming architecture |
-| Repeated audits         | Cached project index   |
-
----
-
-## ✨ Features
-
-* Instance-wide keyword search
-* No repository cloning
-* JSONL project index
-* Branch scanning strategies
-* Smart fork analysis
-* Resume interrupted scans
-* Streaming output
-* Low memory footprint
-* Automation-friendly
-* Built-in post-processing tools
-
----
-
-## 📦 Installation
-
-### Recommended — install from PyPI
-
-```bash
-pipx install gitlab-harvester
-```
-
-Run:
-
-```bash
-gitlab-harvester --help
-```
-
----
-
-### Alternative — pip
-
-```bash
-pip install gitlab-harvester
-```
-
----
-
-### Development install
-
-```bash
-git clone https://github.com/Cur1iosity/GitlabHarvester.git
-cd GitlabHarvester
-pip install .
-```
-
-Editable mode:
-
-```bash
-pip install -e .
-```
-
----
-
-### Install latest dev version
-
-```bash
-pipx install git+https://github.com/Cur1iosity/GitlabHarvester.git
-```
-
----
-
-## Requirements
-
-* Python **3.10+**
-* GitLab token with **read_api** permission
-
----
-
-## 🌿 Branch Control
-
-Two independent controls:
-
-* `--index-branches` — stored branches
-* `--scan-branches` — scanned branches
-
-Example:
-
-```bash
-gitlab-harvester -u ... -t ... --scan-branches 10
-```
-
-Store all + scan all:
-
-```bash
-gitlab-harvester -u ... -t ... --index-branches all --scan-branches all
-```
-
-Shortcut:
-
-```bash
---branches N
-```
-
----
-
-## 🍴 Fork Strategies
-
-```
---forks skip|include|branch-diff|all-branches
-```
-
-Recommended → **branch-diff**
-
-| Mode         | Behavior                       |
-| ------------ | ------------------------------ |
-| skip         | ignore forks                   |
-| include      | treat as normal repos          |
-| branch-diff  | scan default + unique branches |
-| all-branches | full exhaustive scan           |
-
----
-
-## 💾 Sessions & Resume
-
-Create session:
-
-```bash
-gitlab-harvester -u ... -t ... --terms-file words.txt --session audit
-```
-
-Resume:
-
-```bash
-gitlab-harvester -u ... -t ... --session-file audit.jsonl --resume
-```
-
----
-
-## 📊 Output
-
-Two file types:
-
-| File          | Purpose                 |
-| ------------- | ----------------------- |
-| Project index | cached project metadata |
-| Session file  | hits + checkpoints      |
-
-Format → JSONL (streaming-friendly)
-
----
-
-## 🧰 Post-Processing Modes
-
-GitlabHarvester includes built-in post-processing utilities.
-
-### Deduplicate results
-
-```bash
-gitlab-harvester -m dedup \
-  --input-file session.jsonl \
-  --output-file clean.jsonl
-```
-
-Options:
-
-* `--sqlite-path file.sqlite`
-* `--hash-algo blake2b|sha1|sha256`
-* `--no-normalize-hits`
-
----
-
-### Convert JSONL → JSON
-
-```bash
-gitlab-harvester -m convert \
-  --input-file session.jsonl \
-  --output-file result.json
-```
-
-Pretty print:
-
-```bash
-jq . result.json > formatted.json
-```
-
----
-
-## 🏗 Architecture
-
-```
-GitLab API
-   ↓
-Indexer
-   ↓
-Branch planner
-   ↓
-Matcher
-   ↓
-JSONL stream
-```
-
-Constant memory usage regardless of instance size.
-
----
-
-## 🎯 Typical Use Cases
-
-* secret discovery
-* credential leaks detection
-* internal audits
-* redteam/pentest reconnaissance
-* DevSecOps validation
-* large-scale code search
-
----
-
-## 🔐 Security Notice
-
-Use only on GitLab instances where you are authorized to perform scanning.
-
----
-
-## 🤝 Contributing
-
-Pull requests and ideas welcome.
-
----
-
-## 📜 License
-
-MIT
+MIT. Use only on GitLab instances you are authorized to scan.

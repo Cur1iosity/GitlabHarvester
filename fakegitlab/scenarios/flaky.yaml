@@ -1,0 +1,35 @@
+# Default data with realistic transient failures, for manual resilience checks.
+#
+# - The second page of the project list is rate limited once (429, Retry-After: 1).
+# - Every branch listing of project 102 fails with 503.
+# - Blob search in project 301 is slow (0.5 s per request).
+# - Blob search in project 103 returns a malformed JSON body once.
+name: flaky
+description: Default scenario with rate limiting, 5xx, slow responses and malformed JSON.
+extends: default
+
+faults:
+  - name: projects-rate-limited
+    match: {method: GET, path: "^/api/v4/projects$", query: {page: "2"}}
+    times: 1
+    response:
+      status: 429
+      headers: {Retry-After: "1"}
+      json: {message: "Retry later"}
+
+  - name: payments-branches-unavailable
+    match: {method: GET, path: "^/api/v4/projects/102/repository/branches$"}
+    response:
+      status: 503
+      json: {message: "503 Service Unavailable"}
+
+  - name: terraform-search-slow
+    match: {method: GET, path: "^/api/v4/projects/301/search$"}
+    response: {delay: 0.5}
+
+  - name: web-app-search-garbage
+    match: {method: GET, path: "^/api/v4/projects/103/search$"}
+    times: 1
+    response:
+      status: 200
+      body: "<html>502 Bad Gateway</html>"

@@ -1,0 +1,11 @@
+# An instance where the token is valid but no projects are visible.
+name: empty
+description: Valid credentials, zero visible projects.
+
+users:
+  - id: 1
+    username: harvester-bot
+    name: Harvester Bot
+    tokens: [dev-token]
+
+projects: []
