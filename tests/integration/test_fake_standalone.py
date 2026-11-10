@@ -7,6 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 import requests
 
 from fakegitlab import FakeGitLab
@@ -76,6 +77,35 @@ def test_standalone_entry_point(tmp_path: Path):
         proc.wait(timeout=15)
         err_log.close()
     assert "GET /api/v4/projects" in (tmp_path / "stderr.log").read_text(encoding="utf-8")
+
+
+def test_standalone_https(tmp_path: Path):
+    """`--tls-cert/--tls-key` serve HTTPS; clients verify it with the issuing CA."""
+    trustme = pytest.importorskip("trustme")
+    ca = trustme.CA()
+    cert = ca.issue_cert("127.0.0.1")
+    for name, blob in (("ca.pem", ca.cert_pem), ("cert.pem", cert.cert_chain_pems[0]), ("key.pem", cert.private_key_pem)):
+        blob.write_to_path(str(tmp_path / name))
+
+    err_log = (tmp_path / "stderr.log").open("wb")
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "fakegitlab", "--port", "0", "--tls-cert", str(tmp_path / "cert.pem"),
+         "--tls-key", str(tmp_path / "key.pem")],
+        cwd=str(REPO_ROOT), env=cli_env(), stdout=subprocess.PIPE, stderr=err_log, text=True, encoding="utf-8",
+    )
+    try:
+        assert proc.stdout is not None
+        first = proc.stdout.readline()
+        url = re.search(r"(https://\S+)", first).group(1)
+        r = requests.get(f"{url}/api/v4/user", headers={"PRIVATE-TOKEN": "dev-token"}, timeout=10,
+                         verify=str(tmp_path / "ca.pem"))
+        assert r.status_code == 200 and r.json()["web_url"].startswith("https://")
+        with pytest.raises(requests.exceptions.SSLError):
+            requests.get(f"{url}/api/v4/user", timeout=10)  # not trusted without the CA
+    finally:
+        kill_process_tree(proc)
+        proc.wait(timeout=10)
+        err_log.close()
 
 
 def test_list_scenarios_cli():

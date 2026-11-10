@@ -2,7 +2,9 @@
 
 The README shows a GIF recorded with [VHS](https://github.com/charmbracelet/vhs) in a
 container: `pipx install gitlab-harvester`, then the real CLI against the bundled Fake GitLab
-(artificial data only) served as `http://gitlab.example.com`. Nothing is sent to a real GitLab.
+(artificial data only) served as `https://gitlab.example.com`. Nothing is sent to a real GitLab.
+`setup.sh` (sourced, not recorded) issues a certificate from a throwaway private CA and trusts it via
+`REQUESTS_CA_BUNDLE`, so TLS is really verified and the recorded command needs no TLS flags.
 
 `pipx install` runs for real, but offline: the image builds wheels of this checkout and its
 dependencies, and pip is pointed at them (`PIP_NO_INDEX`, `PIP_FIND_LINKS`). So the GIF shows
@@ -12,6 +14,7 @@ the version of the checkout, not whatever is on PyPI at recording time.
 |---|---|
 | `demo.tape` | what is typed; waits for the output (`Wait /done!/`, `Wait /Done\. Keywords/`) instead of fixed pauses |
 | `demo.yaml` | Fake GitLab scenario: the default dataset plus small response delays, so the progress line is visible |
+| `setup.sh` | hidden setup: private CA and certificate, HTTPS Fake GitLab, term list, token |
 | `Dockerfile` | VHS image with pipx, a local wheel directory for GitlabHarvester, and the Fake GitLab |
 
 ## Where the GIF lives

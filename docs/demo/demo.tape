@@ -14,13 +14,12 @@ Set Framerate 24
 Set TypingSpeed 28ms
 Set Theme "Catppuccin Mocha"
 
-# Setup (not recorded): Fake GitLab on http://gitlab.example.com, a term list, a token.
+# Setup (not recorded): Fake GitLab on https://gitlab.example.com with a certificate
+# from a throwaway private CA that the shell trusts; see setup.sh.
 Hide
-Type "echo '127.0.0.1 gitlab.example.com' >> /etc/hosts; cd /tmp; printf 'password\napi_key\ntoken\n' > words.txt; export GITLAB_TOKEN=dev-token PS1='$ '"
+Type "source /vhs/demo/setup.sh"
 Enter
-Type "(cd /demo-app && /opt/fake/bin/python -m fakegitlab --host 127.0.0.1 --port 80 --scenario /vhs/demo/demo.yaml >/dev/null 2>&1 &); sleep 1.5; clear"
-Enter
-Sleep 2.5s
+Sleep 4s
 Show
 
 Type "pipx install gitlab-harvester"
@@ -29,7 +28,7 @@ Enter
 Wait+Screen@90s /done!/
 Sleep 1s
 
-Type "gitlab-harvester -u http://gitlab.example.com -t $GITLAB_TOKEN -f words.txt -b all --forks branch-diff --session audit"
+Type "gitlab-harvester -u https://gitlab.example.com -t $GITLAB_TOKEN -f words.txt -b all --forks branch-diff --session audit"
 Sleep 400ms
 Enter
 Wait+Screen@90s /Done\. Keywords/
