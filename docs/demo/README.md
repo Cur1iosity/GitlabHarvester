@@ -35,8 +35,14 @@ To preview changes to the tape or the console output (from the repository root):
 
 ```bash
 docker build -f docs/demo/Dockerfile -t gitlab-harvester/demo .
-docker run --rm -v "$PWD/docs:/vhs" gitlab-harvester/demo demo/demo.tape
-# Windows PowerShell: -v "${PWD}/docs:/vhs"; Git Bash: prefix with MSYS_NO_PATHCONV=1
+
+# Linux/macOS: the container runs as root, so hand the output back to your user
+docker run --rm -v "$PWD/docs:/vhs" -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+  --entrypoint sh gitlab-harvester/demo -c 'vhs demo/demo.tape && chown -R "$HOST_UID:$HOST_GID" demo/out'
+
+# Windows (Docker Desktop doesn't keep root ownership on the host)
+docker run --rm -v "${PWD}/docs:/vhs" gitlab-harvester/demo demo/demo.tape   # PowerShell
+MSYS_NO_PATHCONV=1 docker run --rm -v "$PWD/docs:/vhs" gitlab-harvester/demo demo/demo.tape   # Git Bash
 ```
 
 The GIF is written to `docs/demo/out/demo.gif`, which is git-ignored: local recordings never
