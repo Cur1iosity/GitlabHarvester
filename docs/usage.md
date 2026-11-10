@@ -41,6 +41,7 @@ gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -s password
 - `--timeout 60` is the per-request timeout in seconds.
 - If TLS verification fails, the tool retries once with verification disabled.
 - `--log-level ERROR|WARN|INFO`, `--debug`, and `--log-file path.log` control logging.
+  The log file also gets a summary of every run, see [Run journal](#run-journal).
 - Rate limiting (HTTP 429) is retried automatically according to `Retry-After`.
   Errors on a single project or branch are logged, and the run continues.
 
@@ -354,6 +355,43 @@ Search finished: 2 terms x 5 projects, 25 hits in 0.3s
   written, plus a heartbeat line with the current status once a minute during long phases.
 - After Ctrl+C or a fatal error, the last status stays on screen to show how far the
   phase got (`| stopped`, or `(interrupted)` in the indexing summary).
+
+## Run journal
+
+With `--log-file` (or `log-file` in the config file), every run appends a summary to
+the log file, **whatever `--log-level` is**, so a history of runs builds up:
+
+```text
+[10-11-2026 16:39:57][SUMMARY][run 2f3724f3] Run started: gitlab-harvester 0.3.6, mode=search, url=https://gitlab.example.com, cwd=/audits
+[10-11-2026 16:39:57][SUMMARY][run 2f3724f3] Options: index-file=idx.jsonl, index-branches=all, batch-size=100, workers=2, dump-projects=False, scan-branches=all, forks=branch-diff, fork-diff-bases=main,master,develop,dev, terms=terms-file words.txt, active=since 2024-06-02, file-changed=since 2024-03-01, session=audit, resume=False, post-process=dedup,convert, final-only=False
+[10-11-2026 16:39:57][SUMMARY][run 2f3724f3] Indexed 9 projects from gitlab.example.com in 0.4s
+[10-11-2026 16:39:57][SUMMARY][run 2f3724f3] Listed 19 branches of 8 projects in 1.2s
+[10-11-2026 16:39:57][SUMMARY][run 2f3724f3] Index: idx.jsonl (built 2026-11-10 13:39:57 UTC, just now; 9 projects, branches: all)
+[10-11-2026 16:39:57][SUMMARY][run 2f3724f3] Search plan: 2 terms, 5 of 9 projects, 12 branches (skipped: 1 empty, 3 inactive since 2024-06-02), files changed since 2024-03-01, 2 workers
+[10-11-2026 16:39:58][SUMMARY][run 2f3724f3] Term 1/2 'password': 5 projects, 14 hits in 0.2s
+[10-11-2026 16:39:58][SUMMARY][run 2f3724f3] Term 2/2 'api_key': 5 projects, 4 hits in 0.1s
+[10-11-2026 16:39:58][SUMMARY][run 2f3724f3] Search finished: 2 terms x 5 projects, 18 hits, 17 file checks in 0.2s
+[10-11-2026 16:39:58][SUMMARY][run 2f3724f3] Session saved to: audit.jsonl
+[10-11-2026 16:39:58][SUMMARY][run 2f3724f3] Done. Keywords: 2 | Hits: 18 | Search time: 0.2s
+[10-11-2026 16:39:58][SUMMARY][run 2f3724f3] Post-processing dedup: audit.jsonl -> audit.deduped.jsonl (kept 9 records, dropped 1 duplicate-only hit records)
+[10-11-2026 16:39:58][SUMMARY][run 2f3724f3] Post-processing convert: audit.deduped.jsonl -> audit.deduped.converted.json (9 objects)
+[10-11-2026 16:39:58][SUMMARY][run 2f3724f3] Final result: audit.deduped.converted.json
+[10-11-2026 16:39:58][SUMMARY][run 2f3724f3] Run finished in 0.4s
+```
+
+- `[run …]` is a random id per run: it groups the lines of one run even if two runs
+  write to the same file at the same time.
+- `Run started` names the version, mode, URL, config file and working directory
+  (relative paths below are relative to it). `Options` lists the settings that shape
+  the run: index and branch modes, forks, time windows, workers, the term source,
+  the session and post-processing. The token is never written.
+- The index line, the search plan, one line per term (projects, hits, time; with
+  several terms), the search summary and every written file follow.
+- The last line is `Run finished in …` or `Run failed after …: <reason>` (an error,
+  an invalid token, Ctrl+C).
+- `-m dedup` and `-m convert` add `Dedup: …` and `Convert: …` lines with their counters.
+- Regular log records (warnings, errors, `--log-level INFO` hit lines) go to the same
+  file as before, with their level instead of `SUMMARY`.
 
 ## Output formats
 

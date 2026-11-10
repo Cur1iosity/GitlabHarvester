@@ -63,6 +63,8 @@ class PipelineResult:
 
     outputs: list[Path] = field(default_factory=list)
     removed: list[Path] = field(default_factory=list)
+    # One human-readable line per step, e.g. "dedup: a.jsonl -> a.deduped.jsonl (kept 7, dropped 2)".
+    notes: list[str] = field(default_factory=list)
 
     @property
     def final(self) -> Path | None:
@@ -107,14 +109,17 @@ def run_pipeline(
             output = directory / f"{base}.jsonl"
             store = sqlite_path or directory / f"{base}.jsonl.seen.sqlite"
             try:
-                dedup_session_file(input_path=current, output_path=output, sqlite_path=store,
-                                   hash_algo=hash_algo, normalize=normalize)
+                stats = dedup_session_file(input_path=current, output_path=output, sqlite_path=store,
+                                           hash_algo=hash_algo, normalize=normalize)
             finally:
                 if sqlite_path is None:
                     _remove(store)
+            result.notes.append(f"dedup: {current} -> {output} (kept {stats['kept']} records, "
+                                f"dropped {stats['dropped']} duplicate-only hit records)")
         else:
             output = directory / f"{base}.converted.json"
-            convert_jsonl_to_json(input_path=current, output_path=output, sort_keys=sort_keys)
+            count = convert_jsonl_to_json(input_path=current, output_path=output, sort_keys=sort_keys)
+            result.notes.append(f"convert: {current} -> {output} ({count} objects)")
         result.outputs.append(output)
         current = output
 

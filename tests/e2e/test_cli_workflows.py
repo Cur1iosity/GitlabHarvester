@@ -443,3 +443,82 @@ def test_index_file_and_build_time_are_shown_before_the_plan(fake_gitlab: FakeGi
     assert lines[index_at + 1].startswith("Search plan: ")
     assert re.fullmatch(rf"Index: idx\.jsonl \(built {built} UTC, just now; 9 projects, branches: default\)",
                         lines[index_at])
+
+
+# --------------------------------------------------------------------------- run journal in the log file
+
+
+def _journal(path: Path) -> list[tuple[str, str]]:
+    """(run id, message) of every SUMMARY line."""
+    import re
+    out = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        m = re.match(r"\[[^]]+\]\[SUMMARY\]\[run ([0-9a-f]{8})\] (.*)$", line)
+        if m:
+            out.append((m.group(1), m.group(2)))
+    return out
+
+
+def test_log_file_collects_a_summary_of_every_run(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
+    terms = tmp_path / "words.txt"
+    terms.write_text("password\napi_key\n", encoding="utf-8")
+    common = [*gl_args(fake_gitlab), "--index-file", "idx.jsonl", "--log-file", "logs/runs.log", "--log-level", "ERROR"]
+
+    run_cli(*common, "-f", str(terms), "-b", "all", "--started-from", "2024-06-02", "-w", "2",
+            "--session", "audit", "--post-process", "dedup,convert", check=True)
+    run_cli(*common, "-s", "token", "--session-file", "second.jsonl", check=True)
+
+    journal = _journal(tmp_path / "logs" / "runs.log")
+    runs = list(dict.fromkeys(run for run, _ in journal))
+    assert len(runs) == 2  # appended, one id per run
+    first = [msg for run, msg in journal if run == runs[0]]
+    second = [msg for run, msg in journal if run == runs[1]]
+
+    def has(messages, prefix):
+        return next((m for m in messages if m.startswith(prefix)), None)
+
+    assert has(first, "Run started: gitlab-harvester ").endswith(f"cwd={tmp_path}")
+    options = has(first, "Options: ")
+    for part in ("index-branches=all", "scan-branches=all", "workers=2", f"terms=terms-file {terms}",
+                 "active=since 2024-06-02", "post-process=dedup,convert", "session=audit"):
+        assert part in options, part
+    assert has(first, "Indexed 9 projects")
+    assert has(first, "Index: idx.jsonl (built ")
+    assert has(first, "Search plan: 2 terms, 5 of 9 projects")
+    assert has(first, "Term 1/2 'password': 5 projects, ") and has(first, "Term 2/2 'api_key': 5 projects, ")
+    assert has(first, "Search finished: 2 terms x 5 projects")
+    assert has(first, "Session saved to: audit.jsonl")
+    assert has(first, "Done. Keywords: 2 | Hits: ") and "Search time: " in has(first, "Done. ")
+    assert has(first, "Post-processing dedup: audit.jsonl -> audit.deduped.jsonl (kept ")
+    assert has(first, "Final result: audit.deduped.converted.json")
+    assert first[-1].startswith("Run finished in ")
+
+    assert has(second, "Index: idx.jsonl (built ")  # reused index: build time still visible
+    assert has(second, "Session saved to: second.jsonl") and second[-1].startswith("Run finished in ")
+    assert fake_gitlab.token not in (tmp_path / "logs" / "runs.log").read_text(encoding="utf-8")
+
+
+def test_log_file_records_failed_runs_and_postprocess_modes(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
+    run_cli("-u", fake_gitlab.url, "-t", "wrong-token", "-s", "x", "--log-file", "runs.log")
+    run_cli(*gl_args(fake_gitlab), "-s", "token", "--session-file", "s.jsonl", "--log-file", "runs.log", check=True)
+    run_cli("-m", "dedup", "--input-file", "s.jsonl", "--output-file", "d.jsonl", "--log-file", "runs.log", check=True)
+    run_cli("-m", "convert", "--input-file", "d.jsonl", "--output-file", "d.json", "--log-file", "runs.log", check=True)
+
+    messages = [msg for _, msg in _journal(tmp_path / "runs.log")]
+    assert any(m.startswith("Run failed after ") and "GitlabAuthenticationError" in m for m in messages)
+    assert any(m.startswith("Dedup: s.jsonl -> d.jsonl (kept ") for m in messages)
+    assert any(m.startswith("Convert: d.jsonl -> d.json (") for m in messages)
+    assert sum(m.startswith("Run started: ") for m in messages) == 4
+
+
+def test_log_file_from_config_is_relative_to_the_config(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
+    conf = tmp_path / "conf"
+    conf.mkdir()
+    (conf / "glh.ini").write_text("[logging]\nlog-file = audit.log\n", encoding="utf-8")
+    run_cli(*gl_args(fake_gitlab), "-c", str(conf / "glh.ini"), "-s", "token", "--session-file", "s.jsonl", check=True)
+    assert any(m.startswith("Search plan: ") for _, m in _journal(conf / "audit.log"))
+
+
+def test_no_log_file_means_no_journal(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
+    run_cli(*gl_args(fake_gitlab), "-s", "token", "--session-file", "s.jsonl", check=True)
+    assert not list(tmp_path.glob("*.log"))

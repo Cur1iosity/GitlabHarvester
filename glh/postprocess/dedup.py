@@ -154,7 +154,7 @@ def dedup_session_file(
     sqlite_path: Path | None = None,
     hash_algo: str = "blake2b",
     normalize: bool = True,
-) -> None:
+) -> dict[str, int]:
     """
     Streamingly deduplicate identical hit content across the entire session output.
 
@@ -200,3 +200,4 @@ def dedup_session_file(
     print(f"[dedup] kept records: {kept}")
     print(f"[dedup] dropped empty hit-records: {dropped}")
     print(f"[dedup] seen-db: {sqlite_path}")
+    return {"kept": kept, "dropped": dropped}

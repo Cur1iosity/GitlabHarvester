@@ -1086,6 +1086,7 @@ class GitlabHarvester:
                 if checkpoints and n_terms > 1:
                     progress.note(
                         f"Term {number + 1}/{n_terms} '{terms[number]}': "
+                        f"{terminal_utils.plural(plan.project_count, 'project')}, "
                         f"{terminal_utils.plural(term_hits[number], 'hit')} in "
                         f"{terminal_utils.format_duration(progress.elapsed - state['term_started'])}"
                     )

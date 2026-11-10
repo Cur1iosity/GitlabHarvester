@@ -327,3 +327,25 @@ def test_console_log_handler_goes_to_stdout_around_the_status_line(monkeypatch):
     assert err.getvalue() == (
         "\rSearching | 1/2 projects" + f"\r{blank}\r" + "\rSearching | 1/2 projects" + f"\r{blank}\r"
     )
+
+
+# --------------------------------------------------------------------------- listeners (run journal)
+
+
+def test_permanent_lines_reach_listeners_but_log_records_do_not():
+    status, _ = make_status(tty=False)
+    seen: list[str] = []
+    status.add_listener(seen.append)
+    status.add_listener(seen.append)  # registered once
+    status.write_line("Search plan: 1 term")
+    status.write_line("[WARNING] slow", stream=FakeStream(False))  # console log record
+    status.remove_listener(seen.append)
+    status.write_line("after removal")
+    assert seen == ["Search plan: 1 term"]
+
+
+def test_broken_listener_does_not_break_output():
+    status, stream = make_status(tty=False)
+    status.add_listener(lambda text: 1 / 0)
+    status.write_line("still printed")
+    assert stream.getvalue() == "still printed\n"

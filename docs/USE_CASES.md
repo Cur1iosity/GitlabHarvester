@@ -9,7 +9,8 @@ Typical scenarios and which options fit them. For the full option reference see
 - [4. Parallel requests: --workers](#4-parallel-requests---workers)
 - [5. Baseline and re-scans](#5-baseline-and-re-scans)
 - [6. Deduplicated JSON report in one run: --post-process](#6-deduplicated-json-report-in-one-run---post-process)
-- [7. Optional: options from a config file](#7-optional-options-from-a-config-file)
+- [7. History of runs in a log file](#7-history-of-runs-in-a-log-file)
+- [8. Optional: options from a config file](#8-optional-options-from-a-config-file)
 
 All examples pass the options on the command line; that is the main way to run the tool.
 
@@ -206,7 +207,27 @@ deleted if the search is interrupted or a step fails.
 Only one step is fine too: `--post-process dedup` (JSONL without duplicates) or
 `--post-process convert` (a JSON array of the raw session).
 
-## 7. Optional: options from a config file
+## 7. History of runs in a log file
+
+Pass the same `--log-file` to every run. Whatever `--log-level` is, each run appends
+a summary: options, index file and its build time, search plan, projects, hits and
+time per term, written files, total duration and outcome.
+
+```bash
+gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -f words.txt -b all \
+  --started-from 2024-06-01 --session june --log-file audits.log
+
+# Later: how long did the searches take, with which options, and what did they find?
+grep -E "Options:|Search plan:|Search finished:|Run (finished|failed)" audits.log
+grep "Term " audits.log            # hits and time per term over all runs
+grep "run 2f3724f3" audits.log     # everything about one run
+```
+
+The run id (`[run 2f3724f3]`) ties together the lines of one run. Use it to compare
+filters (`--forks`, time windows, `--workers`) against duration and number of hits.
+Details: [usage.md](usage.md#run-journal).
+
+## 8. Optional: options from a config file
 
 Any of the options above can also be put into an INI file and passed with
 `-c/--config FILE`. Options given on the command line override the values from the file:

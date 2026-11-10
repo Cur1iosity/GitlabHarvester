@@ -40,7 +40,7 @@ def convert_jsonl_to_json(
     input_path: Path,
     output_path: Path,
     sort_keys: bool = False,
-) -> None:
+) -> int:
     """
     Convert JSONL (or multi-line JSON objects) into a single
     human-readable JSON array.
@@ -70,4 +70,5 @@ def convert_jsonl_to_json(
     print(f"[convert] input : {input_path}")
     print(f"[convert] output: {output_path}")
     print(f"[convert] objects: {len(objects)}")
+    return len(objects)
 

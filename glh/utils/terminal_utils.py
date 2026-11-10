@@ -153,6 +153,7 @@ class StatusLine:
 
         self._lock = threading.RLock()
         self._provider: Callable[[], str] | None = None
+        self._listeners: list[Callable[[str], None]] = []
         self._shown_width = 0
         self._last_refresh = 0.0
         self._last_heartbeat = 0.0
@@ -244,6 +245,24 @@ class StatusLine:
             self._write(stream if stream is not None else self.stream, text + "\n")
             if interactive:
                 self._draw()
+        if stream is None:
+            # Permanent progress lines (plan, phase summaries) also go to listeners,
+            # e.g. the run journal in the log file; log records (stream=stdout) don't.
+            for listener in list(self._listeners):
+                try:
+                    listener(text)
+                except Exception:  # noqa: BLE001 - a broken listener must not break output
+                    pass
+
+    def add_listener(self, listener: Callable[[str], None]) -> None:
+        """Also pass every permanent status line (not log records) to ``listener``."""
+        if listener not in self._listeners:
+            self._listeners.append(listener)
+
+    def remove_listener(self, listener: Callable[[str], None]) -> None:
+        """Stop passing permanent lines to ``listener``."""
+        if listener in self._listeners:
+            self._listeners.remove(listener)
 
     # ---------------------------------------------------------------------- ticker
 
