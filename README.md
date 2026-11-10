@@ -8,8 +8,19 @@
 
 </div>
 
-Search for keywords and secrets across every repository of a GitLab instance through the API,
-without cloning. Useful on GitLab CE, which has no instance-wide code search.
+**GitlabHarvester** is a lightweight tool built to install in a minute and show impact fast.
+It searches every repository of a GitLab instance for keywords and secrets through the API,
+without cloning, including GitLab CE, which has no instance-wide code search.
+
+- **Red team engagements.** A quick PoC: install, point it at an instance, get findings.
+  Fine-grained settings (branch and fork strategies, time windows, parallel requests)
+  control how many requests are sent and how much noise they make.
+- **Penetration tests.** Instance-wide discovery of credentials, tokens and keys as part
+  of the assessment.
+- **Blue teams.** Secret hunting and audits: full baselines, regular re-scans of recent
+  activity, deduplicated reports, and a history of runs in the log file.
+- **Developers, analysts and architects.** Surprisingly handy as plain instance-wide code
+  search: find where an API, a config key or a library is used across all projects.
 
 ## Install
 
@@ -90,4 +101,5 @@ Details: [docs/testing.md](docs/testing.md), [docs/architecture.md](docs/archite
 
 ## License
 
-MIT. Use only on GitLab instances you are authorized to scan.
+MIT. Use it only on GitLab instances you are authorized to work with: your own, your
+organization's, or those within the scope of an agreed engagement.
