@@ -44,7 +44,7 @@ Requires Python 3.10+ and a GitLab token with the `read_api` scope.
 Search one term in the default branch of every project:
 
 ```bash
-export GITLAB_TOKEN = "your-token-here"
+export GITLAB_TOKEN='your-token-here'
 gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -s password
 ```
 
