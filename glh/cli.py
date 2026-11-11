@@ -108,6 +108,20 @@ def parse_workers(value: str) -> int:
     raise argparse.ArgumentTypeError(f"Use an integer from 1 to {MAX_WORKERS}.")
 
 
+def parse_rpm(value: str) -> int:
+    """Parse --rpm/--index-rpm/--search-rpm: a non-negative integer (0 = no limit)."""
+    v = value.strip()
+    if v.isdigit():
+        return int(v)
+    raise argparse.ArgumentTypeError("Use a non-negative integer (requests per minute, 0 = no limit).")
+
+
+# (specific dest, group dest) for every request rate limit; resolved like TIME_BOUNDS.
+RATE_LIMITS: tuple[tuple[str, str], ...] = (
+    ("index_rpm", "rpm"),
+    ("search_rpm", "rpm"),
+)
+
 # (specific dest, group dest) for every time bound; see CliParser.parse().
 TIME_BOUNDS: tuple[tuple[str, str], ...] = (
     ("index_active_after", "time_after"),
@@ -155,6 +169,8 @@ class CliArgs:
     insecure: bool
     ca_bundle: str | None
     workers: int
+    index_rpm: int
+    search_rpm: int
 
     log_file: str | None
     log_level: str
@@ -249,6 +265,20 @@ class CliParser:
             metavar="N",
             help=f"Parallel API requests (1-{MAX_WORKERS}, default 1 = sequential). Speeds up project listing, "
                  "branch listing and search; use more than 1 only if the instance has no API rate limits.",
+        )
+        parser.add_argument(
+            "--rpm", type=parse_rpm, default=None, metavar="N",
+            help="Shortcut for --index-rpm and --search-rpm (a specific option overrides it).",
+        )
+        parser.add_argument(
+            "--index-rpm", type=parse_rpm, default=None, metavar="N",
+            help="Max API requests per minute per worker, except search requests: project and branch "
+                 "listing, file-change checks (default 0 = no limit).",
+        )
+        parser.add_argument(
+            "--search-rpm", type=parse_rpm, default=None, metavar="N",
+            help="Max search API requests per minute per worker; GitLab rate-limits search separately "
+                 "(default 0 = no limit).",
         )
 
         # Logging
@@ -382,15 +412,16 @@ class CliParser:
         return set(vars(probe.parse_args(argv)))
 
     @staticmethod
-    def _resolve_time_bounds(ns: argparse.Namespace, given: set[str], config: dict) -> None:
+    def _resolve_group_options(ns: argparse.Namespace, given: set[str], config: dict) -> None:
         """
-        Resolve every time bound in place and drop time keys from ``config``.
+        Resolve every option that has a group shortcut (time bounds, rate limits)
+        in place and drop their keys from ``config``.
 
-        Order: specific option on the CLI > --time-after/--time-before on the CLI >
-        specific key in the config file > time-after/time-before in the config file.
+        Order: specific option on the CLI > group option (--time-after, --rpm, ...)
+        on the CLI > specific key in the config file > group key in the config file.
         """
         resolved: dict[str, object] = {}
-        for specific, group in TIME_BOUNDS:
+        for specific, group in TIME_BOUNDS + RATE_LIMITS:
             if specific in given:
                 resolved[specific] = getattr(ns, specific)
             elif group in given:
@@ -401,7 +432,7 @@ class CliParser:
                 resolved[specific] = config[group]
             else:
                 resolved[specific] = None
-        for dest in {d for pair in TIME_BOUNDS for d in pair}:
+        for dest in {d for pair in TIME_BOUNDS + RATE_LIMITS for d in pair}:
             config.pop(dest, None)
         for dest, value in resolved.items():
             setattr(ns, dest, value)
@@ -439,14 +470,18 @@ class CliParser:
                     if dest not in given:
                         config.pop(dest, None)
 
-            cls._resolve_time_bounds(ns, given, config)
+            cls._resolve_group_options(ns, given, config)
 
             for dest, value in config.items():
                 if dest not in given:
                     setattr(ns, dest, value)
         else:
-            cls._resolve_time_bounds(ns, {d for d, _ in TIME_BOUNDS + (("time_after", ""), ("time_before", ""))
-                                          if getattr(ns, d) is not None}, {})
+            grouped = TIME_BOUNDS + RATE_LIMITS + (("time_after", ""), ("time_before", ""), ("rpm", ""))
+            cls._resolve_group_options(ns, {d for d, _ in grouped if getattr(ns, d) is not None}, {})
+
+        for dest, _ in RATE_LIMITS:
+            if getattr(ns, dest) is None:
+                setattr(ns, dest, 0)
 
         if ns.insecure and ns.ca_bundle:
             parser.error("--insecure and --ca-bundle exclude each other.")
@@ -478,6 +513,8 @@ class CliParser:
             insecure=ns.insecure,
             ca_bundle=ns.ca_bundle,
             workers=ns.workers,
+            index_rpm=ns.index_rpm,
+            search_rpm=ns.search_rpm,
             log_file=ns.log_file,
             log_level=ns.log_level,
             debug=ns.debug,

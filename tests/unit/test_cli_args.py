@@ -183,3 +183,41 @@ def test_plain_banner_on_legacy_code_pages(encoding):
 
 def test_banner_without_stream_keeps_the_art():
     assert get_banner().startswith(_BANNER)
+
+
+# --------------------------------------------------------------------------- request rate limits
+
+
+def test_rate_limits_are_off_by_default():
+    a = CliParser.parse([])
+    assert (a.index_rpm, a.search_rpm) == (0, 0)
+
+
+def test_rpm_sets_both_limits_and_a_specific_option_overrides_it():
+    a = CliParser.parse(["--rpm", "120"])
+    assert (a.index_rpm, a.search_rpm) == (120, 120)
+    a = CliParser.parse(["--rpm", "120", "--search-rpm", "20"])
+    assert (a.index_rpm, a.search_rpm) == (120, 20)
+    a = CliParser.parse(["--search-rpm", "20"])
+    assert (a.index_rpm, a.search_rpm) == (0, 20)
+
+
+def test_rate_limit_precedence_with_config_file(tmp_path: Path):
+    cfg = tmp_path / "c.ini"
+    cfg.write_text("[connection]\nrpm = 100\nsearch-rpm = 10\n", encoding="utf-8")
+    a = CliParser.parse(["-c", str(cfg)])
+    assert (a.index_rpm, a.search_rpm) == (100, 10)
+
+    # A CLI group option beats any key from the file; a CLI specific option beats the CLI group.
+    a = CliParser.parse(["-c", str(cfg), "--rpm", "50"])
+    assert (a.index_rpm, a.search_rpm) == (50, 50)
+    a = CliParser.parse(["-c", str(cfg), "--rpm", "50", "--index-rpm", "0"])
+    assert (a.index_rpm, a.search_rpm) == (0, 50)
+
+
+@pytest.mark.parametrize("value", ["-1", "1.5", "abc", ""])
+def test_invalid_rate_limit_is_rejected(value, capsys):
+    with pytest.raises(SystemExit) as e:
+        CliParser.parse(["--search-rpm", value])
+    assert e.value.code == 2
+    assert "non-negative integer" in capsys.readouterr().err

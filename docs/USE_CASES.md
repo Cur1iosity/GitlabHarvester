@@ -154,7 +154,9 @@ The price grows in the same proportion:
   under load are logged and the affected branch is skipped.
 
 Start with a small number (4), watch the warnings for 429 and 5xx responses, and
-increase gradually. The results are the same as with one worker; only the order of
+increase gradually. Under a known rate limit, cap the requests instead:
+`--search-rpm` / `--index-rpm` (or `--rpm` for both) set requests per minute per
+worker, e.g. `--workers 2 --search-rpm 15` for a search limit of 30 a minute. The results are the same as with one worker; only the order of
 hit records in the session file differs. Details: [usage.md](usage.md#parallel-requests).
 
 ## 5. Baseline and re-scans

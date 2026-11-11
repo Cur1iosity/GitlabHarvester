@@ -247,6 +247,37 @@ What stays the same:
   connection (python-gitlab client).
 - `--workers 1` is the sequential mode: no threads at all.
 
+## Request rate limits
+
+```bash
+gitlab-harvester -u ... -t ... -f words.txt --workers 4 --search-rpm 20 --index-rpm 300
+```
+
+Client-side limits on how many requests **one worker** sends per minute, to keep
+the traffic low or to stay under the instance's rate limits instead of collecting
+HTTP 429 responses:
+
+| Option | Limits | Default |
+|---|---|---|
+| `--search-rpm N` | search API requests (`/projects/:id/search`, one per result page of a branch search) | 0 = no limit |
+| `--index-rpm N` | every other API request: project and branch listing, file-change checks (`--file-changed-*`), the login check | 0 = no limit |
+| `--rpm N` | shortcut: sets both | |
+
+There are two budgets because GitLab limits the search API separately and usually
+much lower than the rest of the API. A specific option overrides `--rpm`
+(`--rpm 300 --search-rpm 20`), with the same precedence as the time filters:
+specific option on the command line > `--rpm` on the command line > specific key
+in the config file > `rpm` in the config file.
+
+- The limits are **per worker**: every worker has its own connection and budget, so
+  `--workers 4 --search-rpm 20` sends up to 80 search requests a minute. For an
+  instance-wide limit of L requests a minute, use about L / workers.
+- Requests are spaced evenly (one every 60/N seconds, counted from the start of the
+  previous one), so there are no bursts at the start of a minute.
+- Retries after HTTP 429 go through the same limit.
+- The search plan line names the limits: `Search plan: ..., 4 workers, rate limit:
+  search 20/min, other API 300/min per worker`; the run journal records them too.
+
 ## Sessions and resume
 
 | Option | Session file |
@@ -478,6 +509,9 @@ are URL-encoded.
 | `--ca-bundle FILE` | system CAs | CA bundle (PEM) for the GitLab TLS certificate |
 | `--[no-]insecure` | off | disable TLS verification explicitly (never automatic) |
 | `-w, --workers N` | 1 | parallel API requests (1-64); only for instances without rate limits |
+| `--rpm N` | 0 | shortcut for `--index-rpm` and `--search-rpm` |
+| `--index-rpm N` | 0 | max non-search API requests per minute per worker (0 = no limit) |
+| `--search-rpm N` | 0 | max search API requests per minute per worker (0 = no limit) |
 | `--time-after DATE`, `--time-before DATE` | — | window for the index, its projects and the files with hits |
 | `--index-active-after/--index-active-before DATE` | — | index only projects active in the window (API filter) |
 | `--active-after DATE` (`--started-from`), `--active-before DATE` | — | search only indexed projects active in the window |

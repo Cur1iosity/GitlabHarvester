@@ -29,6 +29,7 @@ from glh.planner import (
     format_api_time,
     parse_timestamp,
 )
+from glh import ratelimit
 from glh import workers as pool
 from glh.utils import logging_utils, terminal_utils
 from glh.utils.terminal_utils import human_int
@@ -114,10 +115,15 @@ class GitlabHarvester:
             host: str | None = None,  # backward-compat alias for `url`
             workers: int = 1,
             ssl_verify: bool | str = True,
+            index_rpm: int = 0,
+            search_rpm: int = 0,
     ) -> None:
         self.search_terms: list = search_terms or []
         # Parallel API requests (1 = sequential). See glh/workers.py.
         self.workers: int = max(1, int(workers))
+        # Requests per minute per client (thread); 0 = no limit. See glh/ratelimit.py.
+        self.index_rpm: int = max(0, int(index_rpm))
+        self.search_rpm: int = max(0, int(search_rpm))
         self._local = threading.local()
         self._gl_main: Gitlab | None = None
         self._client_kwargs: dict[str, Any] | None = None
@@ -176,13 +182,22 @@ class GitlabHarvester:
             session = Session()
             session.proxies.update(main_session.proxies)
             kwargs["session"] = session
-        self._local.gl = self._watch_responses(Gitlab(**kwargs))
+        self._local.gl = self._setup_client(Gitlab(**kwargs))
 
-    def _watch_responses(self, gl: Gitlab) -> Gitlab:
-        """Hook every response of ``gl`` (rate-limit visibility, see _on_response)."""
-        hooks = getattr(getattr(gl, "session", None), "hooks", None)
+    def _setup_client(self, gl: Gitlab) -> Gitlab:
+        """
+        Prepare the requests session of a new client (main or worker).
+
+        - a response hook makes HTTP 429 waits visible (see _on_response);
+        - --index-rpm / --search-rpm: a throttling adapter with its own
+          limiters, so every client (thread) gets the full per-thread budget.
+        """
+        session = getattr(gl, "session", None)
+        hooks = getattr(session, "hooks", None)
         if isinstance(hooks, dict):
             hooks.setdefault("response", []).append(self._on_response)
+        if session is not None and hasattr(session, "mount"):
+            ratelimit.limit_session(session, index_rpm=self.index_rpm, search_rpm=self.search_rpm)
         return gl
 
     @staticmethod
@@ -397,7 +412,7 @@ class GitlabHarvester:
 
         _maybe_disable_warnings()
 
-        gl = self._watch_responses(Gitlab(**kwargs))
+        gl = self._setup_client(Gitlab(**kwargs))
 
         try:
             gl.auth()
@@ -995,6 +1010,8 @@ class GitlabHarvester:
         terms_text = terminal_utils.plural(n_terms, "term")
         hits_before = hit_counter
         parallel = f", {self.workers} workers" if self.workers > 1 else ""
+        if limits := ratelimit.describe(self.index_rpm, self.search_rpm):
+            parallel += f", rate limit: {limits}"
 
         files = f", files changed {options.file_window.describe()}" if options.file_window else ""
         terminal_utils.STATUS.write_line(f"Search plan: {terms_text}, {plan.describe()}{files}{parallel}")

@@ -82,6 +82,7 @@ Common options:
 | `--time-after DATE`, `--time-before DATE` | limit the index, its projects and the files with hits to a time window |
 | `--started-from 2024-06-01` | search only indexed projects with activity since the date |
 | `-w, --workers N` | parallel API requests, for instances without rate limits |
+| `--rpm N`, `--index-rpm N`, `--search-rpm N` | requests per minute per worker: all, non-search, search |
 | `-m dump-index`, `--dump-projects` | build or rebuild the project index |
 | `--session NAME`, `--resume` | name a session and continue it later |
 | `--post-process dedup,convert`, `--final-only` | deduplicate and convert the session right after the search |

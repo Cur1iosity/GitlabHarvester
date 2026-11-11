@@ -142,6 +142,8 @@ def _describe_options(args: CliArgs) -> str:
             "index-branches": args.index_branches,
             "batch-size": args.batch_size,
             "workers": args.workers,
+            "index-rpm": args.index_rpm or "no limit",
+            "search-rpm": args.search_rpm or "no limit",
             "index-active": _when(args.index_active_after, args.index_active_before),
         })
     if args.mode == "search":
@@ -225,6 +227,8 @@ def _mk_harvester(args: CliArgs) -> GitlabHarvester:
         "token": token,
         "timeout": args.timeout,
         "workers": args.workers,
+        "index_rpm": args.index_rpm,
+        "search_rpm": args.search_rpm,
         "log_level": args.log_level,
         "log_file": args.log_file,
         "ssl_verify": False if args.insecure else (args.ca_bundle or True),
@@ -323,6 +327,8 @@ def _run_search(args: CliArgs) -> None:
                     "index_file": str(index_file),
                     "batch_size": args.batch_size,
                     "workers": args.workers,
+                    "index_rpm": args.index_rpm,
+                    "search_rpm": args.search_rpm,
                     "branches_per_page": args.branches_per_page,
                     "index_branches": args.index_branches,
                     "scan_branches": args.scan_branches,
