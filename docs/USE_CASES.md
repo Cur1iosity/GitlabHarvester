@@ -3,18 +3,47 @@
 Typical scenarios and which options fit them. For the full option reference see
 [usage.md](usage.md).
 
-- [1. Export the project inventory only](#1-export-the-project-inventory-only)
-- [2. Forks: scan them or not](#2-forks-scan-them-or-not)
-- [3. Only fresh findings: time filters](#3-only-fresh-findings-time-filters)
-- [4. Parallel requests: --workers](#4-parallel-requests---workers)
-- [5. Baseline and re-scans](#5-baseline-and-re-scans)
-- [6. Deduplicated JSON report in one run: --post-process](#6-deduplicated-json-report-in-one-run---post-process)
-- [7. History of runs in a log file](#7-history-of-runs-in-a-log-file)
-- [8. Optional: options from a config file](#8-optional-options-from-a-config-file)
+- [1. First runs: terms, sessions, reports](#1-first-runs-terms-sessions-reports)
+- [2. Export the project inventory only](#2-export-the-project-inventory-only)
+- [3. Forks: scan them or not](#3-forks-scan-them-or-not)
+- [4. Only fresh findings: time filters](#4-only-fresh-findings-time-filters)
+- [5. Parallel requests: --workers](#5-parallel-requests---workers)
+- [6. Baseline and re-scans](#6-baseline-and-re-scans)
+- [7. Deduplicated JSON report in one run: --post-process](#7-deduplicated-json-report-in-one-run---post-process)
+- [8. History of runs in a log file](#8-history-of-runs-in-a-log-file)
+- [9. Optional: options from a config file](#9-optional-options-from-a-config-file)
 
 All examples pass the options on the command line; that is the main way to run the tool.
+They expect the token in an environment variable: `export GITLAB_TOKEN=...`.
 
-## 1. Export the project inventory only
+## 1. First runs: terms, sessions, reports
+
+```bash
+# One term in the default branch of every project
+gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -s password
+
+# A list of terms (one per line, # starts a comment) in all branches, as a named session.
+# --dump-projects rebuilds the index so it holds all branch names.
+gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -f words.txt -b all --dump-projects --session audit
+
+# Interrupted? The same command with --resume (and without --dump-projects) continues
+# after the last finished term and reuses the index
+gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -f words.txt -b all --session audit --resume
+
+# Remove duplicate hits and export as a JSON array
+gitlab-harvester -m dedup   --input-file audit.jsonl --output-file clean.jsonl
+gitlab-harvester -m convert --input-file clean.jsonl --output-file clean.json
+```
+
+- The first run builds the project index (`<host>_project_index.jsonl`); later runs
+  reuse it. Branch options (`-b`) take effect when the index is built, so add
+  `--dump-projects` after changing them.
+- The session file (`audit.jsonl`) gets every hit as soon as it is found, plus a
+  checkpoint after every finished term: that is what `--resume` continues from.
+- dedup and convert can also run right after the search: see
+  [section 7](#7-deduplicated-json-report-in-one-run---post-process).
+
+## 2. Export the project inventory only
 
 Use `-m dump-index` to get a list of all projects visible to the token without
 searching anything, for example for an asset inventory, to estimate the size of a
@@ -39,7 +68,7 @@ build time, and `is_completed` (false if the listing stopped on an API error).
 The same file serves later searches: pass it with `--index-file` and it is reused
 as is (add `--dump-projects` to rebuild it).
 
-## 2. Forks: scan them or not
+## 3. Forks: scan them or not
 
 GitLab blob search looks at the current files of a branch. A fork is a separate
 repository with its own branches, so a secret can live only there:
@@ -76,7 +105,7 @@ only the fork's default branch. `--fork-diff-bases` (default
 because a fork often changes exactly those. Deduplication afterwards
 (`-m dedup`) removes hits that still repeat across forks and branches.
 
-## 3. Only fresh findings: time filters
+## 4. Only fresh findings: time filters
 
 Use `--started-from DATE` (alias of `--active-after`) when only recent changes matter: a regular re-scan after
 a full baseline, a check after an incident, or a review of what changed during a
@@ -130,7 +159,7 @@ Keep in mind:
   example, creating a branch or tag in the web UI) may not update it. Take the
   date with a margin, e.g. a day before the previous scan.
 
-## 4. Parallel requests: --workers
+## 5. Parallel requests: --workers
 
 `-w/--workers N` sends up to N API requests at a time and speeds up project
 listing, branch listing and search almost N times. It is appropriate when the
@@ -154,12 +183,25 @@ The price grows in the same proportion:
   under load are logged and the affected branch is skipped.
 
 Start with a small number (4), watch the warnings for 429 and 5xx responses, and
-increase gradually. Under a known rate limit, cap the requests instead:
-`--search-rpm` / `--index-rpm` (or `--rpm` for both) set requests per minute per
-worker, e.g. `--workers 2 --search-rpm 15` for a search limit of 30 a minute. The results are the same as with one worker; only the order of
+increase gradually. The results are the same as with one worker; only the order of
 hit records in the session file differs. Details: [usage.md](usage.md#parallel-requests).
 
-## 5. Baseline and re-scans
+Under a known rate limit, or to keep the traffic low, cap the requests per minute
+**per worker** instead: `--search-rpm` for search requests (GitLab limits them
+separately and usually lower), `--index-rpm` for all other requests, `--rpm` for
+both (a specific option overrides it):
+
+```bash
+# Search limit of 30 a minute: 2 workers x 15
+gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -f words.txt -b all --workers 2 --search-rpm 15
+
+# Low and slow: one worker, at most 10 requests a minute of any kind
+gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -f words.txt --rpm 10
+```
+
+Details: [usage.md](usage.md#request-rate-limits).
+
+## 6. Baseline and re-scans
 
 ```bash
 # 1. Baseline: everything, fresh index with all branches (parallel if the instance allows it)
@@ -176,7 +218,7 @@ gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -f words.txt \
   --index-file gitlab_index.jsonl -b all --forks branch-diff --started-from 2024-06-24 --session week-26 --resume
 ```
 
-## 6. Deduplicated JSON report in one run: --post-process
+## 7. Deduplicated JSON report in one run: --post-process
 
 The same secret usually shows up many times: in every branch, in every fork, for
 several terms. Instead of running `-m dedup` and `-m convert` after the search, ask
@@ -209,7 +251,7 @@ deleted if the search is interrupted or a step fails.
 Only one step is fine too: `--post-process dedup` (JSONL without duplicates) or
 `--post-process convert` (a JSON array of the raw session).
 
-## 7. History of runs in a log file
+## 8. History of runs in a log file
 
 Pass the same `--log-file` to every run. Whatever `--log-level` is, each run appends
 a summary: options, index file and its build time, search plan, projects, hits and
@@ -229,7 +271,7 @@ The run id (`[run 2f3724f3]`) ties together the lines of one run. Use it to comp
 filters (`--forks`, time windows, `--workers`) against duration and number of hits.
 Details: [usage.md](usage.md#run-journal).
 
-## 8. Optional: options from a config file
+## 9. Optional: options from a config file
 
 Any of the options above can also be put into an INI file and passed with
 `-c/--config FILE`. Options given on the command line override the values from the file:
