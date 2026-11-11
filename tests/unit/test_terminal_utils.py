@@ -277,6 +277,22 @@ def test_progress_without_work_has_no_eta():
     assert p.render() == "Searching | 0/0 projects | 0:00"
 
 
+def test_progress_detail_provider_replaces_the_static_detail():
+    status, _ = make_status(tty=False)
+    p = Progress("Searching", total=4, status=status)
+    p.detail = "acme/done"
+    p.detail_provider = lambda: "acme/huge @ main, page 3, 0:42"
+    assert p.render().endswith(" | acme/huge @ main, page 3, 0:42")
+    p.detail_provider = lambda: ""  # nothing running: the static detail stays
+    assert p.render().endswith(" | acme/done")
+
+    def broken() -> str:
+        raise RuntimeError
+
+    p.detail_provider = broken  # never breaks the status line
+    assert p.render().endswith(" | acme/done")
+
+
 def test_progress_finish_prints_summary_once_and_returns_elapsed():
     clock = FakeClock()
     status, stream = make_status(tty=False, clock=clock)

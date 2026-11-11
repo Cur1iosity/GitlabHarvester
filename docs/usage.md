@@ -221,7 +221,10 @@ gitlab-harvester -u ... -t ... -f words.txt -b all --workers 8
 when the instance has no API rate limits: N workers send about N times more requests
 per second, which also means N times more load and noise in the GitLab logs.
 HTTP 429 responses are still retried according to `Retry-After`, but under a rate
-limit more workers mostly produce more 429s, not more speed.
+limit more workers mostly produce more 429s, not more speed. These waits are
+visible: a warning (at most once a minute) names the endpoint, the wait and the
+count so far, and the status line shows `rate limited (HTTP 429), retry in …` for
+the waiting task.
 
 How the work is split:
 
@@ -343,6 +346,23 @@ Searching 'api_key' (2/3) | term 3/5 projects (60%) 0:02 ETA 0:01 | total 8/15 (
 ```
 
 Percentages are rounded down, so 100% means the work is really finished.
+
+The last part is the search running right now with the page being fetched and how
+long it has been running. With `--workers` it is the longest-running search, and
+`(+N running)` counts the others:
+
+```text
+Searching 'password' | 7/8 projects (87%) | 7 hits | 14:31 | ETA 2:04 | acme/monorepo @ main, page 37, 12:10 (+1 running)
+```
+
+The last searches of a scan can run long after all the others are done (a huge
+repository has many result pages, and GitLab runs the search again for every
+page; rate limits add waits). With `--workers`, a search still running after
+5 minutes gets a permanent line, repeated every 5 minutes (also in the run journal):
+
+```text
+Still searching 'password' in acme/monorepo @ main (page 37): running for 10:00
+```
 
 When a phase ends, the status line is replaced by a permanent summary:
 

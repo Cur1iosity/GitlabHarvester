@@ -15,13 +15,18 @@ Design:
   exactly the sequential behavior.
 - Worker threads are daemons: Ctrl+C in the main thread does not wait for
   requests that are still in flight.
+- :class:`ActiveTasks` records what every thread is working on right now, so
+  the main thread can show running tasks (not only finished ones) and report
+  tasks that take very long.
 """
 
 from __future__ import annotations
 
 import queue
 import threading
-from dataclasses import dataclass
+import time
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from typing import Any, Callable, Generic, Iterable, Iterator, TypeVar
 
 T = TypeVar("T")
@@ -45,6 +50,95 @@ class Done(Generic[T]):
         return self.result
 
 
+@dataclass(slots=True, eq=False)
+class ActiveTask:
+    """A task some thread is running right now (see :class:`ActiveTasks`)."""
+
+    label: str
+    started: float
+    # Longer description for "still running" reports; defaults to ``label``.
+    report: str = ""
+    step: str = ""
+    waiting: str = ""
+    # Last "still running" report, written by the consumer thread only.
+    reported_at: float | None = field(default=None)
+
+
+class ActiveTasks:
+    """
+    Thread-safe registry of running tasks, one per thread.
+
+    Workers call :meth:`running` around a task and :meth:`set_step` /
+    :meth:`set_waiting` while it runs; the consumer thread reads
+    :meth:`snapshot` / :meth:`describe`. Updates from a thread that has no
+    registered task are ignored.
+    """
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._tasks: dict[int, ActiveTask] = {}
+
+    def clock(self) -> float:
+        return self._clock()
+
+    @contextmanager
+    def running(self, label: str, *, report: str = "") -> Iterator[ActiveTask]:
+        """Register the calling thread's task for the duration of the block."""
+        task = ActiveTask(label, started=self._clock(), report=report or label)
+        ident = threading.get_ident()
+        with self._lock:
+            self._tasks[ident] = task
+        try:
+            yield task
+        finally:
+            with self._lock:
+                if self._tasks.get(ident) is task:
+                    del self._tasks[ident]
+
+    def _current(self) -> ActiveTask | None:
+        return self._tasks.get(threading.get_ident())
+
+    def set_step(self, step: str) -> None:
+        """Describe the calling thread's progress inside its task (e.g. 'page 3')."""
+        with self._lock:
+            if (task := self._current()) is not None:
+                task.step = step
+
+    def set_waiting(self, waiting: str) -> None:
+        """Mark the calling thread's task as waiting (e.g. rate limited); '' clears it."""
+        with self._lock:
+            if (task := self._current()) is not None:
+                task.waiting = waiting
+
+    def snapshot(self) -> list[ActiveTask]:
+        """Running tasks, the longest-running first."""
+        with self._lock:
+            return sorted(self._tasks.values(), key=lambda t: t.started)
+
+    def elapsed(self, task: ActiveTask) -> float:
+        return max(self._clock() - task.started, 0.0)
+
+    @staticmethod
+    def text(task: ActiveTask) -> str:
+        """'label, step, waiting' without empty parts."""
+        return ", ".join(x for x in (task.label, task.step, task.waiting) if x)
+
+    def describe(self, format_clock: Callable[[float], str]) -> str:
+        """
+        One-line summary of the longest-running task, e.g.
+        ``group/repo @ main, page 37, 14:02 (+3 running)``; '' when idle.
+        """
+        tasks = self.snapshot()
+        if not tasks:
+            return ""
+        oldest = tasks[0]
+        text = f"{self.text(oldest)}, {format_clock(self.elapsed(oldest))}"
+        if len(tasks) > 1:
+            text += f" (+{len(tasks) - 1} running)"
+        return text
+
+
 class _Pool:
     """Feeder thread + daemon workers + bounded window; results in completion order."""
 
@@ -56,8 +150,10 @@ class _Pool:
             workers: int,
             window: int,
             initializer: Callable[[], None] | None,
+            on_idle: Callable[[], None] | None = None,
     ) -> None:
         self._fn = fn
+        self._on_idle = on_idle
         self._items = iter(items)
         self._window = threading.BoundedSemaphore(window)
         self._tasks: queue.Queue[tuple[int, Any] | None] = queue.Queue()
@@ -120,6 +216,8 @@ class _Pool:
                 try:
                     seq, done = self._results.get(timeout=_POLL)
                 except queue.Empty:
+                    if self._on_idle is not None:
+                        self._on_idle()
                     continue
                 if seq is None:  # feeder/initializer failure
                     raise done  # type: ignore[misc]
@@ -140,6 +238,7 @@ def imap_unordered(
         workers: int = 1,
         window: int | None = None,
         initializer: Callable[[], None] | None = None,
+        on_idle: Callable[[], None] | None = None,
 ) -> Iterator[Done[T]]:
     """
     Run ``fn`` over ``items`` and yield outcomes as tasks finish.
@@ -153,6 +252,8 @@ def imap_unordered(
         workers: Number of worker threads; 1 = run inline, in order.
         window: Max tasks in flight (default: 2 x workers).
         initializer: Called once in every worker thread before its first task.
+        on_idle: Called in the calling thread every 0.2 s while no result
+            arrives (workers > 1 only), e.g. to report slow tasks.
     """
     if workers <= 1:
         for item in items:
@@ -162,7 +263,8 @@ def imap_unordered(
                 yield Done(item, error=e)
         return
 
-    pool = _Pool(fn, items, workers=workers, window=window or 2 * workers, initializer=initializer)
+    pool = _Pool(fn, items, workers=workers, window=window or 2 * workers, initializer=initializer,
+                 on_idle=on_idle)
     for _, done in pool.results():
         try:
             yield done
