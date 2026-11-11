@@ -15,15 +15,16 @@
 It searches every repository of a GitLab instance for keywords and secrets through the API,
 without cloning, including GitLab CE, which has no instance-wide code search.
 
-- **Red team engagements.** A quick PoC: install, point it at an instance, get findings.
-  Fine-grained settings (branch and fork strategies, time windows, parallel requests)
-  control how many requests are sent and how much noise they make.
+- **Red team engagements.** One token, the whole instance: credentials, internal hosts
+  and pivots hiding in the code. Loud and fast or low and slow, your call: rate limits,
+  jitter and User-Agent rotation keep the noise and the signature under control.
 - **Penetration tests.** Instance-wide discovery of credentials, tokens and keys as part
   of the assessment.
-- **Blue teams.** Secret hunting and audits: full baselines, regular re-scans of recent
-  activity, deduplicated reports, and a history of runs in the log file.
-- **Developers, analysts and architects.** Surprisingly handy as plain instance-wide code
-  search: find where an API, a config key or a library is used across all projects.
+- **Blue teams and security research.** Secret hunting and hygiene audits: a quick first
+  look, full baselines, regular re-scans of recent activity, deduplicated reports, and a
+  history of runs in the log file.
+- **Developers, analysts and architects.** Not for secrets, but for code: fast search
+  across a large codebase, even on GitLab CE.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/Cur1iosity/GitlabHarvester/demo-assets/demo.gif"
