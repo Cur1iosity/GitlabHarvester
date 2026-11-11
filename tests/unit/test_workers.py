@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-from glh.workers import imap_ordered, imap_unordered
+from glh.workers import ActiveTasks, imap_ordered, imap_unordered
 
 
 class Gauge:
@@ -118,3 +118,71 @@ def test_task_errors_do_not_stop_other_tasks():
 
     out = list(imap_ordered(fn, range(6), workers=3))
     assert [d.error is not None for d in out] == [False, False, False, True, False, False]
+
+
+def test_on_idle_runs_in_the_calling_thread_while_tasks_are_slow():
+    calls: list[str] = []
+    out = list(imap_unordered(lambda x: time.sleep(0.5) or x, [1, 2], workers=2,
+                              on_idle=lambda: calls.append(threading.current_thread().name)))
+    assert sorted(d.item for d in out) == [1, 2]
+    assert calls and set(calls) == {threading.current_thread().name}
+
+
+# --------------------------------------------------------------------------- running tasks
+
+
+class Clock:
+    def __init__(self) -> None:
+        self.now = 100.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def fmt(seconds: float) -> str:
+    return f"{int(seconds)}s"
+
+
+def test_active_tasks_describe_the_longest_running_task_first():
+    clock = Clock()
+    active = ActiveTasks(clock=clock)
+    assert active.describe(fmt) == ""
+    release = threading.Event()
+    started = threading.Event()
+
+    def other():
+        with active.running("acme/b @ dev"):
+            started.set()
+            release.wait(5)
+
+    with active.running("acme/huge @ main", report="'password' in acme/huge @ main") as task:
+        active.set_step("page 37")
+        active.set_waiting("rate limited")
+        clock.now += 30
+        t = threading.Thread(target=other)
+        t.start()
+        started.wait(5)
+        clock.now += 12
+        assert active.describe(fmt) == "acme/huge @ main, page 37, rate limited, 42s (+1 running)"
+        assert [x.label for x in active.snapshot()] == ["acme/huge @ main", "acme/b @ dev"]
+        assert task.report == "'password' in acme/huge @ main"
+        active.set_waiting("")
+        release.set()
+        t.join(5)
+        assert active.describe(fmt) == "acme/huge @ main, page 37, 42s"
+    assert active.snapshot() == []
+
+
+def test_active_tasks_ignore_updates_from_threads_without_a_task():
+    active = ActiveTasks()
+    active.set_step("page 2")
+    active.set_waiting("rate limited")
+    assert active.snapshot() == []
+
+
+def test_active_task_is_removed_when_the_task_fails():
+    active = ActiveTasks()
+    with pytest.raises(ValueError):
+        with active.running("acme/api @ main"):
+            raise ValueError
+    assert active.snapshot() == []

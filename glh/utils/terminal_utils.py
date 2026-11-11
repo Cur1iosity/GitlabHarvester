@@ -332,6 +332,9 @@ class Progress:
         self.done = 0
         self.info = ""
         self.detail = ""
+        # Called on every redraw (also by the ticker thread) to describe the
+        # work running right now; its non-empty text replaces ``detail``.
+        self.detail_provider: Callable[[], str] | None = None
         # Work done across all rounds when rounds overlap (parallel search);
         # None = derive it from round/done.
         self.completed_units: int | None = None
@@ -479,6 +482,12 @@ class Progress:
             parts += [format_clock(self.elapsed)]
             if (eta := self.eta()) is not None:
                 parts += [f"ETA {format_clock(eta)}"]
-        if self.detail:
-            parts.append(self.detail)
+        detail = self.detail
+        if self.detail_provider is not None:
+            try:
+                detail = self.detail_provider() or detail
+            except Exception:  # noqa: BLE001 - the status line must never break the phase
+                pass
+        if detail:
+            parts.append(detail)
         return " | ".join(parts)

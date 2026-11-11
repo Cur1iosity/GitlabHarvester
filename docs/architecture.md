@@ -151,7 +151,12 @@ Headers and behavior that matter:
   not the matching line. Each result has `data`, `startline`, `path`, `filename`,
   `basename`, `ref`, `project_id`. A missing `scope`/`search` returns `400`.
 - **python-gitlab error handling** (defaults):
-  - `429` is retried up to 10 times, sleeping `Retry-After` seconds;
+  - `429` is retried up to 10 times, sleeping `Retry-After` seconds (silently:
+    the harvester sees it through a `requests` response hook, `_on_response`);
+    with `--index-rpm`/`--search-rpm`/`--jitter`/`-A`/`--user-agent-file` every
+    client session also gets a `ratelimit.ThrottledAdapter`, which spaces
+    requests, adds the random delay and sets the User-Agent right before they
+    are sent (retries included);
   - `5xx` is **not** retried (`retry_transient_errors=False`);
   - timeouts and connection errors are **not** retried;
   - a non-JSON 2xx body → `GitlabParsingError`.
@@ -183,6 +188,7 @@ Each one is fixed minimally and pinned by tests (all of them fail on the origina
 | A read timeout or connection error in a branch/search request aborted the whole run | One slow project killed a multi-hour scan | Catch `requests.RequestException` like `GitlabError` in per-project calls | `test_search_timeout_skips_branch_and_continues`, `test_branch_listing_timeout_does_not_abort_index` |
 | `from datetime import UTC` (3.11+) while `requires-python >= 3.10` | Import error on Python 3.10 | `UTC = timezone.utc` | CI matrix (3.10) |
 | On a TLS certificate error, the client silently retried with verification disabled | A man-in-the-middle certificate was accepted and the token sent to it | No automatic fallback; explicit `--ca-bundle FILE` or `--insecure` (warned on every run) | `tests/integration/test_tls.py` |
+| With `--workers`, the status line showed the last *finished* project, and python-gitlab waited on HTTP 429 without output | A slow last project (many result pages, rate limits) looked like a hung scan with a ticking progress bar | `ActiveTasks` (`glh/workers.py`): the status line shows the running searches with page and elapsed time; `Still searching …` lines after 5 minutes; a throttled 429 warning | `test_status_line_shows_the_running_task_not_the_last_finished_one`, `test_rate_limit_waits_are_reported` |
 | A term was marked `keyword_done` even when some of its searches failed (5xx, 429, 401, timeout, network) | `--resume` skipped it, so the failed projects were never searched | Such terms get `keyword_incomplete`, the summary says `completed: false`; 403/404 stay permanent skips | `test_partial_success_when_one_project_fails[*]`, `test_failed_term_is_not_a_resume_checkpoint`, `test_failed_term_is_reported_and_resumed` |
 
 Observed behavior that was intentionally **not** changed (documented by tests):

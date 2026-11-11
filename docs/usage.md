@@ -39,6 +39,12 @@ gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -s password
 - The token needs the `read_api` scope. Only projects visible to the token are searched.
 - `--proxy http://127.0.0.1:8080` routes API traffic through a proxy (a scheme is added if missing).
 - `--timeout 60` is the per-request timeout in seconds.
+- User-Agent: by default python-gitlab's own (`python-gitlab/<version>`) is sent.
+  `-A/--user-agent "Mozilla/5.0 (...)"` sends one fixed string with every request;
+  `--user-agent-file agents.txt` reads one User-Agent per line (blank lines and
+  `#` comments are skipped) and gives every request one chosen at random. The two
+  options exclude each other. Strings must be Latin-1 without control characters
+  (an invalid line is reported with its number before the run starts).
 - TLS certificates are always verified, and verification is never turned off
   automatically. For a private CA, pass its PEM bundle with `--ca-bundle ca.pem`. To
   connect without verification, add `--insecure` explicitly: every run then warns that
@@ -221,7 +227,10 @@ gitlab-harvester -u ... -t ... -f words.txt -b all --workers 8
 when the instance has no API rate limits: N workers send about N times more requests
 per second, which also means N times more load and noise in the GitLab logs.
 HTTP 429 responses are still retried according to `Retry-After`, but under a rate
-limit more workers mostly produce more 429s, not more speed.
+limit more workers mostly produce more 429s, not more speed. These waits are
+visible: a warning (at most once a minute) names the endpoint, the wait and the
+count so far, and the status line shows `rate limited (HTTP 429), retry in …` for
+the waiting task.
 
 How the work is split:
 
@@ -243,6 +252,61 @@ What stays the same:
 - Only the main thread writes files and progress; every worker has its own
   connection (python-gitlab client).
 - `--workers 1` is the sequential mode: no threads at all.
+
+## Request rate limits
+
+```bash
+gitlab-harvester -u ... -t ... -f words.txt --workers 4 --search-rpm 20 --index-rpm 300
+```
+
+Client-side limits on how many requests **one worker** sends per minute, to keep
+the traffic low or to stay under the instance's rate limits instead of collecting
+HTTP 429 responses:
+
+| Option | Limits | Default |
+|---|---|---|
+| `--search-rpm N` | search API requests (`/projects/:id/search`, one per result page of a branch search) | 0 = no limit |
+| `--index-rpm N` | every other API request: project and branch listing, file-change checks (`--file-changed-*`), the login check | 0 = no limit |
+| `--rpm N` | shortcut: sets both | |
+
+There are two budgets because GitLab limits the search API separately and usually
+much lower than the rest of the API. A specific option overrides `--rpm`
+(`--rpm 300 --search-rpm 20`), with the same precedence as the time filters:
+specific option on the command line > `--rpm` on the command line > specific key
+in the config file > `rpm` in the config file.
+
+- The limits are **per worker**: every worker has its own connection and budget, so
+  `--workers 4 --search-rpm 20` sends up to 80 search requests a minute. For an
+  instance-wide limit of L requests a minute, use about L / workers.
+- Requests are spaced evenly (one every 60/N seconds, counted from the start of the
+  previous one), so there are no bursts at the start of a minute.
+- Retries after HTTP 429 go through the same limit.
+- The search plan line names the limits: `Search plan: ..., 4 workers, rate limit:
+  search 20/min, other API 300/min per worker`; the run journal records them too.
+
+### Random delay: --jitter
+
+```bash
+gitlab-harvester -u ... -t ... -f words.txt --jitter 0.01-0.05
+```
+
+`--jitter RANGE` waits a random time before every API request, drawn anew for each
+request, so the requests don't come at a fixed rhythm:
+
+| Value | Delay before each request |
+|---|---|
+| `0.03` | 0 to 0.03 s |
+| `0.01-0.05` | 0.01 to 0.05 s |
+| `10ms-50ms` | the same, in milliseconds (`ms` and `s` suffixes) |
+| `0` or not set | none (default) |
+
+- It applies to every request (search and the rest), in every worker, retries
+  after HTTP 429 included.
+- It adds to the `--*-rpm` spacing: two requests of one worker are at least
+  `60/rpm` seconds plus the jitter apart, so the jitter never pushes the rate above
+  a limit. Without a limit it slows the scan by about the mean delay per request
+  (`0.01-0.05`: about 30 ms each).
+- The search plan line shows it (`..., jitter 0.01-0.05s`), and so does the run journal.
 
 ## Sessions and resume
 
@@ -343,6 +407,23 @@ Searching 'api_key' (2/3) | term 3/5 projects (60%) 0:02 ETA 0:01 | total 8/15 (
 ```
 
 Percentages are rounded down, so 100% means the work is really finished.
+
+The last part is the search running right now with the page being fetched and how
+long it has been running. With `--workers` it is the longest-running search, and
+`(+N running)` counts the others:
+
+```text
+Searching 'password' | 7/8 projects (87%) | 7 hits | 14:31 | ETA 2:04 | acme/monorepo @ main, page 37, 12:10 (+1 running)
+```
+
+The last searches of a scan can run long after all the others are done (a huge
+repository has many result pages, and GitLab runs the search again for every
+page; rate limits add waits). With `--workers`, a search still running after
+5 minutes gets a permanent line, repeated every 5 minutes (also in the run journal):
+
+```text
+Still searching 'password' in acme/monorepo @ main (page 37): running for 10:00
+```
 
 When a phase ends, the status line is replaced by a permanent summary:
 
@@ -458,6 +539,12 @@ are URL-encoded.
 | `--ca-bundle FILE` | system CAs | CA bundle (PEM) for the GitLab TLS certificate |
 | `--[no-]insecure` | off | disable TLS verification explicitly (never automatic) |
 | `-w, --workers N` | 1 | parallel API requests (1-64); only for instances without rate limits |
+| `--rpm N` | 0 | shortcut for `--index-rpm` and `--search-rpm` |
+| `--index-rpm N` | 0 | max non-search API requests per minute per worker (0 = no limit) |
+| `--search-rpm N` | 0 | max search API requests per minute per worker (0 = no limit) |
+| `--jitter RANGE` | off | random delay before every request: `MAX` or `MIN-MAX` seconds (`0.03`, `0.01-0.05`, `10ms-50ms`) |
+| `-A, --user-agent STRING` | python-gitlab's | fixed User-Agent of every request |
+| `--user-agent-file FILE` | | one User-Agent per line; a random one for every request |
 | `--time-after DATE`, `--time-before DATE` | — | window for the index, its projects and the files with hits |
 | `--index-active-after/--index-active-before DATE` | — | index only projects active in the window (API filter) |
 | `--active-after DATE` (`--started-from`), `--active-before DATE` | — | search only indexed projects active in the window |

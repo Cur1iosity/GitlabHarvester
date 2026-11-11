@@ -29,6 +29,7 @@ from glh.planner import (
     format_api_time,
     parse_timestamp,
 )
+from glh import ratelimit, user_agents
 from glh import workers as pool
 from glh.utils import logging_utils, terminal_utils
 from glh.utils.terminal_utils import human_int
@@ -114,10 +115,21 @@ class GitlabHarvester:
             host: str | None = None,  # backward-compat alias for `url`
             workers: int = 1,
             ssl_verify: bool | str = True,
+            index_rpm: int = 0,
+            search_rpm: int = 0,
+            jitter: tuple[float, float] = ratelimit.NO_JITTER,
+            user_agents: list[str] | tuple[str, ...] = (),
     ) -> None:
         self.search_terms: list = search_terms or []
         # Parallel API requests (1 = sequential). See glh/workers.py.
         self.workers: int = max(1, int(workers))
+        # Requests per minute per client (thread); 0 = no limit. See glh/ratelimit.py.
+        self.index_rpm: int = max(0, int(index_rpm))
+        self.search_rpm: int = max(0, int(search_rpm))
+        # Random delay range (seconds) before every request; (0, 0) = off.
+        self.jitter: tuple[float, float] = (float(jitter[0]), float(jitter[1]))
+        # User-Agent of every request: one = fixed, several = random per request; () = python-gitlab's.
+        self.user_agents: tuple[str, ...] = tuple(user_agents)
         self._local = threading.local()
         self._gl_main: Gitlab | None = None
         self._client_kwargs: dict[str, Any] | None = None
@@ -126,6 +138,16 @@ class GitlabHarvester:
         # Terms of the last search_keywords() run that had failed (retryable) searches.
         self.incomplete_terms: list[str] = []
         self._file_change_lock = threading.Lock()
+        # What every thread is searching right now (status line, slow-task reports).
+        self._active = pool.ActiveTasks()
+        # Report a search task still running after this many seconds (and again
+        # every as many seconds); 0 disables. Parallel search only.
+        self.slow_task_report: float = 300.0
+        # HTTP 429: python-gitlab waits and retries silently, so we warn (throttled).
+        self.rate_limit_warn_interval: float = 60.0
+        self._rate_limit_lock = threading.Lock()
+        self._rate_limited = 0
+        self._rate_limit_warned_at: float | None = None
 
         self.log_level: int = logging_utils.coerce_log_level(log_level)
         self.log_file: str | None = log_file
@@ -166,7 +188,69 @@ class GitlabHarvester:
             session = Session()
             session.proxies.update(main_session.proxies)
             kwargs["session"] = session
-        self._local.gl = Gitlab(**kwargs)
+        self._local.gl = self._setup_client(Gitlab(**kwargs))
+
+    def _setup_client(self, gl: Gitlab) -> Gitlab:
+        """
+        Prepare the requests session of a new client (main or worker).
+
+        - a response hook makes HTTP 429 waits visible (see _on_response);
+        - --index-rpm / --search-rpm / --jitter: a throttling adapter with its
+          own limiters, so every client (thread) gets the full per-thread budget;
+          the same adapter sets the User-Agent (-A, --user-agent-file).
+        """
+        session = getattr(gl, "session", None)
+        hooks = getattr(session, "hooks", None)
+        if isinstance(hooks, dict):
+            hooks.setdefault("response", []).append(self._on_response)
+        if session is not None and hasattr(session, "mount"):
+            ratelimit.limit_session(session, index_rpm=self.index_rpm, search_rpm=self.search_rpm,
+                                    jitter=self.jitter, user_agents=self.user_agents)
+        return gl
+
+    @staticmethod
+    def _retry_after(headers: Any) -> float | None:
+        """Seconds python-gitlab waits after a 429 (Retry-After / RateLimit-Reset), if known."""
+        try:
+            if "Retry-After" in headers:
+                return max(float(headers["Retry-After"]), 0.0)
+            if "RateLimit-Reset" in headers:
+                return max(float(headers["RateLimit-Reset"]) - time.time(), 0.0)
+        except (TypeError, ValueError):
+            pass
+        return None
+
+    def _on_response(self, response: Any, *args: Any, **kwargs: Any) -> None:
+        """
+        requests response hook (runs in the thread that made the request).
+
+        On HTTP 429 python-gitlab waits (Retry-After) and retries up to 10
+        times without any output, which looks like a hung scan. Mark the
+        running task as waiting and log a throttled warning instead.
+        """
+        if getattr(response, "status_code", None) != 429:
+            self._active.set_waiting("")
+            return None
+        wait = self._retry_after(getattr(response, "headers", None) or {})
+        wait_text = terminal_utils.format_duration(wait) if wait is not None else "a moment"
+        self._active.set_waiting(f"rate limited (HTTP 429), retry in {wait_text}")
+        with self._rate_limit_lock:
+            self._rate_limited += 1
+            count = self._rate_limited
+            now = time.monotonic()
+            warn = (self._rate_limit_warned_at is None
+                    or now - self._rate_limit_warned_at >= self.rate_limit_warn_interval)
+            if warn:
+                self._rate_limit_warned_at = now
+        if warn:
+            path = urlparse(getattr(response, "url", "") or "").path
+            self.logger.warning(
+                "GitLab rate limit (HTTP 429) on %s: waiting %s before a retry "
+                "(%s so far; python-gitlab retries up to 10 times). "
+                "Fewer --workers lowers the request rate.",
+                path or "a request", wait_text, terminal_utils.plural(count, "rate-limited response"),
+            )
+        return None
 
     def _imap_ordered(self, fn: Callable[[Any], Any], items: Any, *, parallel: bool = True):
         """imap_ordered() with this harvester's worker count and per-thread clients."""
@@ -336,7 +420,7 @@ class GitlabHarvester:
 
         _maybe_disable_warnings()
 
-        gl = Gitlab(**kwargs)
+        gl = self._setup_client(Gitlab(**kwargs))
 
         try:
             gl.auth()
@@ -934,6 +1018,12 @@ class GitlabHarvester:
         terms_text = terminal_utils.plural(n_terms, "term")
         hits_before = hit_counter
         parallel = f", {self.workers} workers" if self.workers > 1 else ""
+        if limits := ratelimit.describe(self.index_rpm, self.search_rpm):
+            parallel += f", rate limit: {limits}"
+        if jitter := ratelimit.format_jitter(self.jitter):
+            parallel += f", jitter {jitter}"
+        if agents := user_agents.describe(self.user_agents):
+            parallel += f", {agents}"
 
         files = f", files changed {options.file_window.describe()}" if options.file_window else ""
         terminal_utils.STATUS.write_line(f"Search plan: {terms_text}, {plan.describe()}{files}{parallel}")
@@ -1005,6 +1095,19 @@ class GitlabHarvester:
             hits, else None. 403/404 are logged and treated as nothing to find.
         """
         project_url = task.project["web_url"]
+        name = task.project.get("path_with_namespace", project_url)
+        n_branches = len(task.branches)
+        label = f"{name} @ {task.branch}" + (f" [{task.branch_no + 1}/{n_branches}]" if n_branches > 1 else "")
+        with self._active.running(label, report=f"'{task.term}' in {name} @ {task.branch}"):
+            if self.workers <= 1:
+                # Inline (main thread): show the new task now. Worker threads
+                # leave redraws to the status ticker.
+                terminal_utils.STATUS.refresh()
+            return self._search_branch_task(task, name, project_url)
+
+    def _search_branch_task(self, task: _BranchTask, name: str,
+                            project_url: str) -> tuple[list[dict[str, Any]], str | None]:
+        """_search_branch() body, while the task is registered as running."""
         project_obj: Project = self._gl.projects.get(task.project["id"], lazy=True)
         path_filter = None
         if task.file_window:
@@ -1021,7 +1124,6 @@ class GitlabHarvester:
         retryable = [e for e in errors if not is_permanent_error(e)]
         failure = None
         if retryable:
-            name = task.project.get("path_with_namespace", project_url)
             failure = f"{name} @ {task.branch}: {type(retryable[0]).__name__}: {retryable[0]}"
         return hits, failure
 
@@ -1145,57 +1247,82 @@ class GitlabHarvester:
                 term_begun.setdefault(term_no, progress.clock())
                 for project_no, (project, branches) in enumerate(plan.targets):
                     for branch_no, branch in enumerate(branches):
-                        if self.workers <= 1:
-                            info = branch if len(branches) == 1 else f"{branch} [{branch_no + 1}/{len(branches)}]"
-                            progress.set_detail(f"{project.get('path_with_namespace', project['web_url'])} @ {info}")
                         yield _BranchTask(term_no, term, project_no, project, branches, branch_no, file_window)
+
+        def report_slow_tasks() -> None:
+            # Main thread only. A search can legitimately run for hours (huge
+            # repositories, rate limits): say so instead of looking hung.
+            if not self.slow_task_report:
+                return
+            now = self._active.clock()
+            for running in self._active.snapshot():
+                since = running.reported_at if running.reported_at is not None else running.started
+                if now - since >= self.slow_task_report:
+                    running.reported_at = now
+                    details = ", ".join(x for x in (running.step, running.waiting) if x)
+                    progress.note(
+                        f"Still searching {running.report}"
+                        f"{f' ({details})' if details else ''}: running for "
+                        f"{terminal_utils.format_duration(self._active.elapsed(running))}"
+                    )
 
         if n_terms:
             progress.start_round(1, label(0))
         progress.set_info(f"{human_int(hit_counter)} hits")
         close_finished_terms()  # terms without planned projects
 
-        tasks_iter = pool.imap_unordered(self._search_branch, tasks(), workers=self.workers,
-                                         initializer=self._init_worker_client)
-        for done in tasks_iter:
-            task: _BranchTask = done.item
-            hits, failure = done.unwrap()
-            if failure:
-                term_failures[task.term_no].append(failure)
-            key = (task.term_no, task.project_no)
-            got = partial.setdefault(key, {})
-            got[task.branch_no] = hits
-            if len(got) < len(task.branches):
-                continue
+        # The status line shows the tasks running right now (the longest-running
+        # first), not the last finished one: the last task of a scan may run long
+        # after all the others are done.
+        previous_provider = progress.detail_provider
+        progress.detail_provider = lambda: self._active.describe(terminal_utils.format_clock)
 
-            # All branches of this (term, project) are done: one session record.
-            del partial[key]
-            project = task.project
-            s_res = [{"branch": b, "branch_search_result": got[i]} for i, b in enumerate(task.branches) if got[i]]
-            found = sum(len(h) for h in got.values())
-            hit_counter += found
-            term_hits[task.term_no] += found
-            if s_res:
-                out = {
-                    "project_id": project["id"],
-                    "web_url": project["web_url"],
-                    "created_at": project.get("created_at"),
-                    "last_activity_at": project.get("last_activity_at"),
-                    "project_search_result": s_res,
-                }
-                results[task.term_no].append((task.project_no, out))
-                if session_file:
-                    self._emit_record(session_file, record={"term": task.term, "result": out})
+        try:
+            tasks_iter = pool.imap_unordered(self._search_branch, tasks(), workers=self.workers,
+                                             initializer=self._init_worker_client, on_idle=report_slow_tasks)
+            for done in tasks_iter:
+                task: _BranchTask = done.item
+                hits, failure = done.unwrap()
+                if failure:
+                    term_failures[task.term_no].append(failure)
+                key = (task.term_no, task.project_no)
+                got = partial.setdefault(key, {})
+                got[task.branch_no] = hits
+                if len(got) < len(task.branches):
+                    continue
 
-            projects_left[task.term_no] -= 1
-            if task.term_no == state["next_term"]:
-                progress.done = plan.project_count - projects_left[task.term_no]
-            progress.completed_units = sum(plan.project_count - left for left in projects_left)
-            progress.set_info(f"{human_int(hit_counter)} hits")
-            if self.workers > 1:
-                progress.set_detail(f"{project.get('path_with_namespace', project['web_url'])}")
-            progress.advance(0)
-            close_finished_terms()
+                # All branches of this (term, project) are done: one session record.
+                del partial[key]
+                project = task.project
+                s_res = [{"branch": b, "branch_search_result": got[i]} for i, b in enumerate(task.branches) if got[i]]
+                found = sum(len(h) for h in got.values())
+                hit_counter += found
+                term_hits[task.term_no] += found
+                if s_res:
+                    out = {
+                        "project_id": project["id"],
+                        "web_url": project["web_url"],
+                        "created_at": project.get("created_at"),
+                        "last_activity_at": project.get("last_activity_at"),
+                        "project_search_result": s_res,
+                    }
+                    results[task.term_no].append((task.project_no, out))
+                    if session_file:
+                        self._emit_record(session_file, record={"term": task.term, "result": out})
+
+                projects_left[task.term_no] -= 1
+                if task.term_no == state["next_term"]:
+                    progress.done = plan.project_count - projects_left[task.term_no]
+                progress.completed_units = sum(plan.project_count - left for left in projects_left)
+                progress.set_info(f"{human_int(hit_counter)} hits")
+                progress.advance(0)
+                close_finished_terms()
+                report_slow_tasks()
+
+        finally:
+            # An interrupted search keeps the running tasks in its "stopped" line.
+            progress.detail = self._active.describe(terminal_utils.format_clock) or progress.detail
+            progress.detail_provider = previous_provider
 
         res = [{"term": term, "result": [out for _, out in sorted(results[i], key=lambda x: x[0])]}
                for i, term in enumerate(terms)]
@@ -1304,6 +1431,8 @@ class GitlabHarvester:
         search_results: list[dict[str, Any]] = []
         try:
             while True:
+                if page > 1:
+                    self._active.set_step(f"page {page}")
                 batch = project.search(scope=SearchScope.BLOBS,
                                        ref=branch,
                                        search=term,

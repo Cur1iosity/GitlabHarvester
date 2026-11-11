@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import io
 import json
+import logging
+import re
 import threading
 from collections import Counter
 from pathlib import Path
@@ -152,3 +154,46 @@ def test_parallel_progress_counts_planned_projects(fake_gitlab: FakeGitLab, make
     counts = {m.group(2) for m in re.finditer(r"(\d+)/(\d+) projects", out)}
     assert counts == {"5"}
     assert "Search finished: 2 terms x 5 projects" in out
+
+
+# --------------------------------------------------------------------------- slow last task
+
+
+def test_status_line_shows_the_running_task_not_the_last_finished_one(fake_gitlab: FakeGitLab, make_harvester,
+                                                                       index, monkeypatch):
+    """Regression: with workers > 1 a slow last project looked hung (status showed a finished project)."""
+    from glh.utils import terminal_utils
+    from tests.helpers import FakeStream
+
+    tty = FakeStream(True)
+    status = terminal_utils.StatusLine(tty, columns=lambda: 400, tick_interval=0.05, refresh_interval=0)
+    monkeypatch.setattr(terminal_utils, "STATUS", status)
+    fake_gitlab.add_fault({"match": {"path": "^/api/v4/projects/301/search$"}, "response": {"delay": 1.0}})
+    glh = make_harvester(workers=4)
+    glh.slow_task_report = 0.3
+
+    run_search(glh, index, terms=["password"], scan_branches="default")
+
+    out = tty.getvalue()
+    frames = [f for f in out.split("\r") if "projects (" in f]
+    slow = "ops/infra/terraform/modules @ main"
+    assert any(f" {slow}, 0:00" in f for f in frames), frames  # shown while it runs
+    assert re.search(rf"Still searching 'password' in {slow}: running for 0\.\ds\n", out), out
+    assert glh._active.snapshot() == []
+
+
+def test_rate_limit_waits_are_reported(fake_gitlab: FakeGitLab, make_harvester, index, no_retry_sleep):
+    from tests.helpers import capture_logs
+
+    fake_gitlab.add_fault({"match": {"path": "/search$"}, "times": 3,
+                           "response": {"status": 429, "headers": {"Retry-After": "7"}}})
+    glh = make_harvester(workers=4)
+    logs = capture_logs(glh)
+
+    _, hits, _ = run_search(glh, index, terms=["password"], scan_branches="default")
+
+    assert hits > 0 and no_retry_sleep == [7.0, 7.0, 7.0]
+    warnings = [m for m in logs.messages(logging.WARNING) if "rate limit" in m]
+    assert len(warnings) == 1  # throttled
+    assert "HTTP 429" in warnings[0] and "/search" in warnings[0] and "7.0s" in warnings[0]
+    assert glh._rate_limited == 3

@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, IO
 from urllib.parse import urlparse
 
-from glh import GitlabHarvester
+from glh import GitlabHarvester, ratelimit, user_agents
 from glh.exceptions import GitlabHarvesterError
 from glh.cli import CliArgs, _get_version
 from glh.planner import ScanOptions, TimeWindow, parse_timestamp
@@ -142,6 +142,11 @@ def _describe_options(args: CliArgs) -> str:
             "index-branches": args.index_branches,
             "batch-size": args.batch_size,
             "workers": args.workers,
+            "index-rpm": args.index_rpm or "no limit",
+            "search-rpm": args.search_rpm or "no limit",
+            "jitter": ratelimit.format_jitter(args.jitter) or "off",
+            "user-agent": (f"file {args.user_agent_file}" if args.user_agent_file
+                           else (repr(args.user_agent) if args.user_agent else "python-gitlab")),
             "index-active": _when(args.index_active_after, args.index_active_before),
         })
     if args.mode == "search":
@@ -220,11 +225,24 @@ def _mk_harvester(args: CliArgs) -> GitlabHarvester:
     """Create a GitlabHarvester instance from CLI args."""
     url, token = _require_gitlab(args)
 
+    agents: list[str] = []
+    if args.user_agent_file:
+        try:
+            agents = user_agents.load_user_agents(args.user_agent_file)
+        except user_agents.UserAgentError as e:
+            raise SystemExit(str(e)) from None
+    elif args.user_agent:
+        agents = [args.user_agent]
+
     kwargs: dict[str, Any] = {
         "url": url,
         "token": token,
         "timeout": args.timeout,
         "workers": args.workers,
+        "index_rpm": args.index_rpm,
+        "search_rpm": args.search_rpm,
+        "jitter": args.jitter,
+        "user_agents": agents,
         "log_level": args.log_level,
         "log_file": args.log_file,
         "ssl_verify": False if args.insecure else (args.ca_bundle or True),
@@ -323,6 +341,11 @@ def _run_search(args: CliArgs) -> None:
                     "index_file": str(index_file),
                     "batch_size": args.batch_size,
                     "workers": args.workers,
+                    "index_rpm": args.index_rpm,
+                    "search_rpm": args.search_rpm,
+                    "jitter": list(args.jitter),
+                    "user_agent": args.user_agent,
+                    "user_agent_file": args.user_agent_file,
                     "branches_per_page": args.branches_per_page,
                     "index_branches": args.index_branches,
                     "scan_branches": args.scan_branches,
