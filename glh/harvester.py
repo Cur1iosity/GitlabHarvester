@@ -29,7 +29,7 @@ from glh.planner import (
     format_api_time,
     parse_timestamp,
 )
-from glh import ratelimit
+from glh import ratelimit, user_agents
 from glh import workers as pool
 from glh.utils import logging_utils, terminal_utils
 from glh.utils.terminal_utils import human_int
@@ -118,6 +118,7 @@ class GitlabHarvester:
             index_rpm: int = 0,
             search_rpm: int = 0,
             jitter: tuple[float, float] = ratelimit.NO_JITTER,
+            user_agents: list[str] | tuple[str, ...] = (),
     ) -> None:
         self.search_terms: list = search_terms or []
         # Parallel API requests (1 = sequential). See glh/workers.py.
@@ -127,6 +128,8 @@ class GitlabHarvester:
         self.search_rpm: int = max(0, int(search_rpm))
         # Random delay range (seconds) before every request; (0, 0) = off.
         self.jitter: tuple[float, float] = (float(jitter[0]), float(jitter[1]))
+        # User-Agent of every request: one = fixed, several = random per request; () = python-gitlab's.
+        self.user_agents: tuple[str, ...] = tuple(user_agents)
         self._local = threading.local()
         self._gl_main: Gitlab | None = None
         self._client_kwargs: dict[str, Any] | None = None
@@ -193,7 +196,8 @@ class GitlabHarvester:
 
         - a response hook makes HTTP 429 waits visible (see _on_response);
         - --index-rpm / --search-rpm / --jitter: a throttling adapter with its
-          own limiters, so every client (thread) gets the full per-thread budget.
+          own limiters, so every client (thread) gets the full per-thread budget;
+          the same adapter sets the User-Agent (-A, --user-agent-file).
         """
         session = getattr(gl, "session", None)
         hooks = getattr(session, "hooks", None)
@@ -201,7 +205,7 @@ class GitlabHarvester:
             hooks.setdefault("response", []).append(self._on_response)
         if session is not None and hasattr(session, "mount"):
             ratelimit.limit_session(session, index_rpm=self.index_rpm, search_rpm=self.search_rpm,
-                                    jitter=self.jitter)
+                                    jitter=self.jitter, user_agents=self.user_agents)
         return gl
 
     @staticmethod
@@ -1018,6 +1022,8 @@ class GitlabHarvester:
             parallel += f", rate limit: {limits}"
         if jitter := ratelimit.format_jitter(self.jitter):
             parallel += f", jitter {jitter}"
+        if agents := user_agents.describe(self.user_agents):
+            parallel += f", {agents}"
 
         files = f", files changed {options.file_window.describe()}" if options.file_window else ""
         terminal_utils.STATUS.write_line(f"Search plan: {terms_text}, {plan.describe()}{files}{parallel}")

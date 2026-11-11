@@ -65,6 +65,7 @@ and rate limits, deduplicated reports, config files:
 | `-w, --workers N` | parallel API requests, for instances without rate limits |
 | `--rpm N`, `--index-rpm N`, `--search-rpm N` | requests per minute per worker: all, non-search, search |
 | `--jitter 0.01-0.05` | random delay before every request (seconds, or `10ms-50ms`) |
+| `-A STRING`, `--user-agent-file FILE` | fixed User-Agent, or a random one from the file for every request |
 | `-m dump-index`, `--dump-projects` | build or rebuild the project index |
 | `--session NAME`, `--resume` | name a session and continue it later |
 | `--post-process dedup,convert`, `--final-only` | deduplicate and convert the session right after the search |

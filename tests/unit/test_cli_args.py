@@ -240,3 +240,42 @@ def test_invalid_jitter_is_a_usage_error(capsys):
         CliParser.parse(["--jitter", "0.05-0.01"])
     assert e.value.code == 2
     assert "larger than the maximum" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- User-Agent
+
+
+def test_user_agent_options():
+    a = CliParser.parse([])
+    assert a.user_agent is None and a.user_agent_file is None
+    assert CliParser.parse(["-A", "Mozilla/5.0 (X11)"]).user_agent == "Mozilla/5.0 (X11)"
+    assert CliParser.parse(["--user-agent-file", "ua.txt"]).user_agent_file == "ua.txt"
+
+
+def test_user_agent_and_file_exclude_each_other(capsys):
+    with pytest.raises(SystemExit) as e:
+        CliParser.parse(["-A", "curl/8", "--user-agent-file", "ua.txt"])
+    assert e.value.code == 2
+    assert "not allowed with argument" in capsys.readouterr().err
+
+
+def test_invalid_user_agent_is_a_usage_error(capsys):
+    with pytest.raises(SystemExit):
+        CliParser.parse(["-A", "Мозилла"])
+    assert "Latin-1" in capsys.readouterr().err
+
+
+def test_user_agent_from_config_file(tmp_path: Path, capsys):
+    (tmp_path / "ua.txt").write_text("a/1\n", encoding="utf-8")
+    cfg = tmp_path / "c.ini"
+    cfg.write_text("[connection]\nuser-agent-file = ua.txt\n", encoding="utf-8")
+    a = CliParser.parse(["-c", str(cfg)])
+    assert a.user_agent_file == str(tmp_path / "ua.txt")  # relative to the config file
+    # One of them on the command line replaces the other from the file.
+    a = CliParser.parse(["-c", str(cfg), "-A", "curl/8"])
+    assert a.user_agent == "curl/8" and a.user_agent_file is None
+
+    cfg.write_text("[connection]\nuser-agent = curl/8\nuser-agent-file = ua.txt\n", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        CliParser.parse(["-c", str(cfg)])
+    assert "mutually exclusive" in capsys.readouterr().err

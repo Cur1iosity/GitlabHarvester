@@ -153,9 +153,10 @@ Headers and behavior that matter:
 - **python-gitlab error handling** (defaults):
   - `429` is retried up to 10 times, sleeping `Retry-After` seconds (silently:
     the harvester sees it through a `requests` response hook, `_on_response`);
-    with `--index-rpm`/`--search-rpm`/`--jitter` every client session also gets a
-    `ratelimit.ThrottledAdapter`, which spaces requests (and adds the random
-    delay) before they are sent (retries included);
+    with `--index-rpm`/`--search-rpm`/`--jitter`/`-A`/`--user-agent-file` every
+    client session also gets a `ratelimit.ThrottledAdapter`, which spaces
+    requests, adds the random delay and sets the User-Agent right before they
+    are sent (retries included);
   - `5xx` is **not** retried (`retry_transient_errors=False`);
   - timeouts and connection errors are **not** retried;
   - a non-JSON 2xx body → `GitlabParsingError`.

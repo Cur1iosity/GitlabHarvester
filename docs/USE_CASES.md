@@ -205,6 +205,18 @@ gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -f words.txt -
 `--jitter` draws a new delay for every request, so the traffic doesn't come at the
 fixed interval that `--rpm` alone produces (easy to spot in logs).
 
+The User-Agent is the other obvious marker: by default every request says
+`python-gitlab/<version>`. Send a browser string instead, fixed or a random one
+per request from a file (one per line, `#` comments allowed):
+
+```bash
+gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -f words.txt -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -f words.txt --user-agent-file agents.txt --rpm 10 --jitter 0.5-3
+```
+
+All requests still carry the same token, so the User-Agent changes how the
+traffic looks in logs, not whose requests they are.
+
 Details: [usage.md](usage.md#request-rate-limits).
 
 ## 6. Baseline and re-scans

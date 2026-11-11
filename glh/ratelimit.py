@@ -23,6 +23,9 @@ two requests of one thread is at least ``60/rpm + jitter`` (without a limit,
 at least the jitter), so jitter never pushes the rate above the limit.
 
 Retries of python-gitlab (HTTP 429) go through the same pacing.
+
+The same adapter also sets the User-Agent (-A/--user-agent, --user-agent-file;
+see ``glh.user_agents``).
 """
 
 from __future__ import annotations
@@ -31,7 +34,7 @@ import random
 import re
 import threading
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 from urllib.parse import urlsplit
 
 from requests.adapters import HTTPAdapter
@@ -143,26 +146,37 @@ def _limiter(rpm: int, jitter: Jitter) -> RateLimiter | None:
 
 
 class ThrottledAdapter(HTTPAdapter):
-    """requests transport adapter that waits for the matching :class:`RateLimiter` before each request."""
+    """
+    requests transport adapter that shapes every request right before it is
+    sent (python-gitlab retries included): waits for the matching
+    :class:`RateLimiter` and sets the User-Agent (one chosen at random from
+    ``user_agents`` for each request; a single string = fixed).
+    """
 
     def __init__(self, *, index_rpm: int = 0, search_rpm: int = 0, jitter: Jitter = NO_JITTER,
-                 **kwargs: Any) -> None:
+                 user_agents: Sequence[str] = (), rng: random.Random | None = None, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.index_limiter = _limiter(index_rpm, jitter)
         self.search_limiter = _limiter(search_rpm, jitter)
+        self.user_agents: tuple[str, ...] = tuple(user_agents)
+        self._rng = rng or random.Random()
 
     def send(self, request: Any, *args: Any, **kwargs: Any) -> Any:
         limiter = self.search_limiter if is_search_request(request.url or "") else self.index_limiter
         if limiter is not None:
             limiter.wait()
+        if self.user_agents:
+            request.headers["User-Agent"] = (self.user_agents[0] if len(self.user_agents) == 1
+                                             else self._rng.choice(self.user_agents))
         return super().send(request, *args, **kwargs)
 
 
-def limit_session(session: Any, *, index_rpm: int = 0, search_rpm: int = 0, jitter: Jitter = NO_JITTER) -> None:
-    """Mount a fresh :class:`ThrottledAdapter` on ``session`` (no-op without limits or jitter)."""
-    if index_rpm <= 0 and search_rpm <= 0 and jitter[1] <= 0:
+def limit_session(session: Any, *, index_rpm: int = 0, search_rpm: int = 0, jitter: Jitter = NO_JITTER,
+                  user_agents: Sequence[str] = ()) -> None:
+    """Mount a fresh :class:`ThrottledAdapter` on ``session`` (no-op when there is nothing to shape)."""
+    if index_rpm <= 0 and search_rpm <= 0 and jitter[1] <= 0 and not user_agents:
         return
-    adapter = ThrottledAdapter(index_rpm=index_rpm, search_rpm=search_rpm, jitter=jitter)
+    adapter = ThrottledAdapter(index_rpm=index_rpm, search_rpm=search_rpm, jitter=jitter, user_agents=user_agents)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
 

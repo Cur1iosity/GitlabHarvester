@@ -121,3 +121,42 @@ def test_search_plan_names_the_jitter(make_harvester, tmp_path, waits, monkeypat
     monkeypatch.setattr(terminal_utils, "STATUS", terminal_utils.StatusLine(err, ticker=False))
     search(make_harvester(search_rpm=30, jitter=(0.0, 0.03)), projects, terms=["password"])
     assert ", rate limit: search 30/min per worker, jitter 0-0.03s\n" in err.getvalue()
+
+
+# --------------------------------------------------------------------------- User-Agent
+
+
+def user_agents_sent(fake_gitlab: FakeGitLab) -> list[str]:
+    return [next(v for k, v in r.headers.items() if k.lower() == "user-agent") for r in fake_gitlab.requests]
+
+
+def test_fixed_user_agent_on_every_request(fake_gitlab: FakeGitLab, make_harvester, tmp_path):
+    projects = index_of(make_harvester, tmp_path)
+    assert all(ua.startswith("python-gitlab/") for ua in user_agents_sent(fake_gitlab))  # default
+    fake_gitlab.clear_journal()
+
+    search(make_harvester(workers=2, user_agents=["Mozilla/5.0 (X11; Linux x86_64)"]), projects)
+    sent = user_agents_sent(fake_gitlab)
+    assert len(sent) > 3 and set(sent) == {"Mozilla/5.0 (X11; Linux x86_64)"}  # login check included
+
+
+def test_random_user_agent_per_request(fake_gitlab: FakeGitLab, make_harvester, tmp_path):
+    projects = index_of(make_harvester, tmp_path)
+    fake_gitlab.clear_journal()
+    agents = [f"agent-{i}/1.0" for i in range(4)]
+
+    search(make_harvester(workers=2, user_agents=agents), projects)
+    sent = user_agents_sent(fake_gitlab)
+    assert set(sent) <= set(agents)
+    assert len(set(sent)) > 1  # chosen per request, not once per run
+
+
+def test_cli_user_agent_file(fake_gitlab: FakeGitLab, run_cli, tmp_path):
+    (tmp_path / "ua.txt").write_text("# test agents\nagent-a/1.0\nagent-b/2.0\n", encoding="utf-8")
+    proc = run_cli("-u", fake_gitlab.url, "-t", fake_gitlab.token, "-s", "password", "-b", "all",
+                   "--user-agent-file", "ua.txt", check=True)
+    assert "random User-Agent of 2" in proc.stderr
+    assert set(user_agents_sent(fake_gitlab)) <= {"agent-a/1.0", "agent-b/2.0"}
+
+    bad = run_cli("-u", fake_gitlab.url, "-t", fake_gitlab.token, "-s", "password", "--user-agent-file", "none.txt")
+    assert bad.returncode != 0 and "Cannot read the User-Agent file" in bad.stderr

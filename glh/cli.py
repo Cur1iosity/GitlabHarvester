@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from importlib.metadata import version, PackageNotFoundError
 
-from glh import ratelimit
+from glh import ratelimit, user_agents
 from glh.config import TERMS_DEST, ConfigError, load_config
 from glh.planner import parse_timestamp
 from glh.postprocess.pipeline import normalize_steps
@@ -126,6 +126,14 @@ def parse_jitter(value: str) -> tuple[float, float]:
             f"{e}. Use MAX or MIN-MAX in seconds, e.g. 0.03, 0.01-0.05 or 10ms-50ms (0 = off).") from None
 
 
+def parse_user_agent(value: str) -> str:
+    """Parse -A/--user-agent: a User-Agent that can be sent as an HTTP header."""
+    try:
+        return user_agents.check_user_agent(value)
+    except user_agents.UserAgentError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
+
+
 # (specific dest, group dest) for every request rate limit; resolved like TIME_BOUNDS.
 RATE_LIMITS: tuple[tuple[str, str], ...] = (
     ("index_rpm", "rpm"),
@@ -182,6 +190,8 @@ class CliArgs:
     index_rpm: int
     search_rpm: int
     jitter: tuple[float, float]
+    user_agent: str | None
+    user_agent_file: str | None
 
     log_file: str | None
     log_level: str
@@ -296,6 +306,12 @@ class CliParser:
             help="Random delay before every API request, drawn anew for each one: MAX or MIN-MAX seconds, "
                  "e.g. 0.03, 0.01-0.05 or 10ms-50ms (default: off). Adds to the --*-rpm spacing.",
         )
+        ua = parser.add_mutually_exclusive_group()
+        ua.add_argument("-A", "--user-agent", type=parse_user_agent, default=None, metavar="STRING",
+                        help="User-Agent of every API request (default: python-gitlab's).")
+        ua.add_argument("--user-agent-file", default=None, metavar="FILE",
+                        help="File with one User-Agent per line (# comments allowed): every API request "
+                             "gets one chosen at random.")
 
         # Logging
         parser.add_argument("--log-file", default=None, help="Write logs to a file (in addition to stderr).")
@@ -474,7 +490,8 @@ class CliParser:
                 parser.error(str(e))
             given = cls._given_dests(argv)
 
-            exclusive = (("search", "terms_file", TERMS_DEST), ("session", "session_file"))
+            exclusive = (("search", "terms_file", TERMS_DEST), ("session", "session_file"),
+                         ("user_agent", "user_agent_file"))
             for group in exclusive:
                 if given & set(group):
                     for dest in group:
@@ -532,6 +549,8 @@ class CliParser:
             index_rpm=ns.index_rpm,
             search_rpm=ns.search_rpm,
             jitter=ns.jitter or ratelimit.NO_JITTER,
+            user_agent=ns.user_agent,
+            user_agent_file=ns.user_agent_file,
             log_file=ns.log_file,
             log_level=ns.log_level,
             debug=ns.debug,

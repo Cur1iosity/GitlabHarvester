@@ -16,7 +16,7 @@ Extras that have no CLI counterpart:
 - ``token = env:NAME`` reads the token from the environment variable NAME.
 
 Relative paths (``index-file``, ``terms-file``, ``session-file``, ``log-file``,
-``input-file``, ``output-file``, ``sqlite-path``, ``ca-bundle``) are resolved against the
+``input-file``, ``output-file``, ``sqlite-path``, ``ca-bundle``, ``user-agent-file``) are resolved against the
 directory of the config file, so the config works from any working directory.
 """
 
@@ -30,7 +30,7 @@ from typing import Any
 
 # Keys (argparse dests) that hold file system paths.
 PATH_DESTS = frozenset({"index_file", "terms_file", "session_file", "log_file", "input_file", "output_file",
-                        "sqlite_path", "ca_bundle"})
+                        "sqlite_path", "ca_bundle", "user_agent_file"})
 # Config-only keys (no CLI option).
 TERMS_DEST = "terms"
 # Options that make no sense in a config file.
@@ -156,7 +156,7 @@ def load_config(path: str | os.PathLike[str], parser: argparse.ArgumentParser) -
             values[action.dest] = value
 
     # The same exclusivity rules as on the command line.
-    for group in (("search", "terms_file", TERMS_DEST), ("session", "session_file")):
+    for group in (("search", "terms_file", TERMS_DEST), ("session", "session_file"), ("user_agent", "user_agent_file")):
         present = [d for d in group if d in values]
         if len(present) > 1:
             names = ", ".join(d.replace("_", "-") for d in present)

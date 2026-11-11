@@ -39,6 +39,12 @@ gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -s password
 - The token needs the `read_api` scope. Only projects visible to the token are searched.
 - `--proxy http://127.0.0.1:8080` routes API traffic through a proxy (a scheme is added if missing).
 - `--timeout 60` is the per-request timeout in seconds.
+- User-Agent: by default python-gitlab's own (`python-gitlab/<version>`) is sent.
+  `-A/--user-agent "Mozilla/5.0 (...)"` sends one fixed string with every request;
+  `--user-agent-file agents.txt` reads one User-Agent per line (blank lines and
+  `#` comments are skipped) and gives every request one chosen at random. The two
+  options exclude each other. Strings must be Latin-1 without control characters
+  (an invalid line is reported with its number before the run starts).
 - TLS certificates are always verified, and verification is never turned off
   automatically. For a private CA, pass its PEM bundle with `--ca-bundle ca.pem`. To
   connect without verification, add `--insecure` explicitly: every run then warns that
@@ -537,6 +543,8 @@ are URL-encoded.
 | `--index-rpm N` | 0 | max non-search API requests per minute per worker (0 = no limit) |
 | `--search-rpm N` | 0 | max search API requests per minute per worker (0 = no limit) |
 | `--jitter RANGE` | off | random delay before every request: `MAX` or `MIN-MAX` seconds (`0.03`, `0.01-0.05`, `10ms-50ms`) |
+| `-A, --user-agent STRING` | python-gitlab's | fixed User-Agent of every request |
+| `--user-agent-file FILE` | | one User-Agent per line; a random one for every request |
 | `--time-after DATE`, `--time-before DATE` | — | window for the index, its projects and the files with hits |
 | `--index-active-after/--index-active-before DATE` | — | index only projects active in the window (API filter) |
 | `--active-after DATE` (`--started-from`), `--active-before DATE` | — | search only indexed projects active in the window |
