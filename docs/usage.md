@@ -278,6 +278,30 @@ in the config file > `rpm` in the config file.
 - The search plan line names the limits: `Search plan: ..., 4 workers, rate limit:
   search 20/min, other API 300/min per worker`; the run journal records them too.
 
+### Random delay: --jitter
+
+```bash
+gitlab-harvester -u ... -t ... -f words.txt --jitter 0.01-0.05
+```
+
+`--jitter RANGE` waits a random time before every API request, drawn anew for each
+request, so the requests don't come at a fixed rhythm:
+
+| Value | Delay before each request |
+|---|---|
+| `0.03` | 0 to 0.03 s |
+| `0.01-0.05` | 0.01 to 0.05 s |
+| `10ms-50ms` | the same, in milliseconds (`ms` and `s` suffixes) |
+| `0` or not set | none (default) |
+
+- It applies to every request (search and the rest), in every worker, retries
+  after HTTP 429 included.
+- It adds to the `--*-rpm` spacing: two requests of one worker are at least
+  `60/rpm` seconds plus the jitter apart, so the jitter never pushes the rate above
+  a limit. Without a limit it slows the scan by about the mean delay per request
+  (`0.01-0.05`: about 30 ms each).
+- The search plan line shows it (`..., jitter 0.01-0.05s`), and so does the run journal.
+
 ## Sessions and resume
 
 | Option | Session file |
@@ -512,6 +536,7 @@ are URL-encoded.
 | `--rpm N` | 0 | shortcut for `--index-rpm` and `--search-rpm` |
 | `--index-rpm N` | 0 | max non-search API requests per minute per worker (0 = no limit) |
 | `--search-rpm N` | 0 | max search API requests per minute per worker (0 = no limit) |
+| `--jitter RANGE` | off | random delay before every request: `MAX` or `MIN-MAX` seconds (`0.03`, `0.01-0.05`, `10ms-50ms`) |
 | `--time-after DATE`, `--time-before DATE` | — | window for the index, its projects and the files with hits |
 | `--index-active-after/--index-active-before DATE` | — | index only projects active in the window (API filter) |
 | `--active-after DATE` (`--started-from`), `--active-before DATE` | — | search only indexed projects active in the window |

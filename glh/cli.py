@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from importlib.metadata import version, PackageNotFoundError
 
+from glh import ratelimit
 from glh.config import TERMS_DEST, ConfigError, load_config
 from glh.planner import parse_timestamp
 from glh.postprocess.pipeline import normalize_steps
@@ -116,6 +117,15 @@ def parse_rpm(value: str) -> int:
     raise argparse.ArgumentTypeError("Use a non-negative integer (requests per minute, 0 = no limit).")
 
 
+def parse_jitter(value: str) -> tuple[float, float]:
+    """Parse --jitter: MAX or MIN-MAX seconds, optionally with ms/s (0.03, 0.01-0.05, 10ms-50ms)."""
+    try:
+        return ratelimit.parse_jitter(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(
+            f"{e}. Use MAX or MIN-MAX in seconds, e.g. 0.03, 0.01-0.05 or 10ms-50ms (0 = off).") from None
+
+
 # (specific dest, group dest) for every request rate limit; resolved like TIME_BOUNDS.
 RATE_LIMITS: tuple[tuple[str, str], ...] = (
     ("index_rpm", "rpm"),
@@ -171,6 +181,7 @@ class CliArgs:
     workers: int
     index_rpm: int
     search_rpm: int
+    jitter: tuple[float, float]
 
     log_file: str | None
     log_level: str
@@ -279,6 +290,11 @@ class CliParser:
             "--search-rpm", type=parse_rpm, default=None, metavar="N",
             help="Max search API requests per minute per worker; GitLab rate-limits search separately "
                  "(default 0 = no limit).",
+        )
+        parser.add_argument(
+            "--jitter", type=parse_jitter, default=None, metavar="RANGE",
+            help="Random delay before every API request, drawn anew for each one: MAX or MIN-MAX seconds, "
+                 "e.g. 0.03, 0.01-0.05 or 10ms-50ms (default: off). Adds to the --*-rpm spacing.",
         )
 
         # Logging
@@ -515,6 +531,7 @@ class CliParser:
             workers=ns.workers,
             index_rpm=ns.index_rpm,
             search_rpm=ns.search_rpm,
+            jitter=ns.jitter or ratelimit.NO_JITTER,
             log_file=ns.log_file,
             log_level=ns.log_level,
             debug=ns.debug,

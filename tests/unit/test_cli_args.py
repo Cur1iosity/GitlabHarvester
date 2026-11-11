@@ -221,3 +221,22 @@ def test_invalid_rate_limit_is_rejected(value, capsys):
         CliParser.parse(["--search-rpm", value])
     assert e.value.code == 2
     assert "non-negative integer" in capsys.readouterr().err
+
+
+def test_jitter_is_off_by_default_and_parsed():
+    assert CliParser.parse([]).jitter == (0.0, 0.0)
+    assert CliParser.parse(["--jitter", "10ms-50ms"]).jitter == pytest.approx((0.01, 0.05))
+
+
+def test_jitter_from_config_file_and_cli_override(tmp_path: Path):
+    cfg = tmp_path / "c.ini"
+    cfg.write_text("[connection]\njitter = 0.03\n", encoding="utf-8")
+    assert CliParser.parse(["-c", str(cfg)]).jitter == pytest.approx((0.0, 0.03))
+    assert CliParser.parse(["-c", str(cfg), "--jitter", "0"]).jitter == (0.0, 0.0)
+
+
+def test_invalid_jitter_is_a_usage_error(capsys):
+    with pytest.raises(SystemExit) as e:
+        CliParser.parse(["--jitter", "0.05-0.01"])
+    assert e.value.code == 2
+    assert "larger than the maximum" in capsys.readouterr().err

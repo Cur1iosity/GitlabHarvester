@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, IO
 from urllib.parse import urlparse
 
-from glh import GitlabHarvester
+from glh import GitlabHarvester, ratelimit
 from glh.exceptions import GitlabHarvesterError
 from glh.cli import CliArgs, _get_version
 from glh.planner import ScanOptions, TimeWindow, parse_timestamp
@@ -144,6 +144,7 @@ def _describe_options(args: CliArgs) -> str:
             "workers": args.workers,
             "index-rpm": args.index_rpm or "no limit",
             "search-rpm": args.search_rpm or "no limit",
+            "jitter": ratelimit.format_jitter(args.jitter) or "off",
             "index-active": _when(args.index_active_after, args.index_active_before),
         })
     if args.mode == "search":
@@ -229,6 +230,7 @@ def _mk_harvester(args: CliArgs) -> GitlabHarvester:
         "workers": args.workers,
         "index_rpm": args.index_rpm,
         "search_rpm": args.search_rpm,
+        "jitter": args.jitter,
         "log_level": args.log_level,
         "log_file": args.log_file,
         "ssl_verify": False if args.insecure else (args.ca_bundle or True),
@@ -329,6 +331,7 @@ def _run_search(args: CliArgs) -> None:
                     "workers": args.workers,
                     "index_rpm": args.index_rpm,
                     "search_rpm": args.search_rpm,
+                    "jitter": list(args.jitter),
                     "branches_per_page": args.branches_per_page,
                     "index_branches": args.index_branches,
                     "scan_branches": args.scan_branches,

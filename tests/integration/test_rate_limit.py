@@ -93,3 +93,31 @@ def test_search_plan_names_the_limits(make_harvester, tmp_path, waits, capsys, m
     monkeypatch.setattr(terminal_utils, "STATUS", terminal_utils.StatusLine(err, ticker=False))
     search(make_harvester(workers=2, index_rpm=300, search_rpm=30), projects, terms=["password"])
     assert "2 workers, rate limit: search 30/min, other API 300/min per worker\n" in err.getvalue()
+
+
+def test_jitter_delays_every_request(fake_gitlab: FakeGitLab, make_harvester, tmp_path, waits):
+    projects = index_of(make_harvester, tmp_path)
+    waits.clear()
+    fake_gitlab.clear_journal()
+
+    glh = make_harvester(workers=2, jitter=(0.01, 0.05))
+    n_before = len(fake_gitlab.requests)  # the login check of the new client
+    search(glh, projects)
+
+    n_requests = len(fake_gitlab.requests)
+    assert n_requests > 3
+    # Every request (login, every search page, in every worker) got its own delay.
+    assert len(waits) == n_requests and n_before == 1
+    assert all(0.01 <= w <= 0.05 for w in waits)
+    assert len(set(waits)) > 1  # random, not a fixed rhythm
+
+
+def test_search_plan_names_the_jitter(make_harvester, tmp_path, waits, monkeypatch):
+    from glh.utils import terminal_utils
+    from tests.helpers import FakeStream
+
+    projects = index_of(make_harvester, tmp_path)
+    err = FakeStream(False)
+    monkeypatch.setattr(terminal_utils, "STATUS", terminal_utils.StatusLine(err, ticker=False))
+    search(make_harvester(search_rpm=30, jitter=(0.0, 0.03)), projects, terms=["password"])
+    assert ", rate limit: search 30/min per worker, jitter 0-0.03s\n" in err.getvalue()

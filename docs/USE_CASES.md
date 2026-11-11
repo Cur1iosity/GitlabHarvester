@@ -197,7 +197,13 @@ gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -f words.txt -
 
 # Low and slow: one worker, at most 10 requests a minute of any kind
 gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -f words.txt --rpm 10
+
+# No fixed rhythm: a random 0.5-3 s pause before every request, on top of the limit
+gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -f words.txt --rpm 10 --jitter 0.5-3
 ```
+
+`--jitter` draws a new delay for every request, so the traffic doesn't come at the
+fixed interval that `--rpm` alone produces (easy to spot in logs).
 
 Details: [usage.md](usage.md#request-rate-limits).
 

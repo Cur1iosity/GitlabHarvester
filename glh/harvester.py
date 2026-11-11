@@ -117,6 +117,7 @@ class GitlabHarvester:
             ssl_verify: bool | str = True,
             index_rpm: int = 0,
             search_rpm: int = 0,
+            jitter: tuple[float, float] = ratelimit.NO_JITTER,
     ) -> None:
         self.search_terms: list = search_terms or []
         # Parallel API requests (1 = sequential). See glh/workers.py.
@@ -124,6 +125,8 @@ class GitlabHarvester:
         # Requests per minute per client (thread); 0 = no limit. See glh/ratelimit.py.
         self.index_rpm: int = max(0, int(index_rpm))
         self.search_rpm: int = max(0, int(search_rpm))
+        # Random delay range (seconds) before every request; (0, 0) = off.
+        self.jitter: tuple[float, float] = (float(jitter[0]), float(jitter[1]))
         self._local = threading.local()
         self._gl_main: Gitlab | None = None
         self._client_kwargs: dict[str, Any] | None = None
@@ -189,15 +192,16 @@ class GitlabHarvester:
         Prepare the requests session of a new client (main or worker).
 
         - a response hook makes HTTP 429 waits visible (see _on_response);
-        - --index-rpm / --search-rpm: a throttling adapter with its own
-          limiters, so every client (thread) gets the full per-thread budget.
+        - --index-rpm / --search-rpm / --jitter: a throttling adapter with its
+          own limiters, so every client (thread) gets the full per-thread budget.
         """
         session = getattr(gl, "session", None)
         hooks = getattr(session, "hooks", None)
         if isinstance(hooks, dict):
             hooks.setdefault("response", []).append(self._on_response)
         if session is not None and hasattr(session, "mount"):
-            ratelimit.limit_session(session, index_rpm=self.index_rpm, search_rpm=self.search_rpm)
+            ratelimit.limit_session(session, index_rpm=self.index_rpm, search_rpm=self.search_rpm,
+                                    jitter=self.jitter)
         return gl
 
     @staticmethod
@@ -1012,6 +1016,8 @@ class GitlabHarvester:
         parallel = f", {self.workers} workers" if self.workers > 1 else ""
         if limits := ratelimit.describe(self.index_rpm, self.search_rpm):
             parallel += f", rate limit: {limits}"
+        if jitter := ratelimit.format_jitter(self.jitter):
+            parallel += f", jitter {jitter}"
 
         files = f", files changed {options.file_window.describe()}" if options.file_window else ""
         terminal_utils.STATUS.write_line(f"Search plan: {terms_text}, {plan.describe()}{files}{parallel}")

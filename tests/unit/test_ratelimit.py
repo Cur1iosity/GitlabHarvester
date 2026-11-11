@@ -108,3 +108,75 @@ def test_default_sleep_is_patchable(monkeypatch):
     limiter.wait()
     limiter.wait()
     assert slept == [1.0]
+
+
+# --------------------------------------------------------------------------- jitter
+
+
+class FixedRandom:
+    """random.Random stand-in that returns the given uniform() values in turn."""
+
+    def __init__(self, *values: float) -> None:
+        self.values = list(values)
+        self.calls: list[tuple[float, float]] = []
+
+    def uniform(self, low: float, high: float) -> float:
+        self.calls.append((low, high))
+        return self.values.pop(0)
+
+
+def test_jitter_delays_every_request_by_its_own_amount():
+    clock = Clock()
+    rng = FixedRandom(0.02, 0.05, 0.01)
+    limiter = RateLimiter(jitter=(0.01, 0.05), clock=clock, sleep=clock.sleep, rng=rng)
+    assert [round(limiter.wait(), 6) for _ in range(3)] == [0.02, 0.05, 0.01]
+    assert rng.calls == [(0.01, 0.05)] * 3
+
+
+def test_jitter_adds_to_the_rpm_spacing():
+    clock = Clock()
+    limiter = RateLimiter(60, jitter=(0.0, 0.5), clock=clock, sleep=clock.sleep, rng=FixedRandom(0.3, 0.1, 0.4))
+    limiter.wait()  # first request: jitter only
+    first_sent = clock.now
+    limiter.wait()
+    second_sent = clock.now
+    limiter.wait()
+    # Never closer than the 1 s interval: jitter can't push the rate above the limit.
+    assert round(second_sent - first_sent, 6) == 1.1
+    assert round(clock.now - second_sent, 6) == 1.4
+    assert clock.slept == [0.3, 1.1, 1.4]
+
+
+@pytest.mark.parametrize(("value", "parsed"), [
+    ("0.03", (0.0, 0.03)),
+    ("0.01-0.05", (0.01, 0.05)),
+    ("10ms-50ms", (0.01, 0.05)),
+    ("30MS", (0.0, 0.03)),
+    ("0.5s-2", (0.5, 2.0)),
+    (".2", (0.0, 0.2)),
+    ("0", (0.0, 0.0)),
+    ("1-1", (1.0, 1.0)),
+])
+def test_parse_jitter(value, parsed):
+    assert ratelimit.parse_jitter(value) == pytest.approx(parsed)
+
+
+@pytest.mark.parametrize("value", ["", "abc", "-0.1", "0.05-0.01", "1-2-3", "0.1m", "5000"])
+def test_invalid_jitter_is_rejected(value):
+    with pytest.raises(ValueError):
+        ratelimit.parse_jitter(value)
+
+
+def test_jitter_alone_mounts_the_adapter_for_both_kinds():
+    session = Session()
+    limit_session(session, jitter=(0.0, 0.03))
+    adapter = session.get_adapter("https://gitlab.test")
+    assert isinstance(adapter, ThrottledAdapter)
+    assert adapter.index_limiter.jitter == adapter.search_limiter.jitter == (0.0, 0.03)
+    assert adapter.index_limiter.rpm == adapter.search_limiter.rpm == 0
+
+
+def test_describe_with_jitter():
+    assert describe(0, 0, (0.0, 0.03)) == "jitter 0-0.03s"
+    assert describe(0, 30, (0.01, 0.05)) == "search 30/min per worker, jitter 0.01-0.05s"
+    assert ratelimit.format_jitter((0.0, 0.0)) == ""
