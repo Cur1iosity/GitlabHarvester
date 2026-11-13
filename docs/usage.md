@@ -373,6 +373,30 @@ gitlab-harvester -u ... -t ... -f words.txt --session audit --resume
 - New records are appended after a `resume` marker. The final `summary` counts
   hits of the resumed part only.
 
+### One file per term: --output-separated
+
+```bash
+gitlab-harvester -u ... -t ... -f words.txt --session audit --output-separated
+# -> audit.jsonl (full session) + audit.password.jsonl, audit.api_key.jsonl, ...
+```
+
+With several search terms, `--output-separated` also writes each term's hits to its
+own file next to the session, named `<session-stem>.<term>.jsonl`, so you can triage
+one kind of finding at a time. It needs more than one term (with a single term it is
+ignored with a notice).
+
+- The session file itself is still written in full — the per-term files are an extra
+  view of it, each a valid session-hit file (`{"term", "result"}` lines), so
+  `-m dedup` / `-m convert` work on them too.
+- Only terms that produced at least one hit get a file. The split runs after the
+  search over the whole session, so with `--resume` the files cover every run.
+- The term is sanitized for the file system: characters other than letters, digits,
+  `.`, `-` and `_` become `_` (so a term like `api/key` or `BEGIN RSA PRIVATE KEY`
+  is safe on Windows, macOS and Linux and can't escape the session's directory), the
+  name is shortened, and terms that would collide get a numeric suffix.
+- It combines with `--post-process`: the per-term split happens first, so `--final-only`
+  (which deletes the session) still leaves the per-term files.
+
 ## Post-processing
 
 Post-processing modes work offline and don't need `-u` or `-t`.
@@ -600,6 +624,7 @@ are URL-encoded.
 | `--session NAME` | — | session file `NAME.jsonl` |
 | `--session-file FILE` | `results/<host>_session_<ts>.jsonl` | explicit session file |
 | `--resume` | off | continue a session, skipping completed terms |
+| `--[no-]output-separated` | off | with several terms, also write each term's hits to `<session>.<term>.jsonl` |
 | `--input-file`, `--output-file` | — | files for `dedup` and `convert` |
 | `--hash-algo` | `blake2b` | dedup hash |
 | `--[no-]normalize-hits` | on | collapse whitespace before comparing hits in dedup (`--no-normalize-hits` = exact) |

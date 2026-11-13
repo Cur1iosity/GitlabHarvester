@@ -473,6 +473,49 @@ def test_post_process_from_config_file(fake_gitlab: FakeGitLab, run_cli, tmp_pat
     assert (tmp_path / "out" / "audit.converted.json").read_text(encoding="utf-8").startswith('[{"active_before"')  # sort-keys
 
 
+# --------------------------------------------------------------------------- --output-separated
+
+
+def test_output_separated_writes_one_file_per_term(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
+    (tmp_path / "terms.txt").write_text("password\napi_key\ntoken\n", encoding="utf-8")
+    proc = run_cli(*gl_args(fake_gitlab), "-f", "terms.txt", "-b", "all", "--index-file", "idx.jsonl",
+                   "--session-file", "out/audit.jsonl", "--output-separated", check=True)
+    out = tmp_path / "out"
+    assert sorted(p.name for p in out.iterdir()) == [
+        "audit.api_key.jsonl", "audit.jsonl", "audit.password.jsonl", "audit.token.jsonl",
+    ]
+
+    session = Session.load(out / "audit.jsonl")
+    for term in ("password", "api_key", "token"):
+        per = Session.load(out / f"audit.{term}.jsonl")
+        assert per.hits() and all(h["term"] == term for h in per.hits())   # only that term's hits
+        assert all(r.get("type") is None for r in per.records)             # no meta/summary records
+        assert len(per.hits()) == len(session.hits(term))
+    # Every hit lands in exactly one per-term file: nothing lost or duplicated.
+    split_total = sum(len(Session.load(out / f"audit.{t}.jsonl").hits()) for t in ("password", "api_key", "token"))
+    assert split_total == len(session.hits())
+
+    assert "Separated output:" in proc.stdout
+    assert session.records[0]["output_separated"] is True
+
+
+def test_output_separated_ignored_for_a_single_term(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
+    proc = _search_with(fake_gitlab, run_cli, "--output-separated")
+    assert [p.name for p in (tmp_path / "out").iterdir()] == ["audit.jsonl"]  # no per-term file
+    assert "output-separated ignored" in proc.stdout
+
+
+def test_output_separated_files_survive_final_only(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
+    (tmp_path / "terms.txt").write_text("password\ntoken\n", encoding="utf-8")
+    run_cli(*gl_args(fake_gitlab), "-f", "terms.txt", "-b", "all", "--index-file", "idx.jsonl",
+            "--session-file", "out/audit.jsonl", "--output-separated",
+            "--post-process", "convert", "--final-only", check=True)
+    names = sorted(p.name for p in (tmp_path / "out").iterdir())
+    # --final-only drops the session JSONL, but the per-term files (split first) and the
+    # final converted report stay.
+    assert names == ["audit.converted.json", "audit.password.jsonl", "audit.token.jsonl"]
+
+
 def test_post_process_is_skipped_when_the_search_fails(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
     fake_gitlab.add_fault({"match": {"path": "^/api/v4/projects$"}, "response": {"status": 403, "json": {"message": "403"}}})
     proc = run_cli(*gl_args(fake_gitlab), "-s", "password", "--index-file", "idx.jsonl", "--session-file", "s.jsonl",

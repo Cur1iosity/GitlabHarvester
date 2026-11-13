@@ -221,6 +221,7 @@ class CliArgs:
     session: str | None
     session_file: str | None
     resume: bool
+    output_separated: bool
 
     input_file: str | None
     output_file: str | None
@@ -407,6 +408,14 @@ class CliParser:
         parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=False,
                             help="Resume from existing session file.")
 
+        parser.add_argument(
+            "--output-separated",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help="With several search terms, also write each term's hits to its own file "
+                 "<session>.<term>.jsonl next to the session (ignored for a single term).",
+        )
+
         # Postprocess
         parser.add_argument(
             "--post-process",
@@ -587,6 +596,7 @@ class CliParser:
             session=ns.session,
             session_file=ns.session_file,
             resume=ns.resume,
+            output_separated=ns.output_separated,
             input_file=ns.input_file,
             output_file=ns.output_file,
             post_process=tuple(ns.post_process),

@@ -245,6 +245,12 @@ def test_invalid_jitter_is_a_usage_error(capsys):
 # --------------------------------------------------------------------------- User-Agent
 
 
+def test_output_separated_flag():
+    assert CliParser.parse([]).output_separated is False
+    assert CliParser.parse(["--output-separated"]).output_separated is True
+    assert CliParser.parse(["--output-separated", "--no-output-separated"]).output_separated is False
+
+
 def test_token_options():
     a = CliParser.parse([])
     assert a.token is None and a.token_file is None

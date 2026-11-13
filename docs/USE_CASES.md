@@ -41,6 +41,9 @@ gitlab-harvester -m convert --input-file clean.jsonl --output-file clean.json
   `--dump-projects` after changing them.
 - The session file (`audit.jsonl`) gets every hit as soon as it is found, plus a
   checkpoint after every finished term: that is what `--resume` continues from.
+- Searching a list of terms? Add `--output-separated` to also get one file per term
+  next to the session (`audit.password.jsonl`, `audit.api_key.jsonl`, …), so each kind
+  of finding can be triaged on its own. See [usage.md](usage.md#one-file-per-term---output-separated).
 - dedup and convert can also run right after the search: see
   [section 8](#8-deduplicated-json-report-in-one-run---post-process).
 

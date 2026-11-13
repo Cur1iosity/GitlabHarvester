@@ -28,6 +28,7 @@ from glh.planner import ScanOptions, TimeWindow, parse_timestamp
 from glh.postprocess.convert import convert_jsonl_to_json
 from glh.postprocess.dedup import dedup_session_file
 from glh.postprocess.pipeline import run_pipeline
+from glh.postprocess.split import split_session_by_term
 from glh.session import load_done_keywords
 from glh.utils import terminal_utils
 from glh.utils.logging_utils import JOURNAL
@@ -189,6 +190,7 @@ def _describe_options(args: CliArgs) -> str:
             "file-changed": _when(args.file_changed_after, args.file_changed_before),
             "session": args.session_file or args.session or "(default)",
             "resume": args.resume,
+            "output-separated": args.output_separated or None,
             "post-process": ",".join(args.post_process) or None,
             "final-only": args.final_only if args.post_process else None,
         })
@@ -305,6 +307,9 @@ def _run_search(args: CliArgs) -> None:
     keywords = _load_keywords(search=args.search, terms_file=args.terms_file, terms=args.terms)
     if not keywords:
         raise SystemExit("Nothing to do: provide --search, --terms-file or `terms` in the config file.")
+    # The full supplied list (before --resume drops already-done terms): the
+    # --output-separated split names and covers files for every term.
+    all_keywords = list(keywords)
 
     index_file = glh.build_project_index(
         per_page=args.batch_size,
@@ -383,6 +388,7 @@ def _run_search(args: CliArgs) -> None:
                     "file_changed_after": args.file_changed_after.isoformat() if args.file_changed_after else None,
                     "file_changed_before": args.file_changed_before.isoformat() if args.file_changed_before else None,
                     "keywords_count": len(keywords),
+                    "output_separated": args.output_separated,
                     "post_process": list(args.post_process),
                     "final_only": args.final_only,
                 },
@@ -419,8 +425,26 @@ def _run_search(args: CliArgs) -> None:
             f"Repeat the command with --resume to search them again."
         )
 
+    # Split before post-processing: --final-only there may delete the session.
+    if args.output_separated:
+        _separate_output(all_keywords, session_path)
+
     if args.post_process:
         _post_process(args, session_path, keep_session=bool(incomplete))
+
+
+def _separate_output(terms: list[str], session_path: Path) -> None:
+    """Write each term's hits to its own file (--output-separated); needs several terms."""
+    if len(terms) < 2:
+        _report("--output-separated ignored: it needs several search terms.")
+        return
+    files = split_session_by_term(session_path, terms)
+    if not files:
+        _report("Separated output: no hits, no per-term files written.")
+        return
+    shown = ", ".join(f.name for f in files) if len(files) <= 10 else f"{len(files)} files"
+    _report(f"Separated output: {terminal_utils.plural(len(files), 'term file')} "
+            f"in {session_path.parent} ({shown})")
 
 
 def _post_process(args: CliArgs, session_path: Path, keep_session: bool = False) -> None:
