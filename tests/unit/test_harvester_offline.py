@@ -73,6 +73,30 @@ def test_api_methods_require_initialized_client():
         GitlabHarvester().fetch_projects()
 
 
+# --------------------------------------------------------------------------- error descriptions
+
+
+@pytest.mark.parametrize(("error", "expected"), [
+    (gitlab.exceptions.GitlabError("<html>500 page</html>", response_code=500), "HTTP 500 Internal Server Error"),
+    (gitlab.exceptions.GitlabError("nope", response_code=404), "HTTP 404 Not Found"),
+    (gitlab.exceptions.GitlabError("teapot", response_code=418), "HTTP 418"),
+    (requests.exceptions.ConnectTimeout("timed out"), "ConnectTimeout: timed out"),
+])
+def test_describe_api_error_is_a_short_line(error, expected):
+    from glh.harvester import describe_api_error
+
+    assert describe_api_error(error) == expected
+
+
+def test_describe_api_error_omits_the_response_body():
+    from glh.harvester import describe_api_error
+
+    e = gitlab.exceptions.GitlabError("<html><h1>500</h1><p>Whoops, something went wrong</p></html>",
+                                      response_code=500)
+    assert describe_api_error(e) == "HTTP 500 Internal Server Error"
+    assert "Whoops" not in describe_api_error(e)
+
+
 # --------------------------------------------------------------------------- tokens & concurrency
 
 

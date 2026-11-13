@@ -166,7 +166,12 @@ Headers and behavior that matter:
   - `5xx` is **not** retried (`retry_transient_errors=False`);
   - timeouts and connection errors are **not** retried;
   - a non-JSON 2xx body → `GitlabParsingError`.
-  All `Gitlab*Error` exceptions derive from `GitlabError`.
+  All `Gitlab*Error` exceptions derive from `GitlabError`. A per-project/branch
+  error is logged with `describe_api_error()` — a one-line `HTTP <code> <reason>`
+  (or the exception type for a timeout/network error), never the response body,
+  which a real GitLab returns as a whole HTML page. The full exception goes to a
+  separate `self.logger.debug(...)` line (visible with `--debug`), and the
+  session `keyword_incomplete` `failures` entries use the same short form.
 
 Reference documentation:
 [REST pagination](https://docs.gitlab.com/api/rest/#pagination),

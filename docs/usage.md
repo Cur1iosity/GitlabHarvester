@@ -64,7 +64,12 @@ gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -s password
 - `--log-level ERROR|WARN|INFO`, `--debug`, and `--log-file path.log` control logging.
   The log file also gets a summary of every run, see [Run journal](#run-journal).
 - Rate limiting (HTTP 429) is retried automatically according to `Retry-After`.
-  Errors on a single project or branch are logged, and the run continues.
+  An error on a single project or branch (an unreachable project, a GitLab 500,
+  a timeout) is logged as a concise one-line warning — `HTTP 500 Internal Server
+  Error` and the project/branch, not the server's HTML error page — and the scan
+  moves on. The full error, body included, is logged only with `--debug`. A
+  branch that failed with a retryable error keeps its term out of the
+  `keyword_done` checkpoint, so `--resume` searches it again.
 
 ## Configuration file
 

@@ -48,6 +48,35 @@ def is_permanent_error(error: BaseException) -> bool:
     return getattr(error, "response_code", None) in PERMANENT_ERROR_CODES
 
 
+# Standard reasons for the HTTP statuses the harvester runs into, so a log line
+# can say "HTTP 500 Internal Server Error" without the response body.
+_HTTP_REASONS = {
+    401: "Unauthorized", 403: "Forbidden", 404: "Not Found", 408: "Request Timeout",
+    429: "Too Many Requests", 500: "Internal Server Error", 502: "Bad Gateway",
+    503: "Service Unavailable", 504: "Gateway Timeout",
+}
+
+
+def describe_api_error(error: BaseException) -> str:
+    """
+    Short, one-line description of a GitLab/requests error, without the response
+    body.
+
+    A GitLab HTTP error carries ``response_code`` (and, on a real instance, a
+    whole HTML error page as its message); this returns just ``HTTP 500
+    Internal Server Error``. Other errors (timeouts, connection resets) use
+    their type and first message line. The full exception, body included, is
+    logged separately at debug level.
+    """
+    code = getattr(error, "response_code", None)
+    if code is not None:
+        reason = _HTTP_REASONS.get(code)
+        return f"HTTP {code} {reason}" if reason else f"HTTP {code}"
+    first_line = (str(error).strip().splitlines() or [""])[0][:200]
+    name = type(error).__name__
+    return f"{name}: {first_line}" if first_line else name
+
+
 def client_required(func: Callable) -> Callable:
     """
     Decorator ensuring that a GitLab client is initialized before method execution.
@@ -587,8 +616,9 @@ class GitlabHarvester:
             # mark a partial index as complete.
             is_completed = False
             outcome = " (incomplete: GitLab API error)"
-            self.logger.error("Gitlab API error. The project list wasn't complete.")
-            self.logger.error(e)
+            self.logger.error("Gitlab API error (%s). The project list wasn't complete.",
+                              describe_api_error(e))
+            self.logger.debug("Full project-listing error: %s", e)
 
         except KeyboardInterrupt:
             is_completed = False
@@ -674,10 +704,10 @@ class GitlabHarvester:
 
         except (gitlab.exceptions.GitlabError, requests.exceptions.RequestException) as e:
             self.logger.error(
-                "Gitlab API error. The branch list wasn't complete for project with ID: %s.",
-                project_id,
+                "Gitlab API error (%s). The branch list wasn't complete for project with ID: %s.",
+                describe_api_error(e), project_id,
             )
-            self.logger.error(e)
+            self.logger.debug("Full branch-listing error for project %s: %s", project_id, e)
 
         self.logger.debug("Loaded %s branches for project with ID: %s.", len(branches), project_id)
         return branches
@@ -1187,13 +1217,15 @@ class GitlabHarvester:
             hits, _ = self.scan_branch(project=project_obj, branch=task.branch, term=task.term,
                                        project_url=project_url, path_filter=path_filter, errors=errors)
         except (gitlab.exceptions.GitlabError, requests.exceptions.RequestException) as e:
-            self.logger.warning("%s | %s Branch: %s", e, project_url, task.branch)
+            self.logger.warning("Could not search %s @ %s (%s); skipping it, continuing",
+                                name, task.branch, describe_api_error(e))
+            self.logger.debug("Full error searching %s @ %s: %s", name, task.branch, e)
             errors.append(e)
             hits = []
         retryable = [e for e in errors if not is_permanent_error(e)]
         failure = None
         if retryable:
-            failure = f"{name} @ {task.branch}: {type(retryable[0]).__name__}: {retryable[0]}"
+            failure = f"{name} @ {task.branch}: {describe_api_error(retryable[0])}"
         return hits, failure
 
     def _file_changed_in_window(self, project_id: Any, branch: str, path: str, window: TimeWindow) -> bool:
@@ -1221,8 +1253,10 @@ class GitlabHarvester:
                 query_parameters=params, page=1, per_page=1)
             changed = bool(commits)
         except (gitlab.exceptions.GitlabError, requests.exceptions.RequestException) as e:
-            self.logger.warning("Cannot check changes of %s in branch %s of project %s, keeping its hits: %s",
-                                path, branch, project_id, e)
+            self.logger.warning("Cannot check changes of %s in branch %s of project %s (%s), keeping its hits",
+                                path, branch, project_id, describe_api_error(e))
+            self.logger.debug("Full error checking changes of %s in branch %s of project %s: %s",
+                              path, branch, project_id, e)
             changed = True
 
         with self._file_change_lock:
@@ -1452,7 +1486,9 @@ class GitlabHarvester:
                 if s_res:
                     res.append({"branch": b, "branch_search_result": s_res})
             except (gitlab.exceptions.GitlabError, requests.exceptions.RequestException) as e:
-                self.logger.warning("%s | %s Branch: %s", e, project_url, b)
+                self.logger.warning("Could not search %s @ %s (%s); skipping it, continuing",
+                                    project_url, b, describe_api_error(e))
+                self.logger.debug("Full error searching %s @ %s: %s", project_url, b, e)
 
         return res, hit_counter
 
@@ -1518,7 +1554,9 @@ class GitlabHarvester:
 
         except (gitlab.exceptions.GitlabError, requests.exceptions.RequestException) as e:
             # Keep results of already fetched pages; a timeout must not abort the whole scan.
-            self.logger.warning("[%s] %s: %s", project.id, project_url, e)
+            self.logger.warning("Could not search %s @ %s (%s); skipping it, continuing",
+                                project_url, branch, describe_api_error(e))
+            self.logger.debug("Full error searching %s @ %s: %s", project_url, branch, e)
             if errors is not None:
                 errors.append(e)
 
