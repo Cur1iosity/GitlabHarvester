@@ -17,7 +17,8 @@ without cloning, including GitLab CE, which has no instance-wide code search.
 
 - **Red team engagements.** One token, the whole instance: credentials, internal hosts
   and pivots hiding in the code. Loud and fast or low and slow, your call: rate limits,
-  jitter and User-Agent rotation keep the noise and the signature under control.
+  jitter and User-Agent rotation keep the noise and the signature under control. Captured
+  several accounts' tokens? Hand them all to one run and beat a per-user rate limit.
 - **Penetration tests.** Instance-wide discovery of credentials, tokens and keys as part
   of the assessment.
 - **Blue teams and security research.** Secret hunting and hygiene audits: a quick first
@@ -44,7 +45,7 @@ Requires Python 3.10+ and a GitLab token with the `read_api` scope.
 Search one term in the default branch of every project:
 
 ```bash
-export GITLAB_TOKEN = "your-token-here"
+export GITLAB_TOKEN='your-token-here'
 gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -s password
 ```
 
@@ -63,7 +64,8 @@ and rate limits, deduplicated reports, config files:
 | `--forks include\|skip\|branch-diff\|all-branches` | how forks are handled |
 | `--time-after DATE`, `--time-before DATE` | limit the index, its projects and the files with hits to a time window |
 | `--started-from 2024-06-01` | search only indexed projects with activity since the date |
-| `-w, --workers N` | parallel API requests, for instances without rate limits |
+| `-t "tok1;tok2"`, `--token-file FILE` | several tokens run in parallel, each with its own workers and rate-limit budget |
+| `-w, --workers N` | parallel API requests per token, for instances without rate limits |
 | `--rpm N`, `--index-rpm N`, `--search-rpm N` | requests per minute per worker: all, non-search, search |
 | `--jitter 0.01-0.05` | random delay before every request (seconds, or `10ms-50ms`) |
 | `-A STRING`, `--user-agent-file FILE` | fixed User-Agent, or a random one from the file for every request |

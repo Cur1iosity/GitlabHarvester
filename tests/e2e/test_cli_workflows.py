@@ -338,6 +338,59 @@ def test_invalid_workers_value(run_cli, value):
     assert "integer from 1 to 64" in proc.stderr
 
 
+# --------------------------------------------------------------------------- several tokens
+
+
+def test_several_tokens_cli_run_matches_single_token(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
+    terms = tmp_path / "terms.txt"
+    terms.write_text("password\ntoken\n", encoding="utf-8")
+    common = ["-u", fake_gitlab.url, "-f", str(terms), "-b", "all", "--forks", "branch-diff"]
+
+    run_cli(*common, "-t", fake_gitlab.token, "--index-file", "one_idx.jsonl",
+            "--session-file", "one.jsonl", check=True)
+    proc = run_cli(*common, "-t", "dev-token;readonly-token", "--index-file", "many_idx.jsonl",
+                   "--session-file", "many.jsonl", "--log-file", "runs.log", check=True)
+
+    def urls(name: str) -> list[tuple[str, str]]:
+        return sorted((h["term"], h["url"]) for h in Session.load(tmp_path / name).hits())
+
+    assert urls("many.jsonl") == urls("one.jsonl") and urls("many.jsonl")  # same findings
+    many = Session.load(tmp_path / "many.jsonl")
+    assert many.records[0]["tokens"] == 2 and many.records[0]["workers"] == 1
+    assert "2 tokens x 1 worker = 2 clients" in proc.stderr
+
+    log = (tmp_path / "runs.log").read_text(encoding="utf-8")
+    assert "tokens=2 inline" in log
+    for secret in ("dev-token", "readonly-token"):
+        assert secret not in log  # token values are never written
+
+
+def test_token_file_cli_run(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
+    token_file = tmp_path / "tokens.txt"
+    token_file.write_text("# shared during the engagement\ndev-token\nreadonly-token\n", encoding="utf-8")
+
+    proc = run_cli("-u", fake_gitlab.url, "--token-file", str(token_file), "-s", "password", "-b", "all",
+                   "--session-file", "s.jsonl", "--log-file", "runs.log", check=True)
+    assert "2 tokens x 1 worker = 2 clients" in proc.stderr
+    assert Session.load(tmp_path / "s.jsonl").records[0]["tokens"] == 2
+    assert f"tokens=file {token_file}" in (tmp_path / "runs.log").read_text(encoding="utf-8")
+
+
+def test_an_invalid_token_in_the_list_fails_fast(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
+    proc = run_cli("-u", fake_gitlab.url, "-t", "dev-token;bad-token", "-s", "password",
+                   "--session-file", "s.jsonl")
+    assert proc.returncode != 0
+    assert "Token #2 of 2" in proc.stderr and "401" in proc.stderr
+    assert not (tmp_path / "s.jsonl").exists()  # nothing written when a token is bad
+
+
+def test_token_and_token_file_are_mutually_exclusive(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
+    (tmp_path / "tokens.txt").write_text("dev-token\n", encoding="utf-8")
+    proc = run_cli("-u", fake_gitlab.url, "-t", "dev-token", "--token-file", "tokens.txt", "-s", "x")
+    assert proc.returncode == 2
+    assert "not allowed with argument" in proc.stderr
+
+
 # --------------------------------------------------------------------------- time filters
 
 

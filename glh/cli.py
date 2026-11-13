@@ -182,6 +182,7 @@ class CliArgs:
     config: str | None
     url: str | None
     token: str | None
+    token_file: str | None
     proxy: str | None
     timeout: int
     insecure: bool
@@ -263,7 +264,17 @@ class CliParser:
             default=None,
             help="GitLab base URL (e.g., https://gitlab.example.com). Alias: -H/--host (deprecated).",
         )
-        parser.add_argument("-t", "--token", default=None, help="GitLab token (required for search/dump-index).",)
+        tok = parser.add_mutually_exclusive_group()
+        tok.add_argument(
+            "-t", "--token", default=None,
+            help="GitLab token(s), required for search/dump-index. Several tokens separated by ';' run in "
+                 "parallel, each with its own --workers clients and its own rate-limit budget.",
+        )
+        tok.add_argument(
+            "--token-file", default=None, metavar="FILE",
+            help="File with one GitLab token per line (# comments allowed); each token runs in parallel, "
+                 "like several tokens in -t.",
+        )
         parser.add_argument("-p", "--proxy", default=None, help="HTTP(S) proxy URL for GitLab API traffic.",)
         parser.add_argument("--timeout", default=60, type=int, help="Timeout in seconds for GitLab API request.",)
         parser.add_argument(
@@ -491,7 +502,7 @@ class CliParser:
             given = cls._given_dests(argv)
 
             exclusive = (("search", "terms_file", TERMS_DEST), ("session", "session_file"),
-                         ("user_agent", "user_agent_file"))
+                         ("user_agent", "user_agent_file"), ("token", "token_file"))
             for group in exclusive:
                 if given & set(group):
                     for dest in group:
@@ -541,6 +552,7 @@ class CliParser:
             config=ns.config,
             url=ns.url,
             token=ns.token,
+            token_file=ns.token_file,
             proxy=ns.proxy,
             timeout=ns.timeout,
             insecure=ns.insecure,

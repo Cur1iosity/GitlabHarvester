@@ -119,10 +119,25 @@ class GitlabHarvester:
             search_rpm: int = 0,
             jitter: tuple[float, float] = ratelimit.NO_JITTER,
             user_agents: list[str] | tuple[str, ...] = (),
+            tokens: list[str] | tuple[str, ...] | None = None,
     ) -> None:
         self.search_terms: list = search_terms or []
-        # Parallel API requests (1 = sequential). See glh/workers.py.
+        # Tokens the run spreads its work over, each with its own pool of workers
+        # and its own server-side rate-limit budget. A single ``token`` (string)
+        # is the one-token case. See glh/tokens.py.
+        resolved_tokens = list(tokens) if tokens else ([token] if token else [])
+        self.tokens: tuple[str, ...] = tuple(resolved_tokens)
+        # Parallel API requests PER TOKEN (1 = sequential). See glh/workers.py.
         self.workers: int = max(1, int(workers))
+        # Total concurrent clients across all tokens = tokens x workers-per-token.
+        # Every worker thread owns one client bound to one token, so a run keeps
+        # this many API connections busy and that many per-worker rpm budgets.
+        self.concurrency: int = max(1, len(self.tokens)) * self.workers
+        # Round-robin assignment of tokens to worker threads (one token per
+        # thread); concurrency is a multiple of len(tokens), so every token gets
+        # exactly ``workers`` threads, and it stays balanced across phases.
+        self._token_lock = threading.Lock()
+        self._next_token = 0
         # Requests per minute per client (thread); 0 = no limit. See glh/ratelimit.py.
         self.index_rpm: int = max(0, int(index_rpm))
         self.search_rpm: int = max(0, int(search_rpm))
@@ -159,9 +174,13 @@ class GitlabHarvester:
 
         url = url or host
         self._gl: Gitlab | None = (
-            self._get_gl_client(url=url, token=token, proxy=proxy, timeout=timeout, ssl_verify=ssl_verify)
-            if url and token else None
+            self._get_gl_client(url=url, token=self.tokens[0], proxy=proxy, timeout=timeout, ssl_verify=ssl_verify)
+            if url and self.tokens else None
         )
+        # The main client above verified the first token; fail fast on the rest
+        # too, so a bad colleague's token is caught before the scan starts.
+        if self._gl is not None and len(self.tokens) > 1:
+            self._verify_extra_tokens(url)
 
     @property
     def _gl(self) -> Gitlab | None:
@@ -172,23 +191,58 @@ class GitlabHarvester:
     def _gl(self, value: Gitlab | None) -> None:
         self._gl_main = value
 
-    def _init_worker_client(self) -> None:
+    def _worker_client_kwargs(self, token: str | None) -> dict[str, Any]:
         """
-        Give the calling worker thread its own python-gitlab client.
-
-        requests.Session is not thread-safe, and one shared connection pool
-        would be too small for many workers. The token was already verified
-        by the main client, so no extra /user request is made.
+        Client kwargs for a worker/verification client: a fresh session (the
+        requests.Session is not thread-safe and its pool would be too small for
+        many workers) and, with several tokens, ``token`` instead of the first.
         """
-        if self._client_kwargs is None:
-            return  # client not built by _get_gl_client (e.g. a test stub): share it
-        kwargs = dict(self._client_kwargs)
+        kwargs = dict(self._client_kwargs or {})
         main_session = kwargs.pop("session", None)
         if main_session is not None:
             session = Session()
             session.proxies.update(main_session.proxies)
             kwargs["session"] = session
-        self._local.gl = self._setup_client(Gitlab(**kwargs))
+        if token is not None:
+            kwargs["private_token"] = token
+        return kwargs
+
+    def _next_worker_token(self) -> str | None:
+        """Next token for a worker thread (round-robin); None with no tokens (test stub)."""
+        if not self.tokens:
+            return None
+        with self._token_lock:
+            token = self.tokens[self._next_token % len(self.tokens)]
+            self._next_token += 1
+        return token
+
+    def _verify_extra_tokens(self, url: str) -> None:
+        """
+        Authenticate every token after the first, so an invalid one fails the
+        run before any scanning (the first token was verified by the main
+        client). Token values are never put in the error message.
+        """
+        total = len(self.tokens)
+        for index, token in enumerate(self.tokens[1:], start=2):
+            gl = self._setup_client(Gitlab(**self._worker_client_kwargs(token)))
+            try:
+                gl.auth()
+            except (gitlab.exceptions.GitlabError, requests.exceptions.RequestException) as e:
+                raise GitlabHarvesterError(
+                    f"Token #{index} of {total} failed to authenticate to {url}: {e}"
+                ) from None
+
+    def _init_worker_client(self) -> None:
+        """
+        Give the calling worker thread its own python-gitlab client.
+
+        With several tokens the thread is bound to one of them (round-robin, so
+        each token gets an equal share of threads). All tokens were already
+        verified at start-up, so no extra /user request is made here.
+        """
+        if self._client_kwargs is None:
+            return  # client not built by _get_gl_client (e.g. a test stub): share it
+        self._local.gl = self._setup_client(Gitlab(**self._worker_client_kwargs(self._next_worker_token())))
 
     def _setup_client(self, gl: Gitlab) -> Gitlab:
         """
@@ -252,9 +306,24 @@ class GitlabHarvester:
             )
         return None
 
+    def _concurrency_text(self) -> str:
+        """
+        How the run is parallelized, for the search plan line and journal.
+
+        '' for a plain sequential run, 'N workers' for one token, and
+        'M tokens x N workers = M*N clients' when several tokens run at once.
+        """
+        n_tokens = len(self.tokens)
+        if n_tokens > 1:
+            worker = "worker" if self.workers == 1 else "workers"
+            return f"{n_tokens} tokens x {self.workers} {worker} = {self.concurrency} clients"
+        if self.workers > 1:
+            return f"{self.workers} workers"
+        return ""
+
     def _imap_ordered(self, fn: Callable[[Any], Any], items: Any, *, parallel: bool = True):
-        """imap_ordered() with this harvester's worker count and per-thread clients."""
-        return pool.imap_ordered(fn, items, workers=self.workers if parallel else 1,
+        """imap_ordered() with this harvester's total concurrency and per-thread clients."""
+        return pool.imap_ordered(fn, items, workers=self.concurrency if parallel else 1,
                                  initializer=self._init_worker_client)
 
     @staticmethod
@@ -734,7 +803,7 @@ class GitlabHarvester:
                 if not uses_api:
                     default_branch = project.get("default_branch")
                     return [default_branch] if default_branch else []
-                if self.workers <= 1:
+                if self.concurrency <= 1:
                     progress.set_detail(str(project.get("path_with_namespace", project["id"])))
                 return self.get_branches(project_id=int(project["id"]), per_page=branches_per_page, limit=limit)
 
@@ -1017,7 +1086,7 @@ class GitlabHarvester:
         n_terms = len(keywords)
         terms_text = terminal_utils.plural(n_terms, "term")
         hits_before = hit_counter
-        parallel = f", {self.workers} workers" if self.workers > 1 else ""
+        parallel = f", {concurrency}" if (concurrency := self._concurrency_text()) else ""
         if limits := ratelimit.describe(self.index_rpm, self.search_rpm):
             parallel += f", rate limit: {limits}"
         if jitter := ratelimit.format_jitter(self.jitter):
@@ -1099,7 +1168,7 @@ class GitlabHarvester:
         n_branches = len(task.branches)
         label = f"{name} @ {task.branch}" + (f" [{task.branch_no + 1}/{n_branches}]" if n_branches > 1 else "")
         with self._active.running(label, report=f"'{task.term}' in {name} @ {task.branch}"):
-            if self.workers <= 1:
+            if self.concurrency <= 1:
                 # Inline (main thread): show the new task now. Worker threads
                 # leave redraws to the status ticker.
                 terminal_utils.STATUS.refresh()
@@ -1278,7 +1347,7 @@ class GitlabHarvester:
         progress.detail_provider = lambda: self._active.describe(terminal_utils.format_clock)
 
         try:
-            tasks_iter = pool.imap_unordered(self._search_branch, tasks(), workers=self.workers,
+            tasks_iter = pool.imap_unordered(self._search_branch, tasks(), workers=self.concurrency,
                                              initializer=self._init_worker_client, on_idle=report_slow_tasks)
             for done in tasks_iter:
                 task: _BranchTask = done.item

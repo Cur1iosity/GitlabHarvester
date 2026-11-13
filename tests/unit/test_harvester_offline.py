@@ -73,6 +73,40 @@ def test_api_methods_require_initialized_client():
         GitlabHarvester().fetch_projects()
 
 
+# --------------------------------------------------------------------------- tokens & concurrency
+
+
+@pytest.mark.parametrize(
+    ("tokens", "workers", "concurrency", "text"),
+    [
+        (["a"], 1, 1, ""),
+        (["a"], 4, 4, "4 workers"),
+        (["a", "b"], 1, 2, "2 tokens x 1 worker = 2 clients"),
+        (["a", "b", "c"], 4, 12, "3 tokens x 4 workers = 12 clients"),
+    ],
+)
+def test_concurrency_is_tokens_times_workers(tokens, workers, concurrency, text):
+    glh = GitlabHarvester(tokens=tokens, workers=workers)  # no url -> no network
+    assert glh.tokens == tuple(tokens)
+    assert glh.workers == workers
+    assert glh.concurrency == concurrency
+    assert glh._concurrency_text() == text
+
+
+def test_single_token_argument_still_works():
+    glh = GitlabHarvester(token="a", workers=2)
+    assert glh.tokens == ("a",) and glh.concurrency == 2
+
+
+def test_worker_threads_cycle_through_tokens():
+    glh = GitlabHarvester(tokens=["a", "b", "c"], workers=2)  # concurrency 6
+    assigned = [glh._next_worker_token() for _ in range(glh.concurrency)]
+    # One client per token per worker: every token used exactly `workers` times.
+    assert sorted(assigned) == ["a", "a", "b", "b", "c", "c"]
+    # The cycle keeps its phase, so the next phase stays balanced too.
+    assert glh._next_worker_token() == "a"
+
+
 @pytest.mark.parametrize(
     ("url", "expected"),
     [

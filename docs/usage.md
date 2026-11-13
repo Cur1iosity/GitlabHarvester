@@ -37,6 +37,17 @@ gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -s password
 ```
 
 - The token needs the `read_api` scope. Only projects visible to the token are searched.
+- **Several tokens at once.** `-t "tok1;tok2;tok3"` (separated by `;`), or
+  `--token-file FILE` with one token per line (`#` comments and blank lines skipped),
+  runs every token in parallel: each gets its own pool of `--workers` clients and its
+  own server-side rate-limit budget, so the layering is `token -> workers per token ->
+  rpm per worker`. Handy when an instance rate-limits per user and you hold several
+  accounts' tokens. Every token is authenticated at start-up, so a bad one stops the run
+  before any scanning (`Token #2 of 3 failed to authenticate …`). Duplicate tokens are
+  dropped. Only projects visible to a given token are searched by that token; with no
+  permission model differences, identical visibility means identical results. The two
+  options exclude each other, and tokens are never written to logs, the session or the
+  journal (only their count is).
 - `--proxy http://127.0.0.1:8080` routes API traffic through a proxy (a scheme is added if missing).
 - `--timeout 60` is the per-request timeout in seconds.
 - User-Agent: by default python-gitlab's own (`python-gitlab/<version>`) is sent.
@@ -90,8 +101,9 @@ terms =
     `--no-sort-keys`, `--no-normalize-hits`) to switch off a value set in the file.
 - `terms` lists search terms one per line, as an alternative to `terms-file`.
 - `token = env:NAME` reads the token from an environment variable, so the file holds no secret.
+  `token = a;b` or `token-file = tokens.txt` run several tokens in parallel (see [Connection](#connection)).
 - Relative paths in the file (`index-file`, `terms-file`, `session-file`, `log-file`,
-  `input-file`, `output-file`, `sqlite-path`) are resolved against the file's directory.
+  `input-file`, `output-file`, `sqlite-path`, `token-file`) are resolved against the file's directory.
   Paths given on the command line stay relative to the working directory.
 - An empty value means "not set". Comments go on their own lines: text after a value is
   part of the value. `%` has no special meaning.
@@ -251,7 +263,29 @@ What stays the same:
   in completion order instead of index order.
 - Only the main thread writes files and progress; every worker has its own
   connection (python-gitlab client).
-- `--workers 1` is the sequential mode: no threads at all.
+- `--workers 1` with one token is the sequential mode: no threads at all.
+
+### Several tokens: `--workers` is per token
+
+`--workers` counts **per token**. With several tokens (`-t "a;b"` or `--token-file`,
+see [Connection](#connection)) the run keeps `tokens × workers` clients busy at once,
+each worker bound to one token for the whole run (round-robin, so every token gets an
+equal share of threads):
+
+```bash
+# 3 tokens x 2 workers each = 6 concurrent clients, each paced to 20 search req/min
+gitlab-harvester -u ... -t "$T1;$T2;$T3" -f words.txt -b all --workers 2 --search-rpm 20
+```
+
+- Tasks come from the one shared queue, so the tokens load-balance themselves: if one
+  token hits a rate limit (429) its workers wait while the others keep taking tasks.
+- Because the `--*-rpm` limits are per worker (per client), every token has its own
+  independent budget. Three tokens at `--search-rpm 20 --workers 2` send up to
+  `3 × 2 × 20 = 120` search requests a minute, 40 per account — useful against an
+  instance that limits each user separately.
+- The search plan line names it: `Search plan: ..., 3 tokens x 2 workers = 6 clients,
+  rate limit: search 20/min per worker`; the run journal records the token count
+  (`tokens=3 inline` / `tokens=file t.txt`) and the session `meta` stores it (`"tokens"`).
 
 ## Request rate limits
 
@@ -533,12 +567,13 @@ are URL-encoded.
 |---|---|---|
 | `-c, --config FILE` | — | read options from an INI file; CLI arguments override it |
 | `-u, --url URL` | — | GitLab base URL (`-H/--host` is a deprecated alias) |
-| `-t, --token TOKEN` | — | API token (`read_api`) |
+| `-t, --token TOKEN` | — | API token(s) (`read_api`); `;`-separated tokens run in parallel |
+| `--token-file FILE` | — | file with one token per line; each runs in parallel like `-t` |
 | `-p, --proxy URL` | — | HTTP(S) proxy |
 | `--timeout SEC` | 60 | per-request timeout |
 | `--ca-bundle FILE` | system CAs | CA bundle (PEM) for the GitLab TLS certificate |
 | `--[no-]insecure` | off | disable TLS verification explicitly (never automatic) |
-| `-w, --workers N` | 1 | parallel API requests (1-64); only for instances without rate limits |
+| `-w, --workers N` | 1 | parallel API requests per token (1-64); only for instances without rate limits |
 | `--rpm N` | 0 | shortcut for `--index-rpm` and `--search-rpm` |
 | `--index-rpm N` | 0 | max non-search API requests per minute per worker (0 = no limit) |
 | `--search-rpm N` | 0 | max search API requests per minute per worker (0 = no limit) |

@@ -245,6 +245,37 @@ def test_invalid_jitter_is_a_usage_error(capsys):
 # --------------------------------------------------------------------------- User-Agent
 
 
+def test_token_options():
+    a = CliParser.parse([])
+    assert a.token is None and a.token_file is None
+    # -t keeps the raw value; the ';' split into a token list happens in modes._resolve_tokens.
+    assert CliParser.parse(["-t", "glpat-a;glpat-b"]).token == "glpat-a;glpat-b"
+    assert CliParser.parse(["--token-file", "tokens.txt"]).token_file == "tokens.txt"
+
+
+def test_token_and_token_file_exclude_each_other(capsys):
+    with pytest.raises(SystemExit) as e:
+        CliParser.parse(["-t", "glpat-a", "--token-file", "tokens.txt"])
+    assert e.value.code == 2
+    assert "not allowed with argument" in capsys.readouterr().err
+
+
+def test_token_file_from_config_file(tmp_path: Path, capsys):
+    (tmp_path / "tokens.txt").write_text("glpat-a\nglpat-b\n", encoding="utf-8")
+    cfg = tmp_path / "c.ini"
+    cfg.write_text("[connection]\ntoken-file = tokens.txt\n", encoding="utf-8")
+    a = CliParser.parse(["-c", str(cfg)])
+    assert a.token_file == str(tmp_path / "tokens.txt")  # relative to the config file
+    # One of them on the command line replaces the other from the file.
+    a = CliParser.parse(["-c", str(cfg), "-t", "glpat-cli"])
+    assert a.token == "glpat-cli" and a.token_file is None
+
+    cfg.write_text("[connection]\ntoken = glpat-a\ntoken-file = tokens.txt\n", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        CliParser.parse(["-c", str(cfg)])
+    assert "mutually exclusive" in capsys.readouterr().err
+
+
 def test_user_agent_options():
     a = CliParser.parse([])
     assert a.user_agent is None and a.user_agent_file is None

@@ -119,7 +119,7 @@ asserts this exact list):
 
 | # | Request | Called from | Query parameters | Response fields read |
 |---|---|---|---|---|
-| 1 | `GET /api/v4/user` | `Gitlab.auth()` in `_get_gl_client` | none | `username`, `web_url` (python-gitlab compares `web_url` with the base URL and warns on mismatch) |
+| 1 | `GET /api/v4/user` | `Gitlab.auth()` in `_get_gl_client` (and `_verify_extra_tokens`, once per extra token) | none | `username`, `web_url` (python-gitlab compares `web_url` with the base URL and warns on mismatch) |
 | 2 | `GET /api/v4/projects` | `fetch_projects` | `page`, `per_page`, `order_by=id`, `sort=desc`; `last_activity_after`/`last_activity_before` with `--index-active-*` | `id`, `web_url`, `path_with_namespace`, `default_branch`, `empty_repo`, `forked_from_project.id`, `created_at`, `last_activity_at` |
 | 3 | `GET /api/v4/projects/:id/repository/branches` | `get_branches` (only when index branches mode ≠ `default`) | `page`, `per_page` | `name` |
 | 4 | `GET /api/v4/projects/:id/search` | `scan_branch` | `scope=blobs`, `search`, `ref`, `page`, `per_page=100` | `path`, `startline`, `data` |
@@ -133,7 +133,13 @@ Headers and behavior that matter:
 
 - **Authentication**: python-gitlab sends `PRIVATE-TOKEN: <token>`. An invalid
   token returns `401 {"message": "401 Unauthorized"}` →
-  `GitlabAuthenticationError`.
+  `GitlabAuthenticationError`. With several tokens (`-t "a;b"` / `--token-file`,
+  `glh/tokens.py`) each one is authenticated with its own `GET /user` at start-up,
+  so a bad token aborts the run before any scanning. Each worker thread is bound to
+  one token round-robin (`_init_worker_client`), so the run keeps `tokens × workers`
+  clients (`GitlabHarvester.concurrency`), each with its own session and per-client
+  rate-limit budget; `tokens × workers == 1` is the inline sequential path. The
+  token values never leave the client: not in logs, the session file or the journal.
 - **Pagination**: GitLab offset pagination — `X-Page`, `X-Per-Page`, `X-Total`,
   `X-Total-Pages`, `X-Next-Page`, `X-Prev-Page`, `Link` (`rel="next|prev|first|last"`).
   `per_page` is capped at 100. Above 10 000 records GitLab omits `X-Total`,

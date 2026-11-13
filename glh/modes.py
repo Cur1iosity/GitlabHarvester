@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, IO
 from urllib.parse import urlparse
 
-from glh import GitlabHarvester, ratelimit, user_agents
+from glh import GitlabHarvester, ratelimit, tokens, user_agents
 from glh.exceptions import GitlabHarvesterError
 from glh.cli import CliArgs, _get_version
 from glh.planner import ScanOptions, TimeWindow, parse_timestamp
@@ -37,11 +37,23 @@ from glh.utils.terminal_utils import format_duration
 UTC = timezone.utc
 
 
-def _require_gitlab(args: CliArgs) -> tuple[str, str]:
-    """Ensure URL and token are present for GitLab-dependent modes."""
-    if not args.url or not args.token:
+def _require_gitlab(args: CliArgs) -> str:
+    """Ensure a URL and at least one token are present for GitLab-dependent modes."""
+    if not args.url or not (args.token or args.token_file):
         raise SystemExit("This mode requires --url and --token.")
-    return args.url, args.token
+    return args.url
+
+
+def _resolve_tokens(args: CliArgs) -> list[str]:
+    """Resolve -t/--token (';'-separated) or --token-file into a list of tokens."""
+    try:
+        if args.token_file:
+            return tokens.load_tokens(args.token_file)
+        if args.token:
+            return tokens.parse_tokens(args.token)
+    except tokens.TokenError as e:
+        raise SystemExit(str(e)) from None
+    return []
 
 
 def _load_keywords(*, search: str | None, terms_file: str | None, terms: tuple[str, ...] = ()) -> list[str]:
@@ -132,6 +144,16 @@ def _when(after: datetime | None, before: datetime | None) -> str | None:
     return window.describe() if window else None
 
 
+def _describe_token_source(args: CliArgs) -> str | None:
+    """How many tokens and from where, for the run journal — never the values."""
+    if args.token_file:
+        return f"file {args.token_file}"
+    if args.token:
+        n = len([t for t in args.token.split(tokens.SEPARATOR) if t.strip()])
+        return f"{n} inline"
+    return None
+
+
 def _describe_options(args: CliArgs) -> str:
     """The settings that shape a run, for the run journal (never the token)."""
     opts: dict[str, Any] = {}
@@ -141,6 +163,7 @@ def _describe_options(args: CliArgs) -> str:
             "index-file": args.index_file or "(default)",
             "index-branches": args.index_branches,
             "batch-size": args.batch_size,
+            "tokens": _describe_token_source(args),
             "workers": args.workers,
             "index-rpm": args.index_rpm or "no limit",
             "search-rpm": args.search_rpm or "no limit",
@@ -223,7 +246,10 @@ def run_mode(args: CliArgs) -> None:
 
 def _mk_harvester(args: CliArgs) -> GitlabHarvester:
     """Create a GitlabHarvester instance from CLI args."""
-    url, token = _require_gitlab(args)
+    url = _require_gitlab(args)
+    token_list = _resolve_tokens(args)
+    if not token_list:
+        raise SystemExit("This mode requires --url and --token.")
 
     agents: list[str] = []
     if args.user_agent_file:
@@ -236,7 +262,7 @@ def _mk_harvester(args: CliArgs) -> GitlabHarvester:
 
     kwargs: dict[str, Any] = {
         "url": url,
-        "token": token,
+        "tokens": token_list,
         "timeout": args.timeout,
         "workers": args.workers,
         "index_rpm": args.index_rpm,
@@ -340,6 +366,7 @@ def _run_search(args: CliArgs) -> None:
                     "config": args.config,
                     "index_file": str(index_file),
                     "batch_size": args.batch_size,
+                    "tokens": len(glh.tokens),
                     "workers": args.workers,
                     "index_rpm": args.index_rpm,
                     "search_rpm": args.search_rpm,
