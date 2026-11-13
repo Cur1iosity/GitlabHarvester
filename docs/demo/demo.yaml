@@ -1,14 +1,54 @@
 # Fake GitLab scenario for the README demo: the default dataset (artificial
-# projects and FAKE-... secrets) with small response delays, so the progress
-# line is visible instead of finishing in a fraction of a second.
+# projects and FAKE-... secrets) plus ~90 generated projects, so the scan
+# sweeps ~100 projects and finds hundreds of hits — a fuller, more convincing
+# run than the handful of default projects. Small response delays keep the
+# progress line readable instead of finishing in a fraction of a second.
+#
+# Generator templates use Python str.format: {n} is the 1-based index
+# (format specs allowed, e.g. {n:03d}) and {id} is the project id. The terms
+# searched in the demo (password, api_key, token; see setup.sh) appear in every
+# generated project, so the hit counter climbs steadily across the scan.
 name: demo
-description: Default dataset with demo-friendly response times.
+description: Default dataset plus ~90 generated projects with hits, for a fuller demo.
 extends: default
 
+generate:
+  - count: 91
+    start_id: 1001
+    project:
+      path_with_namespace: "acme/team-{n:02d}/service-{n:03d}"
+      description: "Generated service {n:03d}"
+      default_branch: main
+      visibility: internal
+      created_at: "2024-02-01T00:00:00.000Z"
+      last_activity_at: "2024-06-10T12:00:00.000Z"
+      branches:
+        main:
+          files:
+            config/settings.py: |
+              DEBUG = False
+              DB_HOST = "db-{n:03d}.internal.example"
+              DB_PASSWORD = "FAKE-db-password-{n:04d}"
+              API_KEY = "FAKE-api-key-{n:04d}"
+            deploy/.env.example: |
+              SERVICE_URL=https://svc-{n:03d}.internal.example
+              SERVICE_TOKEN=FAKE-service-token-{n:04d}
+        develop:
+          inherit: main
+          files:
+            scripts/debug.sh: |
+              #!/bin/sh
+              export API_KEY=FAKE-api-key-dev-{n:04d}
+              export SERVICE_TOKEN=FAKE-token-dev-{n:04d}
+
+# ~100 projects x 2 branches x 3 terms is already ~600 search requests, enough
+# to pace the progress line on its own, so the per-request delays are small (the
+# old tiny dataset needed larger ones not to finish in a blink). Tune them, and
+# the final Sleep in demo.tape, if the recorded GIF runs too long or too short.
 faults:
   - name: demo-search-latency
     match: {method: GET, path: "/search$"}
-    response: {delay: 0.08}
+    response: {delay: 0.004}
   - name: demo-branches-latency
     match: {method: GET, path: "/repository/branches$"}
-    response: {delay: 0.06}
+    response: {delay: 0.01}

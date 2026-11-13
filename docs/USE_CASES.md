@@ -8,10 +8,11 @@ Typical scenarios and which options fit them. For the full option reference see
 - [3. Forks: scan them or not](#3-forks-scan-them-or-not)
 - [4. Only fresh findings: time filters](#4-only-fresh-findings-time-filters)
 - [5. Parallel requests: --workers](#5-parallel-requests---workers)
-- [6. Baseline and re-scans](#6-baseline-and-re-scans)
-- [7. Deduplicated JSON report in one run: --post-process](#7-deduplicated-json-report-in-one-run---post-process)
-- [8. History of runs in a log file](#8-history-of-runs-in-a-log-file)
-- [9. Optional: options from a config file](#9-optional-options-from-a-config-file)
+- [6. Red team: several tokens against a per-user rate limit](#6-red-team-several-tokens-against-a-per-user-rate-limit)
+- [7. Baseline and re-scans](#7-baseline-and-re-scans)
+- [8. Deduplicated JSON report in one run: --post-process](#8-deduplicated-json-report-in-one-run---post-process)
+- [9. History of runs in a log file](#9-history-of-runs-in-a-log-file)
+- [10. Optional: options from a config file](#10-optional-options-from-a-config-file)
 
 All examples pass the options on the command line; that is the main way to run the tool.
 They expect the token in an environment variable: `export GITLAB_TOKEN=...`.
@@ -40,8 +41,11 @@ gitlab-harvester -m convert --input-file clean.jsonl --output-file clean.json
   `--dump-projects` after changing them.
 - The session file (`audit.jsonl`) gets every hit as soon as it is found, plus a
   checkpoint after every finished term: that is what `--resume` continues from.
+- Searching a list of terms? Add `--output-separated` to also get one file per term
+  next to the session (`audit.password.jsonl`, `audit.api_key.jsonl`, …), so each kind
+  of finding can be triaged on its own. See [usage.md](usage.md#one-file-per-term---output-separated).
 - dedup and convert can also run right after the search: see
-  [section 7](#7-deduplicated-json-report-in-one-run---post-process).
+  [section 8](#8-deduplicated-json-report-in-one-run---post-process).
 
 ## 2. Export the project inventory only
 
@@ -219,7 +223,68 @@ traffic looks in logs, not whose requests they are.
 
 Details: [usage.md](usage.md#request-rate-limits).
 
-## 6. Baseline and re-scans
+## 6. Red team: several tokens against a per-user rate limit
+
+On an engagement you often end up with tokens from several accounts — phished,
+pulled from a CI job, found in a dotfile, or simply shared across the team for the
+assessment. When the instance rate-limits **per user** (GitLab's default for the
+search API), one token caps your speed no matter how many `--workers` you add: the
+extra workers just collect HTTP 429s. Spreading the same scan over several tokens
+multiplies the budget, because each account is throttled on its own.
+
+Pass the tokens with `-t` separated by `;`, or keep them in a file with
+`--token-file` (one per line, `#` comments allowed — nicer than a long, shell-logged
+command line):
+
+```bash
+# Three operators' tokens, 2 workers each = 6 concurrent clients.
+# Each token is held to 20 search requests/min, so 60/min total, 20 per account.
+gitlab-harvester -u https://gitlab.example.com -t "$T1;$T2;$T3" \
+  -f words.txt -b all --forks branch-diff --workers 2 --search-rpm 20 --session engagement
+
+# The same from a file kept out of the shell history
+printf '%s\n' "$T1" "$T2" "$T3" > tokens.txt      # or hand-edit it
+gitlab-harvester -u https://gitlab.example.com --token-file tokens.txt \
+  -f words.txt -b all --forks branch-diff --workers 2 --search-rpm 20 --session engagement
+```
+
+The layering is `token -> workers per token -> rpm per worker`:
+
+- `--workers` counts **per token**, so the run keeps `tokens × workers` clients busy
+  (here `3 × 2 = 6`). The search plan line confirms it: `... 3 tokens x 2 workers =
+  6 clients, rate limit: search 20/min per worker`.
+- Every token has its **own** rate-limit budget (the `--*-rpm` limits are per client),
+  so `--search-rpm 20` means 20/min *for each account*. Set it from the instance's
+  per-user limit, not the total — three accounts stay under the radar individually
+  while the scan runs three times faster.
+- Tasks come from one shared queue, so the tokens balance themselves: if one account
+  trips a 429 and waits, the others keep taking work instead of stalling the scan.
+
+Operational notes for an engagement:
+
+- Every token is checked at start-up; a revoked or mistyped one aborts the run before
+  any scanning (`Token #2 of 3 failed to authenticate …`), so you don't burn half a
+  scan on a dead token. Duplicate tokens are dropped.
+- Tokens are **never** written to the session file, the log or the run journal — only
+  their count (`tokens=3 inline`). The session stays safe to hand over as evidence.
+- Each token sees only what its account can see. Overlapping accounts give the same
+  findings faster; accounts in different groups also widen coverage. Deduplicate
+  afterwards (`-m dedup`, [section 8](#8-deduplicated-json-report-in-one-run---post-process))
+  to collapse the repeats.
+- This stacks with the noise controls from [section 5](#5-parallel-requests---workers):
+  `--jitter`, `--user-agent-file` and the rpm limits apply per client, so each token's
+  traffic is paced and disguised on its own. Note that all requests from one token
+  still carry that token — rotating User-Agents changes how the traffic *looks*, not
+  *whose* it is.
+
+```bash
+# Low and slow across three tokens: each account trickles requests, with jitter
+# and a rotating User-Agent, so no single account stands out.
+gitlab-harvester -u https://gitlab.example.com --token-file tokens.txt \
+  -f words.txt -b all --rpm 10 --jitter 0.5-3 --user-agent-file agents.txt --session quiet
+```
+
+## 7. Baseline and re-scans
 
 ```bash
 # 1. Baseline: everything, fresh index with all branches (parallel if the instance allows it)
@@ -236,7 +301,7 @@ gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -f words.txt \
   --index-file gitlab_index.jsonl -b all --forks branch-diff --started-from 2024-06-24 --session week-26 --resume
 ```
 
-## 7. Deduplicated JSON report in one run: --post-process
+## 8. Deduplicated JSON report in one run: --post-process
 
 The same secret usually shows up many times: in every branch, in every fork, for
 several terms. Instead of running `-m dedup` and `-m convert` after the search, ask
@@ -269,7 +334,7 @@ deleted if the search is interrupted or a step fails.
 Only one step is fine too: `--post-process dedup` (JSONL without duplicates) or
 `--post-process convert` (a JSON array of the raw session).
 
-## 8. History of runs in a log file
+## 9. History of runs in a log file
 
 Pass the same `--log-file` to every run. Whatever `--log-level` is, each run appends
 a summary: options, index file and its build time, search plan, projects, hits and
@@ -289,7 +354,7 @@ The run id (`[run 2f3724f3]`) ties together the lines of one run. Use it to comp
 filters (`--forks`, time windows, `--workers`) against duration and number of hits.
 Details: [usage.md](usage.md#run-journal).
 
-## 9. Optional: options from a config file
+## 10. Optional: options from a config file
 
 Any of the options above can also be put into an INI file and passed with
 `-c/--config FILE`. Options given on the command line override the values from the file:

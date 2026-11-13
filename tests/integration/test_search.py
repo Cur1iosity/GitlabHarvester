@@ -194,6 +194,28 @@ def test_partial_success_when_one_project_fails(fake_gitlab: FakeGitLab, indexed
         assert glh.incomplete_terms == ["password"]
 
 
+def test_error_body_is_hidden_by_default_and_shown_at_debug(fake_gitlab: FakeGitLab, indexed, make_harvester):
+    """A 500's HTML body is noise: only a concise line by default, the full body at --debug."""
+    glh, projects = indexed
+    fake_gitlab.add_fault({
+        "match": {"path": "^/api/v4/projects/301/search$"},
+        "response": {"status": 500, "body": "<html><h1>500</h1><p>Whoops, something went wrong on our end</p></html>"},
+    })
+
+    # Default level (WARNING): a concise one-liner, no response body.
+    logs = capture_logs(glh)
+    search(glh, projects, ["password"], scan_branches="default")
+    warnings = logs.messages(logging.WARNING)
+    assert any("HTTP 500 Internal Server Error" in m and "ops/infra/terraform/modules" in m for m in warnings)
+    assert all("Whoops" not in m for m in warnings)
+
+    # With --debug the full error (body included) is available for troubleshooting.
+    debug_glh = make_harvester(log_level="DEBUG")
+    debug_logs = capture_logs(debug_glh)
+    search(debug_glh, projects, ["password"], scan_branches="default")
+    assert any("Whoops" in m for m in debug_logs.messages(logging.DEBUG))
+
+
 def test_failed_term_is_not_a_resume_checkpoint(fake_gitlab: FakeGitLab, indexed, tmp_path: Path):
     """Regression: a term whose searches failed used to be marked done, so --resume skipped it."""
     from glh.session import load_done_keywords

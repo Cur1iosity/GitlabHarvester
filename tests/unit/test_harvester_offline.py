@@ -73,6 +73,64 @@ def test_api_methods_require_initialized_client():
         GitlabHarvester().fetch_projects()
 
 
+# --------------------------------------------------------------------------- error descriptions
+
+
+@pytest.mark.parametrize(("error", "expected"), [
+    (gitlab.exceptions.GitlabError("<html>500 page</html>", response_code=500), "HTTP 500 Internal Server Error"),
+    (gitlab.exceptions.GitlabError("nope", response_code=404), "HTTP 404 Not Found"),
+    (gitlab.exceptions.GitlabError("teapot", response_code=418), "HTTP 418"),
+    (requests.exceptions.ConnectTimeout("timed out"), "ConnectTimeout: timed out"),
+])
+def test_describe_api_error_is_a_short_line(error, expected):
+    from glh.harvester import describe_api_error
+
+    assert describe_api_error(error) == expected
+
+
+def test_describe_api_error_omits_the_response_body():
+    from glh.harvester import describe_api_error
+
+    e = gitlab.exceptions.GitlabError("<html><h1>500</h1><p>Whoops, something went wrong</p></html>",
+                                      response_code=500)
+    assert describe_api_error(e) == "HTTP 500 Internal Server Error"
+    assert "Whoops" not in describe_api_error(e)
+
+
+# --------------------------------------------------------------------------- tokens & concurrency
+
+
+@pytest.mark.parametrize(
+    ("tokens", "workers", "concurrency", "text"),
+    [
+        (["a"], 1, 1, ""),
+        (["a"], 4, 4, "4 workers"),
+        (["a", "b"], 1, 2, "2 tokens x 1 worker = 2 clients"),
+        (["a", "b", "c"], 4, 12, "3 tokens x 4 workers = 12 clients"),
+    ],
+)
+def test_concurrency_is_tokens_times_workers(tokens, workers, concurrency, text):
+    glh = GitlabHarvester(tokens=tokens, workers=workers)  # no url -> no network
+    assert glh.tokens == tuple(tokens)
+    assert glh.workers == workers
+    assert glh.concurrency == concurrency
+    assert glh._concurrency_text() == text
+
+
+def test_single_token_argument_still_works():
+    glh = GitlabHarvester(token="a", workers=2)
+    assert glh.tokens == ("a",) and glh.concurrency == 2
+
+
+def test_worker_threads_cycle_through_tokens():
+    glh = GitlabHarvester(tokens=["a", "b", "c"], workers=2)  # concurrency 6
+    assigned = [glh._next_worker_token() for _ in range(glh.concurrency)]
+    # One client per token per worker: every token used exactly `workers` times.
+    assert sorted(assigned) == ["a", "a", "b", "b", "c", "c"]
+    # The cycle keeps its phase, so the next phase stays balanced too.
+    assert glh._next_worker_token() == "a"
+
+
 @pytest.mark.parametrize(
     ("url", "expected"),
     [
