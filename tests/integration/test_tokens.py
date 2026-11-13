@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import io
 import json
+import threading
+from collections import Counter
 
 import pytest
 
@@ -80,6 +82,53 @@ def test_search_spreads_over_every_token(fake_gitlab: FakeGitLab, make_harvester
     run_search(glh, projects)
 
     assert search_tokens(fake_gitlab) == set(TOKENS)  # both colleagues' tokens did real work
+
+
+def test_several_workers_per_token_still_use_every_token(fake_gitlab: FakeGitLab, make_harvester, tmp_path):
+    # Live threaded run with more than one worker per token: concurrency = tokens x workers.
+    projects = build_index(make_harvester, tmp_path / "idx.jsonl")
+    fake_gitlab.clear_journal()
+
+    glh = make_harvester(tokens=TOKENS, workers=2)  # 2 tokens x 2 workers = 4 clients
+    assert glh.concurrency == 4
+    run_search(glh, projects)
+
+    assert search_tokens(fake_gitlab) == set(TOKENS)  # every token carried real requests
+
+
+def test_token_worker_rpm_wiring(fake_gitlab: FakeGitLab, make_harvester, tmp_path):
+    """
+    The token -> worker -> rpm chain end to end: M tokens x N workers create
+    M*N search clients, N bound to each token, and every client carries its own
+    per-worker rpm limiters (so each token's budget is tokens-independent).
+    """
+    projects = build_index(make_harvester, tmp_path / "idx.jsonl")
+
+    glh = make_harvester(tokens=TOKENS, workers=2, search_rpm=20, index_rpm=300)  # concurrency 4
+    assert glh.concurrency == 4
+
+    # Record every worker client built during the search. The main client and the
+    # per-token start-up checks ran in __init__, before this spy is installed, so
+    # only the pool's worker clients (one per thread) are captured.
+    seen: list[tuple[str, int | None, int | None]] = []
+    lock = threading.Lock()
+    build_client = glh._setup_client
+
+    def spy(gl):
+        gl = build_client(gl)
+        adapter = gl.session.get_adapter("https://x")  # the mounted ThrottledAdapter
+        search_rpm = getattr(getattr(adapter, "search_limiter", None), "rpm", None)
+        index_rpm = getattr(getattr(adapter, "index_limiter", None), "rpm", None)
+        with lock:
+            seen.append((gl.private_token, search_rpm, index_rpm))
+        return gl
+
+    glh._setup_client = spy
+    run_search(glh, projects)
+
+    assert len(seen) == glh.concurrency                       # one client per (token, worker)
+    assert Counter(token for token, _, _ in seen) == {"dev-token": 2, "readonly-token": 2}  # N workers per token
+    assert {(s, i) for _, s, i in seen} == {(20, 300)}        # each client paces itself: its own rpm budget
 
 
 def test_results_match_a_single_token_run(fake_gitlab: FakeGitLab, make_harvester, tmp_path):
