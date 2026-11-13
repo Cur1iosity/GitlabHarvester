@@ -13,7 +13,7 @@ the version of the checkout, not whatever is on PyPI at recording time.
 | File | Purpose |
 |---|---|
 | `demo.tape` | what is typed; waits for the output (`Wait /done!/`, `Wait /Done\. Keywords/`) instead of fixed pauses |
-| `demo.yaml` | Fake GitLab scenario: the default dataset plus small response delays, so the progress line is visible |
+| `demo.yaml` | Fake GitLab scenario: the default dataset plus ~90 generated projects (~100 total, hundreds of hits) with small response delays, so the scan looks substantial and the progress line stays readable |
 | `setup.sh` | hidden setup: private CA and certificate, HTTPS Fake GitLab, term list, token |
 | `Dockerfile` | VHS image with pipx, a local wheel directory for GitlabHarvester, and the Fake GitLab |
 
@@ -49,5 +49,7 @@ MSYS_NO_PATHCONV=1 docker run --rm -v "$PWD/docs:/vhs" gitlab-harvester/demo dem
 ```
 
 The GIF is written to `docs/demo/out/demo.gif`, which is git-ignored: local recordings never
-touch what the README shows. Aim for about 15 seconds: tune the delays in `demo.yaml` and the
-final `Sleep` in `demo.tape`.
+touch what the README shows. The scan of ~100 projects takes roughly 15 s on its own (about
+600 search requests), so the whole clip runs ~20-25 s; most of the length now comes from the
+dataset, not the delays. Tune the `demo.yaml` delays and the final `Sleep` in `demo.tape` to
+taste, or lower the generated `count` for a shorter clip.
