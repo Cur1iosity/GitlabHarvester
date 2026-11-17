@@ -35,6 +35,15 @@ minor release. Runs that use it say so.
   and `L` shows the proposal again. Without a terminal proposals are logged. The run
   ends with the limits to start the next run with.
 - `-m dump-index --auto-limits` measures the other API only.
+- **Every file by name, without a term**: `--filename`/`--extension` with no
+  `-s`/`-f`/`terms` collect every matching file (one hit per file; downloaded with
+  `--download-files`), e.g. all `*.env` files of the instance for offline analysis.
+  The session term is the filter string (`filename:*.env`). `--file-listing` picks
+  how the files of a branch are found: `search` (the search API with the filters
+  only, for backends that take it), `tree` (the repository tree API: any GitLab) or
+  `auto` (default: search, falling back to the tree per branch until the search has
+  proven itself or rejected the query). New `file-listing` key in `config.example.ini`;
+  the session `meta` has `files_only` and `file_listing`.
 - **Search only some projects of the index**: `--project-filter PATTERNS`
   (comma-separated, case-insensitive) keeps the projects whose
   `group/subgroup/project` path contains a pattern (`k8s`) or matches a mask

@@ -147,6 +147,7 @@ instance:                       # all optional
   count_limit: 10000            # above it X-Total/X-Total-Pages are omitted
   search_context_lines: 2       # Gitaly git grep context before/after a match
   search_path_matches: true     # also return files whose path contains the term
+  search_filters_only: empty    # a search of filters only: empty | error (400) | paths (like advanced search)
 
 users:
   - {id: 1, username: harvester-bot, tokens: [dev-token]}

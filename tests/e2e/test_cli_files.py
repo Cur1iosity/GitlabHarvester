@@ -202,3 +202,22 @@ def test_project_filter_searches_only_matching_projects_of_the_index(fake_gitlab
     assert {h["project_id"] for h in s.hits()} == {101, 201}
 
 
+# --------------------------------------------------------------------------- no term: files by name
+
+
+def test_files_by_name_without_a_term(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
+    proc = run_cli(*gl_args(fake_gitlab), "--filename", "settings.py", "--download-files", "--session", "s",
+                   "--to-zip", check=True)
+    assert "no term: every matching file (listing: auto)" in proc.stderr
+    assert "files listed:" in proc.stderr
+    s = Session.load(tmp_path / "s.jsonl")
+    meta = s.records[0]
+    assert meta["files_only"] is True and meta["file_listing"] == "auto"
+    hits = s.hits("filename:settings.py")
+    assert hits and all(h["data"] == "" and (tmp_path / h["file"]).is_file() for h in hits)
+    assert any(t.startswith("filename_settings.py/files/") for t in zip_names(tmp_path / "s.zip"))
+
+
+def test_no_term_and_no_file_filter_is_still_an_error(fake_gitlab: FakeGitLab, run_cli):
+    proc = run_cli(*gl_args(fake_gitlab))
+    assert proc.returncode != 0 and "only --filename/--extension to collect files by name" in proc.stderr

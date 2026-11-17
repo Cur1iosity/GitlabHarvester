@@ -28,6 +28,7 @@ from glh.autolimit import LimitAdvisor, LimiterConsole
 from glh.exceptions import GitlabHarvesterError
 from glh.cli import CliArgs, _get_version
 from glh.downloads import FileDownloader, format_size
+from glh.filefilter import FileFilter
 from glh.output import OutputLayout, SessionOutput
 from glh.planner import ScanOptions, TimeWindow, parse_timestamp
 from glh.postprocess.convert import convert_jsonl_to_json
@@ -210,6 +211,7 @@ def _describe_options(args: CliArgs) -> str:
             "filename": args.filename,
             "extension": args.extension,
             "project-filter": ",".join(args.project_filter) or None,
+            "file-listing": args.file_listing if not (args.search or args.terms_file or args.terms) else None,
             "download-files": args.download_files or None,
             "download-max-size": (format_size(args.download_max_size) if args.download_max_size else "no limit")
             if args.download_files else None,
@@ -475,8 +477,14 @@ def _run_search(args: CliArgs) -> None:
     """Run term search workflow and write a session JSONL file."""
     glh = _mk_harvester(args)
     keywords = _load_keywords(search=args.search, terms_file=args.terms_file, terms=args.terms)
+    files_only = False
+    if not keywords and (args.filename or args.extension):
+        # No term: collect the files by name. The filter string is the session term.
+        keywords = [FileFilter(args.filename, args.extension).query("").strip()]
+        files_only = True
     if not keywords:
-        raise SystemExit("Nothing to do: provide --search, --terms-file or `terms` in the config file.")
+        raise SystemExit("Nothing to do: provide --search, --terms-file or `terms` in the config file "
+                         "(or only --filename/--extension to collect files by name).")
 
     console = None
     if args.auto_limits:
@@ -484,12 +492,12 @@ def _run_search(args: CliArgs) -> None:
         build_index = args.dump_projects or not os.path.exists(_index_path(args, glh))
         console = _start_auto_limits(args, glh, limits.KINDS if build_index else (limits.SEARCH,))
     try:
-        _search(args, glh, keywords)
+        _search(args, glh, keywords, files_only=files_only)
     finally:
         _stop_auto_limits(console)
 
 
-def _search(args: CliArgs, glh: GitlabHarvester, keywords: list[str]) -> None:
+def _search(args: CliArgs, glh: GitlabHarvester, keywords: list[str], *, files_only: bool = False) -> None:
     """The search workflow proper (see _run_search)."""
     stamp = _run_stamp()
     # The full supplied list (before --resume drops already-done terms): the
@@ -524,6 +532,8 @@ def _search(args: CliArgs, glh: GitlabHarvester, keywords: list[str]) -> None:
         filename=args.filename,
         extension=args.extension,
         project_filter=args.project_filter,
+        files_only=files_only,
+        file_listing=args.file_listing,
     )
 
     session_path = _resolve_session_path(glh.get_instance_id(), args.session, args.session_file, stamp)
@@ -574,6 +584,8 @@ def _search(args: CliArgs, glh: GitlabHarvester, keywords: list[str]) -> None:
                 file_changed_before=args.file_changed_before.isoformat() if args.file_changed_before else None,
                 **options.file_filter.to_meta(),
                 project_filter=list(args.project_filter) or None,
+                files_only=files_only,
+                file_listing=args.file_listing if files_only else None,
                 keywords_count=len(keywords),
                 output_separated=args.output_separated,
                 download_files=args.download_files,

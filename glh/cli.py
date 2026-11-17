@@ -293,6 +293,7 @@ class CliArgs:
     filename: str | None
     extension: str | None
     project_filter: tuple[str, ...]
+    file_listing: str
     session: str | None
     session_file: str | None
     resume: bool
@@ -515,7 +516,8 @@ class CliParser:
             "file filters",
             "Search the terms only in some files (case-insensitive; together, a file must match both).\n"
             "GitLab applies them on its side (filename:/extension: in the search string) and the\n"
-            "harvester re-checks every result. They narrow a search: a term (-s/-f) is still needed.",
+            "harvester re-checks every result. Without a term (-s/-f) they collect every matching\n"
+            "file instead (one hit per file; with --download-files, the files): see --file-listing.",
         )
         ff.add_argument(
             "--filename", type=parse_filename, default=None, metavar="PATTERN",
@@ -534,6 +536,13 @@ class CliParser:
                  "comma-separated patterns, case-insensitive: without * a substring (k8s), with * the "
                  "whole path (infra/*, *-k8s). Applied to the existing index, no extra API requests; "
                  "the index itself stays complete.",
+        )
+        ff.add_argument(
+            "--file-listing", choices=("auto", "search", "tree"), default="auto",
+            help="Without a term: how the files of a branch are found. search: the search API with the "
+                 "filters only (works where the search backend takes such queries, e.g. advanced search); "
+                 "tree: the repository tree, any GitLab, one request per 100 entries; auto (default): "
+                 "search, falling back to the tree.",
         )
         ff.add_argument(
             "--extension", type=parse_extension, default=None, metavar="EXT",
@@ -769,6 +778,7 @@ class CliParser:
             filename=ns.filename,
             extension=ns.extension,
             project_filter=tuple(ns.project_filter),
+            file_listing=ns.file_listing,
             session=ns.session,
             session_file=ns.session_file,
             resume=ns.resume,

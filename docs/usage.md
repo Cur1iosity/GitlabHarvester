@@ -293,12 +293,44 @@ gitlab-harvester -u ... -t ... -s token --filename 'config*' --extension yml
   the session exact where GitLab is looser (basic search matches `filename:` against
   the end of the whole path, so `filename:config.yml` also returns `myconfig.yml`)
   or ignores a filter.
-- The filters narrow a search; a term (`-s`/`-f`) is still needed. GitLab returns
-  nothing for a query that has filters only.
+- With a term the filters narrow its search. Without one they collect files by
+  name instead, see below.
 - With `--file-changed-*`, the name check runs first, so files outside the filter
   never cost a commits request.
 - The session `meta` records `filename` and `extension`. `--resume` with other
   filters warns: the terms already done were searched with the old ones.
+
+### Without a term: every file by name
+
+```bash
+# Download every .env file of the instance, to search it offline
+gitlab-harvester -u ... -t ... -b all --filename '*.env' --download-files --to-zip
+gitlab-harvester -u ... -t ... --extension tf --project-filter infra/* --download-files
+```
+
+With `--filename`/`--extension` but no term (no `-s`, `-f` or `terms`), the run
+collects every file whose name passes the filters: one hit per file (an empty
+`data`, a `.../-/blob/<branch>/<path>` URL), downloaded with `--download-files`.
+The session term is the filter string, e.g. `filename:*.env` (so `--resume`,
+`--output-separated` and the download directory `filename_.env/files/` work as
+usual).
+
+How the files of a branch are found depends on GitLab's search backend, so
+`--file-listing` chooses:
+
+| `--file-listing` | How | Works on |
+|---|---|---|
+| `search` | the search API with the filters only (`search=filename:*.env`) | backends that take such queries (advanced search); basic search usually returns nothing or an error |
+| `tree` | the repository tree API, recursive (one request per 100 entries, `--index-rpm`) | any GitLab |
+| `auto` (default) | the search first; a branch with no results or an error is listed by the tree, until the search has found files once (then it is trusted) or rejected the query (then only trees are used) | any GitLab |
+
+- The switch is printed once (`File listing: the search API takes filter-only queries
+  here; using it` / `... rejects ...; listing repository trees instead`), and the
+  search summary counts the branches per method (`files listed: 12 branches by
+  search, 7 branches by tree`).
+- The tree costs no search requests, so it isn't held back by GitLab's low search
+  rate limit, but a huge repository takes many pages. `--file-changed-*` and
+  `--project-filter` apply as usual.
 
 ## Downloading the files with hits: --download-files
 
@@ -890,6 +922,7 @@ are URL-encoded. With `--download-files`, a hit whose file was saved also has
 | `-f, --terms-file FILE` | — | file with one term per line |
 | `--filename PATTERN` | — | search only files with this name: exact (`settings.py`, extension included) or a mask with `*` (`*.env`, `config*`) |
 | `--extension EXT` | — | search only files with this extension (`py`, `.py` and `*.py` are the same) |
+| `--file-listing MODE` | `auto` | without a term: find files by `search` (filters only), `tree` or `auto` |
 | `--project-filter PATTERNS` | — | search only indexed projects whose path matches: substring (`k8s`) or mask (`infra/*`), comma-separated |
 | `--index-file FILE` | `<host>_project_index.jsonl` | project index location |
 | `--dump-projects` | off | rebuild the index before searching |

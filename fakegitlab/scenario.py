@@ -106,6 +106,10 @@ class Instance:
     search_context_lines: int = 2
     # Also return files whose path contains the term (Gitlab::FileFinder#find_by_path).
     search_path_matches: bool = True
+    # A blob search of filters only (``filename:*.env``, no term), which depends on
+    # GitLab's search backend: "empty" (no results), "error" (HTTP 400) or
+    # "paths" (one result per file passing the filters, like advanced search).
+    search_filters_only: str = "empty"
     version: str = "17.5.0-fake"
 
 

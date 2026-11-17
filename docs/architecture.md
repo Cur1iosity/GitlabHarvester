@@ -129,6 +129,8 @@ asserts this exact list):
 | 7 | `GET /api/v4/projects` | `first_project_id` (only `-m find-limits` / `--auto-limits` without an index, to pick a project for search probes) | `per_page=20`, `order_by=id`, `sort=desc` | `id`, `empty_repo` |
 | 8 | `GET /api/v4/projects` | `LimitFinder` probe of the other API (`-m find-limits`, `--auto-limits`), not paced, no 429 retries | `per_page=1`, `simple=true` | status, `RateLimit-*`, `Retry-After` |
 | 9 | `GET /api/v4/projects/:id/search` | `LimitFinder` probe of the search API, not paced, no 429 retries | `scope=blobs`, `search=glhprobe<random hex>`, `per_page=1` | status, `RateLimit-*`, `Retry-After` |
+| 10 | `GET /api/v4/projects/:id/search` | `_paths_by_search` (no term, `--file-listing auto/search`) | `scope=blobs`, `search=filename:<pattern> extension:<ext>` (filters only), `ref`, `page`, `per_page=100` | `path` |
+| 11 | `GET /api/v4/projects/:id/repository/tree` | `_paths_by_tree` (no term, `--file-listing auto/tree`) | `ref`, `recursive=true`, `pagination=keyset`, `per_page=100`, then the `Link: rel="next"` URL (`page_token`) | `type` (`blob`), `path` |
 
 `GET /user` (row 1) also gives the user `id` of every token: tokens of one user
 share its rate limits (`GitlabHarvester.token_users`, `tokens_per_user`).

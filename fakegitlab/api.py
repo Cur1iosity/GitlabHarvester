@@ -15,6 +15,7 @@ Endpoint                                                 Notes
 ``GET /api/v4/projects/:id/search?scope=blobs``          case-insensitive literal search, filters
 ``GET /api/v4/projects/:id/repository/commits``          one synthetic commit per file
 ``GET /api/v4/projects/:id/repository/files/:path/raw``  raw file content of a ref
+``GET /api/v4/projects/:id/repository/tree``             ``ref``, ``recursive``, offset or keyset pagination
 =======================================================  ========================================
 
 With ``rate_limits`` in the scenario, requests are counted per user and
@@ -110,6 +111,7 @@ class GitLabApi:
         ("GET", re.compile(r"^/projects/(?P<pid>[^/]+)/search/?$"), "project_search"),
         ("GET", re.compile(r"^/projects/(?P<pid>[^/]+)/repository/commits/?$"), "commits"),
         ("GET", re.compile(r"^/projects/(?P<pid>[^/]+)/repository/files/(?P<file_path>[^/]+)/raw/?$"), "file_raw"),
+        ("GET", re.compile(r"^/projects/(?P<pid>[^/]+)/repository/tree/?$"), "tree"),
     ]
 
     def __init__(self, scenario: Scenario) -> None:
@@ -242,6 +244,72 @@ class GitLabApi:
         files = project.branches.get(ref) if ref else None
         results = self.search_blobs(project, ref, files or {}, search) if files is not None else []
         return self._paginate(request, base_url, results, lambda x: x)
+
+    @staticmethod
+    def _path_result(p: Project, ref: str, files: dict[str, str], path: str) -> dict[str, Any]:
+        """A path-match search result (startline 1, the first bytes as data)."""
+        raw = files[path].encode("utf-8")
+        return {
+            "basename": posixpath.splitext(path)[0],
+            "data": raw[:_PATH_MATCH_DATA_LIMIT].decode("utf-8", errors="ignore"),
+            "path": path,
+            "filename": path,
+            "id": hashlib.sha1(b"blob %d\0" % len(raw) + raw).hexdigest(),
+            "ref": ref,
+            "startline": 1,
+            "project_id": p.id,
+        }
+
+    def _ep_tree(self, request: Request, base_url: str, user: User, pid: str) -> Response:
+        """
+        Repository tree (``GET /projects/:id/repository/tree``): blobs and the
+        directories above them, sorted by path; ``recursive=true`` for the whole
+        tree, else the entries under ``path``. ``pagination=keyset`` pages by
+        ``page_token`` (the last path) with a ``Link: rel="next"`` header.
+        """
+        project = self._get_project(pid)
+        ref = request.args.get("ref") or project.default_branch
+        files = project.branches.get(ref) if ref else None
+        if files is None:
+            raise ApiError(404, "404 Tree Not Found")
+        recursive = (request.args.get("recursive") or "").lower() in ("true", "1")
+        base = (request.args.get("path") or "").strip("/")
+        entries: dict[str, str] = {}
+        for path in files:
+            if base and not path.startswith(base + "/"):
+                continue
+            parts = path.split("/")
+            for depth in range(1, len(parts)):
+                entries.setdefault("/".join(parts[:depth]), "tree")
+            entries[path] = "blob"
+        level = base.count("/") + 1 if base else 0
+        items = sorted((path, kind) for path, kind in entries.items()
+                       if recursive or path.count("/") == level and (not base or path.startswith(base + "/")))
+
+        def serialize(item: tuple[str, str]) -> dict[str, Any]:
+            path, kind = item
+            content = files.get(path, "") if kind == "blob" else path
+            return {
+                "id": hashlib.sha1(content.encode("utf-8")).hexdigest(),
+                "name": path.rsplit("/", 1)[-1],
+                "type": kind,
+                "path": path,
+                "mode": "100644" if kind == "blob" else "040000",
+            }
+
+        if request.args.get("pagination") != "keyset":
+            return self._paginate(request, base_url, items, serialize)
+        inst = self.scenario.instance
+        per_page = min(max(_int_arg(request, "per_page", inst.default_per_page), 1), inst.max_per_page)
+        token = request.args.get("page_token")
+        rest = [i for i in items if token is None or i[0] > token]
+        chunk = rest[:per_page]
+        headers: dict[str, str] = {}
+        if len(rest) > per_page:
+            params = [(k, v) for k, v in request.args.items(multi=True) if k != "page_token"]
+            params.append(("page_token", chunk[-1][0]))
+            headers["Link"] = f'<{base_url.rstrip("/")}{raw_request_path(request)}?{urlencode(params)}>; rel="next"'
+        return json_response([serialize(i) for i in chunk], headers=headers)
 
     def _ep_file_raw(self, request: Request, base_url: str, user: User, pid: str, file_path: str) -> Response:
         """
@@ -524,6 +592,14 @@ class GitLabApi:
         query of filters only (no term) finds nothing.
         """
         term, filters = parse_search_query(term)
+        if filters and not term:
+            mode = self.scenario.instance.search_filters_only
+            if mode == "error":
+                raise ApiError(400, "search term is missing", key="error")
+            if mode == "paths":
+                return [self._path_result(p, ref, files, path) for path in sorted(files)
+                        if all(f.matches(path) for f in filters)]
+            return []
         if filters:
             return [r for r in self.search_blobs(p, ref, files, term) if all(f.matches(r["path"]) for f in filters)]
         if not term:

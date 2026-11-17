@@ -8,6 +8,7 @@ import os
 import threading
 import time
 import weakref
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, IO, Any
@@ -123,6 +124,8 @@ class _BranchTask:
     file_window: TimeWindow | None = None
     file_filter: FileFilter | None = None
     downloader: FileDownloader | None = None
+    # Files-only mode (no term): "auto" | "search" | "tree"; None = term search.
+    file_listing: str | None = None
 
     @property
     def branch(self) -> str:
@@ -198,6 +201,11 @@ class GitlabHarvester:
         self._file_change_cache: dict[tuple[Any, ...], bool] = {}
         # Terms of the last search_keywords() run that had failed (retryable) searches.
         self.incomplete_terms: list[str] = []
+        # Files-only mode, --file-listing auto: "unknown" until the instance has
+        # shown whether its search takes filter-only queries ("search") or not ("tree").
+        self._file_listing_lock = threading.Lock()
+        self._file_listing_state = "unknown"
+        self.file_listing_counts: Counter[str] = Counter()  # branches listed per method
         self._file_change_lock = threading.Lock()
         # What every thread is searching right now (status line, slow-task reports).
         self._active = pool.ActiveTasks()
@@ -1302,6 +1310,11 @@ class GitlabHarvester:
         files = f", files changed {options.file_window.describe()}" if options.file_window else ""
         if options.file_filter:
             files += f", files: {options.file_filter.describe()}"
+        if options.files_only:
+            files += f", no term: every matching file (listing: {options.file_listing})"
+            with self._file_listing_lock:
+                self._file_listing_state = "unknown"
+                self.file_listing_counts = Counter()
         if downloader is not None:
             files += f", {downloader.describe()}"
         terminal_utils.STATUS.write_line(f"Search plan: {terms_text}, {plan.describe()}{files}{parallel}")
@@ -1313,11 +1326,16 @@ class GitlabHarvester:
                 keywords, plan, hit_counter=hit_counter, output=output,
                 progress=progress, checkpoints=True, file_window=options.file_window or None,
                 file_filter=options.file_filter or None,
+                file_listing=options.file_listing if options.files_only else None,
             )
             checks = (f", {terminal_utils.plural(len(self._file_change_cache), 'file check')}"
                       if options.file_window else "")
             incomplete = (f"; INCOMPLETE: {terminal_utils.plural(len(self.incomplete_terms), 'term')} "
                           f"with failed searches, not marked done" if self.incomplete_terms else "")
+            if options.files_only and self.file_listing_counts:
+                listed = ", ".join(f"{terminal_utils.plural(n, 'branch', 'branches')} by {how}"
+                                   for how, n in sorted(self.file_listing_counts.items()))
+                checks += f"; files listed: {listed}"
             progress.finish(
                 f"Search finished: {terms_text} x {terminal_utils.plural(plan.project_count, 'project')}, "
                 f"{terminal_utils.plural(hit_counter - hits_before, 'hit')}{checks} in "
@@ -1391,6 +1409,8 @@ class GitlabHarvester:
     def _search_branch_task(self, task: _BranchTask, name: str,
                             project_url: str) -> tuple[list[dict[str, Any]], str | None]:
         """_search_branch() body, while the task is registered as running."""
+        if task.file_listing is not None:
+            return self._collect_files_task(task, name, project_url)
         project_obj: Project = self._gl.projects.get(task.project["id"], lazy=True)
         path_filter = None
         if task.file_window or task.file_filter:
@@ -1421,6 +1441,129 @@ class GitlabHarvester:
         if retryable:
             failure = f"{name} @ {task.branch}: {describe_api_error(retryable[0])}"
         return hits, failure
+
+    # ------------------------------------------------------------ files-only mode
+
+    def _collect_files_task(self, task: _BranchTask, name: str,
+                            project_url: str) -> tuple[list[dict[str, Any]], str | None]:
+        """
+        Files-only mode (no term): one hit per file of the branch whose name
+        passes the file filters (and --file-changed-*), downloaded with
+        --download-files.
+
+        ``--file-listing``: "search" asks the search API with the filters only
+        (``filename:*.env``), which works where the search backend takes such
+        queries (advanced search); "tree" lists the repository tree (any
+        GitLab, one request per 100 entries); "auto" tries the search and falls
+        back to the tree for a branch with no results or an error, until the
+        search has found files once (then it is trusted) or rejected the query
+        as invalid (then only the tree is used).
+        """
+        errors: list[BaseException] = []
+        mode = task.file_listing or "auto"
+        paths: list[str] | None = None
+        how = "tree"
+        if mode == "search" or (mode == "auto" and self._file_listing_state != "tree"):
+            paths = self._paths_by_search(task, name, errors, strict=mode == "search")
+            how = "search"
+        if paths is None:
+            paths = self._paths_by_tree(task, name, errors)
+            how = "tree"
+        with self._file_listing_lock:
+            self.file_listing_counts[how] += 1
+
+        keep: list[str] = []
+        for path in dict.fromkeys(paths):
+            if task.file_filter and not task.file_filter.matches(path):
+                continue
+            if task.file_window and not self._file_changed_in_window(task.project["id"], task.branch, path,
+                                                                     task.file_window):
+                continue
+            keep.append(path)
+        local = self._download_files(task, name, keep) if task.downloader is not None and keep else {}
+        blob_url = f"{project_url}/-/blob/{quote(task.branch, safe='/')}"
+        hits = []
+        for path in keep:
+            hit: dict[str, Any] = {"url": f"{blob_url}/{quote(path, safe='/')}", "data": ""}
+            if path in local:
+                hit["file"] = local[path]
+            hits.append(hit)
+            self.logger.info("[+] File '%s': %s", task.term, hit["url"])
+        retryable = [e for e in errors if not is_permanent_error(e)]
+        failure = f"{name} @ {task.branch}: {describe_api_error(retryable[0])}" if retryable else None
+        return hits, failure
+
+    def _set_file_listing_state(self, state: str, message: str) -> None:
+        with self._file_listing_lock:
+            if self._file_listing_state == state:
+                return
+            self._file_listing_state = state
+        terminal_utils.STATUS.write_line(message)
+
+    def _paths_by_search(self, task: _BranchTask, name: str, errors: list[BaseException], *,
+                         strict: bool) -> list[str] | None:
+        """
+        Paths from a filter-only blob search of the branch, or None: let the
+        repository tree answer for it (auto mode, see _collect_files_task).
+        """
+        query = task.file_filter.query("").strip() if task.file_filter else ""
+        project_obj: Project = self._gl.projects.get(task.project["id"], lazy=True)
+        found: dict[str, None] = {}
+        page, per_page = 1, 100
+        try:
+            while True:
+                if page > 1:
+                    self._active.set_step(f"page {page}")
+                batch = project_obj.search(scope=SearchScope.BLOBS, ref=task.branch, search=query,
+                                           page=page, per_page=per_page)
+                for x in batch:
+                    if isinstance(x, dict) and x.get("path"):
+                        found.setdefault(x["path"])
+                page += 1
+                if len(batch) < per_page:
+                    break
+        except (gitlab.exceptions.GitlabError, requests.exceptions.RequestException) as e:
+            if strict or is_permanent_error(e):
+                self.logger.warning("Could not search %s @ %s (%s); skipping it, continuing",
+                                    name, task.branch, describe_api_error(e))
+                errors.append(e)
+                return list(found)
+            if getattr(e, "response_code", None) in (400, 422):
+                self._set_file_listing_state(
+                    "tree", "File listing: the search API rejects filter-only queries here "
+                            f"({describe_api_error(e)}); listing repository trees instead")
+            else:
+                self.logger.debug("Filter-only search of %s @ %s failed (%s); listing the tree",
+                                  name, task.branch, describe_api_error(e))
+            return None
+        if found:
+            self._set_file_listing_state(
+                "search", "File listing: the search API takes filter-only queries here; using it")
+            return list(found)
+        if strict or self._file_listing_state == "search":
+            return []
+        return None  # nothing found, and the search hasn't proven itself: ask the tree
+
+    def _paths_by_tree(self, task: _BranchTask, name: str, errors: list[BaseException]) -> list[str]:
+        """Every file (blob) path of the branch from the repository tree API (keyset pagination)."""
+        paths: list[str] = []
+        try:
+            entries = self._gl.http_list(
+                f"/projects/{EncodedId(task.project['id'])}/repository/tree",
+                query_data={"ref": task.branch, "recursive": "true", "per_page": 100, "pagination": "keyset"},
+                iterator=True,
+            )
+            for n, entry in enumerate(entries, 1):
+                if n % 1000 == 0:
+                    self._active.set_step(f"{n:,} tree entries")
+                if isinstance(entry, dict) and entry.get("type") == "blob" and entry.get("path"):
+                    if not task.file_filter or task.file_filter.matches(entry["path"]):
+                        paths.append(entry["path"])
+        except (gitlab.exceptions.GitlabError, requests.exceptions.RequestException) as e:
+            self.logger.warning("Could not list the files of %s @ %s (%s); skipping it, continuing",
+                                name, task.branch, describe_api_error(e))
+            errors.append(e)
+        return paths
 
     def _open_raw_file(self, project_id: Any, branch: str, path: str) -> requests.Response:
         """
@@ -1513,6 +1656,7 @@ class GitlabHarvester:
             checkpoints: bool,
             file_window: TimeWindow | None = None,
             file_filter: FileFilter | None = None,
+            file_listing: str | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         """
         Search ``terms`` over ``plan`` with ``self.workers`` threads.
@@ -1591,7 +1735,7 @@ class GitlabHarvester:
                 for project_no, (project, branches) in enumerate(plan.targets):
                     for branch_no, branch in enumerate(branches):
                         yield _BranchTask(term_no, term, project_no, project, branches, branch_no, file_window,
-                                          file_filter, output.downloader)
+                                          file_filter, output.downloader, file_listing)
 
         def report_slow_tasks() -> None:
             # Main thread only. A search can legitimately run for hours (huge

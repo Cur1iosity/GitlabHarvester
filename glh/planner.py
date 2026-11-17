@@ -47,6 +47,10 @@ class ScanOptions:
             re-checked on every result path.
         project_filter: Patterns of --project-filter (glh/projectfilter.py):
             only indexed projects whose path matches one of them are searched.
+        files_only: No search term: collect every file whose name passes the
+            file filters (the term is the filter string, e.g. ``filename:*.env``).
+        file_listing: How files_only lists the files of a branch: "auto"
+            (filter-only search, else the repository tree), "search", "tree".
     """
     scan_branches: BranchesMode = "default"  # default|all|N
     forks_mode: str = "include"  # skip|include|branch-diff|all-branches
@@ -58,6 +62,8 @@ class ScanOptions:
     filename: str | None = None
     extension: str | None = None
     project_filter: tuple[str, ...] = ()
+    files_only: bool = False
+    file_listing: str = "auto"
 
     @property
     def projects(self) -> ProjectFilter:
