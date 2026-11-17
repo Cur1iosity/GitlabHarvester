@@ -142,6 +142,12 @@ gitlab-harvester -u ... -t ... -s password --index-file acme.jsonl    # custom l
   (`--index-branches`, `--batch-size`) apply only when it is (re)built.
 - If listing fails midway, the index is saved with `"is_completed": false`, and
   later runs warn about it. Rebuild with `--dump-projects`.
+- The same goes for branch listing (`--index-branches all|N`): when an API error
+  (5xx, a timeout, 429 after its retries) cuts a project's branch list, the project
+  keeps the branches fetched so far plus its default branch, so it is still searched.
+  The run warns which projects are affected, and the index is saved with
+  `"is_completed": false` and `"branches_incomplete": N`. No access to a repository
+  (403/404) is not retried and doesn't make the index incomplete.
 - `-bs/--batch-size` (default 100, GitLab's maximum) is the page size for project listing.
 - While an index is being built, a tip in turquoise above the status line says how
   to reuse it (`--index-file <file>`, found automatically from the same directory;
@@ -949,6 +955,8 @@ All files are UTF-8 JSONL: one JSON object per line.
 ```
 
 `forked_from_project` is `{"id": <upstream id>}` for forks and `false` otherwise.
+`branches_incomplete` (in the meta) appears only when branch lists of that many
+projects were cut by API errors; the index is then `"is_completed": false`.
 
 **Session**: one record per line:
 

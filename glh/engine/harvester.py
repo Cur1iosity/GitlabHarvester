@@ -228,6 +228,11 @@ class GitlabHarvester:
     def get_branches(self, project_id: int, per_page: int = 100, *, limit: int | None = None) -> list[str]:
         return self.indexer.get_branches(project_id, per_page, limit=limit)
 
+    def list_branches(self, project_id: int, per_page: int = 100, *,
+                      limit: int | None = None) -> tuple[list[str], bool]:
+        """(branch names, complete): see ProjectIndexer.list_branches."""
+        return self.indexer.list_branches(project_id, per_page, limit=limit)
+
     def build_project_index(self, **kwargs: Any) -> str:
         """See ProjectIndexer.build_project_index (per_page, filename, enforce_dump, branches, …)."""
         return self.indexer.build_project_index(**kwargs)

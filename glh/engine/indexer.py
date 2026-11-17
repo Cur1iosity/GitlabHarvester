@@ -27,7 +27,7 @@ from glh.domain.models import IndexMeta, Project, ProjectIndex
 from glh.domain.timewindow import format_api_time, parse_timestamp, TimeWindow
 from glh.engine import workers as pool
 from glh.gitlab.connection import GitLabConnection
-from glh.gitlab.errors import describe_api_error
+from glh.gitlab.errors import describe_api_error, is_permanent_error
 from glh.ui.formatting import format_duration, plural
 from glh.ui.progress import Progress
 
@@ -208,7 +208,19 @@ class ProjectIndexer:
         Branch names of a project, in API order (GitLab sorts them by name).
 
         Stops after ``limit`` branches (None = all). On an API error the
-        branches fetched so far are returned and the error is logged.
+        branches fetched so far are returned and the error is logged;
+        list_branches() also tells whether the list is complete.
+        """
+        return self.list_branches(project_id, per_page, limit=limit)[0]
+
+    def list_branches(self, project_id: int, per_page: int = 100, *,
+                      limit: int | None = None) -> tuple[list[str], bool]:
+        """
+        (branch names, complete): get_branches() plus whether the listing ran to its end.
+
+        A retryable error (5xx, 429 after its retries, timeout, network) cuts the
+        list: ``complete`` is False. A permanent one (403/404: no access to the
+        repository) leaves nothing to retry, so the list counts as complete.
         """
         gl = self.connection.require()
         branches: list[str] = []
@@ -222,7 +234,7 @@ class ProjectIndexer:
                 for b in batch:
                     branches.append(b.name)
                     if limit is not None and len(branches) >= limit:
-                        return branches
+                        return branches, True
 
                 page += 1
 
@@ -232,9 +244,32 @@ class ProjectIndexer:
                 describe_api_error(e), project_id,
             )
             self.logger.debug("Full branch-listing error for project %s: %s", project_id, e)
+            return branches, is_permanent_error(e)
 
         self.logger.debug("Loaded %s branches for project with ID: %s.", len(branches), project_id)
-        return branches
+        return branches, True
+
+    def _listed_branches(self, project: Project, per_page: int, limit: int | None) -> tuple[list[str], bool]:
+        """
+        The branches of a non-empty project for the index, and whether the list is complete.
+
+        A cut list keeps its default branch: without it a failure on the first page
+        would leave the project with no branches, and the search would skip it.
+        """
+        branches, complete = self.list_branches(project.id, per_page, limit=limit)
+        if not complete and project.default_branch and project.default_branch not in branches:
+            branches.append(project.default_branch)
+        return branches, complete
+
+    def _warn_incomplete_branches(self, incomplete: list[str]) -> None:
+        """One warning for every project whose branch list an API error cut."""
+        if incomplete:
+            shown = ", ".join(incomplete[:5]) + (f" and {len(incomplete) - 5} more" if len(incomplete) > 5 else "")
+            self.logger.warning(
+                "The branch lists of %s are incomplete (GitLab API errors): %s. Their default branch is "
+                "kept, other branches may be missing from the search; --dump-projects rebuilds the index.",
+                plural(len(incomplete), "project"), shown,
+            )
 
     def first_project_id(self) -> Any | None:
         """Id of a non-empty project from the first page of /projects (for search probes)."""
@@ -308,11 +343,10 @@ class ProjectIndexer:
             except (OSError, json.JSONDecodeError):
                 raw = None
             meta = IndexMeta.from_record(raw)
-            if meta.is_completed is False:
+            if meta.incomplete_reason:
                 self.logger.warning(
-                    "Existing project index %s is incomplete (previous build failed). "
-                    "Use --dump-projects to rebuild it.",
-                    filename,
+                    "Existing project index %s is incomplete (%s). Use --dump-projects to rebuild it.",
+                    filename, meta.incomplete_reason,
                 )
             if isinstance(raw, dict):
                 built = (meta.last_activity_after, meta.last_activity_before)
@@ -342,6 +376,7 @@ class ProjectIndexer:
             self.logger.info("Branches mode: limit=%s (slow-ish).", branches)
 
         tmp_out = f"{filename}.branches.tmp"
+        incomplete: list[str] = []  # projects whose branch list an API error cut
         uses_api = branches != "default"
         # Only non-empty repositories cost API calls, so only they are counted.
         to_list = self._count_nonempty_projects(filename) if uses_api else 0
@@ -353,10 +388,10 @@ class ProjectIndexer:
             if not first_line:
                 raise ValueError(f"Project index file is empty: {filename}")
 
+            # The meta is written last: it records whether every branch list is complete.
             meta = json.loads(first_line)
             meta["branches"] = branches
             meta["timestamp_utc"] = datetime.now(UTC).isoformat()
-            _write_jsonl_line(out_fp, meta)
 
             def index_records():
                 for raw in in_fp:
@@ -366,15 +401,15 @@ class ProjectIndexer:
 
             limit = None if branches in ("default", "all") else int(branches)
 
-            def branches_of(record: dict[str, Any]) -> list[str]:
+            def branches_of(record: dict[str, Any]) -> tuple[list[str], bool]:
                 project = Project.from_record(record)
                 if project.empty_repo:
-                    return []
+                    return [], True
                 if not uses_api:
-                    return [project.default_branch] if project.default_branch else []
+                    return ([project.default_branch] if project.default_branch else []), True
                 if self.connection.concurrency <= 1:
                     progress.set_detail(project.path_with_namespace or str(project.id))
-                return self.get_branches(project_id=project.id, per_page=branches_per_page, limit=limit)
+                return self._listed_branches(project, branches_per_page, limit)
 
             if uses_api:
                 progress.start()
@@ -382,7 +417,9 @@ class ProjectIndexer:
                 # Branch lists are fetched in parallel; the index keeps its order.
                 for done in self._imap_ordered(branches_of, index_records(), parallel=uses_api):
                     project = done.item
-                    project["branches"] = done.unwrap()
+                    project["branches"], complete = done.unwrap()
+                    if not complete:
+                        incomplete.append(str(project.get("path_with_namespace") or project["id"]))
                     if uses_api and not project.get("empty_repo", False):
                         listed_branches += len(project["branches"])
                         progress.advance(detail=str(project.get("path_with_namespace") or project["id"]))
@@ -398,9 +435,22 @@ class ProjectIndexer:
                 f"Listed {plural(listed_branches, 'branch', 'branches')} of "
                 f"{plural(progress.done, 'project')} in "
                 f"{format_duration(progress.elapsed)}"
+                + (f" ({len(incomplete)} incomplete)" if incomplete else "")
             )
+        self._warn_incomplete_branches(incomplete)
+        if incomplete:
+            # Not a complete index: reusing it warns, and --dump-projects rebuilds it.
+            meta["is_completed"] = False
+            meta["branches_incomplete"] = len(incomplete)
 
-        os.replace(tmp_out, filename)
+        new_file = f"{filename}.new"
+        with open(new_file, "w", encoding="utf-8") as out_fp:
+            _write_jsonl_line(out_fp, meta)
+            with open(tmp_out, "r", encoding="utf-8") as in_fp:
+                for line in in_fp:
+                    out_fp.write(line)
+        os.remove(tmp_out)
+        os.replace(new_file, filename)
         if branches != "default":
             self.logger.info("Project index enriched with branches (mode=%s): %s", branches, filename)
         return filename
@@ -464,16 +514,19 @@ class ProjectIndexer:
         """
         self.connection.require()
         to_list = sum(1 for p in projects if not p.get("empty_repo", False))
+        incomplete: list[str] = []
 
-        def branches_of(project: dict[str, Any]) -> list[str]:
+        def branches_of(project: dict[str, Any]) -> tuple[list[str], bool]:
             if project.get("empty_repo", False):
-                return []
-            return self.get_branches(project_id=project["id"], per_page=per_page)
+                return [], True
+            return self._listed_branches(Project.from_record(project), per_page, None)
 
         with Progress("Listing branches", total=to_list, unit="projects") as progress:
             for done in self._imap_ordered(branches_of, projects):
                 project = done.item
-                project["branches"] = done.unwrap()
+                project["branches"], complete = done.unwrap()
+                if not complete:
+                    incomplete.append(str(project.get("path_with_namespace") or project["id"]))
                 if not project.get("empty_repo", False):
                     progress.advance(detail=str(project.get("path_with_namespace") or project.get("web_url", "")))
 
@@ -482,6 +535,7 @@ class ProjectIndexer:
                 f"{format_duration(progress.elapsed)}"
             )
 
+        self._warn_incomplete_branches(incomplete)
         self.logger.info("Loaded branches for %s projects in %s seconds.", len(projects), round(elapsed, 2))
 
         return projects

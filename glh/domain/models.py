@@ -182,6 +182,8 @@ class IndexMeta:
     is_completed: bool | None = None
     # "default" | "all" | N: added when branches are listed into the index.
     branches: str | int | None = None
+    # Projects whose branch list an API error cut (only written when there are any).
+    branches_incomplete: int | None = None
 
     @classmethod
     def from_record(cls, record: Any) -> "IndexMeta":
@@ -203,10 +205,11 @@ class IndexMeta:
             last_activity_before=_str(record.get("last_activity_before")),
             is_completed=completed if isinstance(completed, bool) else None,
             branches=branches if isinstance(branches, (str, int)) and not isinstance(branches, bool) else None,
+            branches_incomplete=_int(record.get("branches_incomplete")),
         )
 
     def to_record(self) -> dict[str, Any]:
-        """The meta record this version writes (``branches`` only when set)."""
+        """The meta record this version writes (``branches``, ``branches_incomplete`` only when set)."""
         record: dict[str, Any] = {
             "type": "meta",
             "source": self.source,
@@ -222,7 +225,18 @@ class IndexMeta:
         }
         if self.branches is not None:
             record["branches"] = self.branches
+        if self.branches_incomplete is not None:
+            record["branches_incomplete"] = self.branches_incomplete
         return record
+
+    @property
+    def incomplete_reason(self) -> str | None:
+        """Why the index is incomplete ("listing failed", "branch lists of N projects failed"); None if it isn't."""
+        if self.is_completed is not False:
+            return None
+        if self.branches_incomplete:
+            return f"branch lists of {self.branches_incomplete} project{'s' if self.branches_incomplete != 1 else ''} failed"
+        return "listing failed"
 
     @property
     def built_at(self) -> datetime | None:

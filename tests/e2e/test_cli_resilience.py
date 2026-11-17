@@ -248,7 +248,9 @@ def test_flaky_scenario_completes(fake_gitlab: FakeGitLab, run_cli, tmp_path: Pa
                    check=True)
     s = Session.load(tmp_path / "s.jsonl")
     assert s.of_type("summary")
-    assert 102 not in s.project_ids()  # branches listing failed -> nothing to scan
+    # Its branch listing failed: the default branch is still searched.
+    assert any(r.arg("ref") == "main" for r in fake_gitlab.api_requests("project_search", path=r"/projects/102/"))
+    assert "branch lists of 1 project are incomplete" in proc.stdout + proc.stderr
     applied = {name for r in fake_gitlab.requests for name in r.faults}
     assert applied == {"projects-rate-limited", "payments-branches-unavailable", "terraform-search-slow",
                        "web-app-search-garbage"}

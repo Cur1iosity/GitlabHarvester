@@ -223,7 +223,8 @@ gitlab-harvester -m convert --input-file inventory.jsonl --output-file inventory
 Each line holds `id`, `web_url`, `path_with_namespace`, `default_branch`,
 `empty_repo`, `forked_from_project`, `created_at`, `last_activity_at` and, if
 requested, `branches`. The first line is a `meta` record: `projects_count`, the
-build time, and `is_completed` (false if the listing stopped on an API error).
+build time, and `is_completed` (false if the listing of projects or of some
+project's branches stopped on an API error; `branches_incomplete` counts the latter).
 
 The same file serves later searches: pass it with `--index-file` and it is reused
 as is (add `--dump-projects` to rebuild it). While an index is being built, a

@@ -107,3 +107,12 @@ def test_index_meta_of_anything():
     assert meta.built_at == datetime(2024, 6, 10, 12, tzinfo=timezone.utc)
     assert meta.window and meta.window.describe() == "since 2024-06-01"
     assert not IndexMeta().window
+
+
+def test_index_meta_branches_incomplete():
+    meta = IndexMeta.from_record({"is_completed": False, "branches": "all", "branches_incomplete": 3})
+    assert meta.branches_incomplete == 3 and meta.incomplete_reason == "branch lists of 3 projects failed"
+    assert list(meta.to_record())[-2:] == ["branches", "branches_incomplete"]
+    assert IndexMeta(is_completed=False).incomplete_reason == "listing failed"
+    assert IndexMeta(is_completed=True).incomplete_reason is None
+    assert "branches_incomplete" not in IndexMeta(branches="all").to_record()
