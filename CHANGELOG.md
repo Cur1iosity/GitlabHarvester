@@ -41,6 +41,9 @@ All notable changes to GitlabHarvester are documented here. The format follows
 - Use cases "Search only in specific files" and "Save the files with hits for deeper
   analysis" in `docs/USE_CASES.md`; `docs/usage.md` documents the filters, the
   downloads and the output layout.
+- README: a "use cases at a glance" picture (`docs/assets/use-cases.svg`): the
+  scenarios of `docs/USE_CASES.md` as branches with their main flags and what the
+  shortcuts expand to. Regenerate it with `python docs/assets/make_use_cases_svg.py`.
 
 ### Changed
 
