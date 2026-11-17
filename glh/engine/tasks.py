@@ -4,9 +4,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 from glh.domain.file_filter import FileFilter
+from glh.domain.models import Project
 from glh.domain.timewindow import TimeWindow
 from glh.output.downloads import FileDownloader
 
@@ -18,7 +18,7 @@ class BranchTask:
     term_no: int
     term: str
     project_no: int
-    project: dict[str, Any]
+    project: Project
     branches: tuple[str, ...]
     branch_no: int
     file_window: TimeWindow | None = None
@@ -33,4 +33,4 @@ class BranchTask:
 
     @property
     def project_name(self) -> str:
-        return self.project.get("path_with_namespace", self.project["web_url"])
+        return self.project.name

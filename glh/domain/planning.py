@@ -9,11 +9,12 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, Iterable, Mapping
 
 from glh.domain.file_filter import FileFilter
+from glh.domain.models import as_project, Project
 from glh.domain.project_filter import ProjectFilter
-from glh.domain.timewindow import format_bound, parse_timestamp, TimeWindow
+from glh.domain.timewindow import format_bound, TimeWindow
 
 BranchesMode = str | int  # "default" | "all" | int
 
@@ -87,7 +88,7 @@ class ScanOptions:
         return FileFilter(self.filename, self.extension)
 
 
-def is_active_since(project: dict[str, Any], started_from: datetime | None) -> bool:
+def is_active_since(project: Project, started_from: datetime | None) -> bool:
     """
     Check whether a project had activity at or after ``started_from``.
 
@@ -96,13 +97,13 @@ def is_active_since(project: dict[str, Any], started_from: datetime | None) -> b
     """
     if started_from is None:
         return True
-    last_activity = parse_timestamp(project.get("last_activity_at"))
+    last_activity = project.last_activity
     if last_activity is None:
         return True
     return last_activity >= started_from
 
 
-def is_active_before(project: dict[str, Any], active_before: datetime | None) -> bool:
+def is_active_before(project: Project, active_before: datetime | None) -> bool:
     """
     Check whether a project's last activity is at or before ``active_before``.
 
@@ -110,62 +111,24 @@ def is_active_before(project: dict[str, Any], active_before: datetime | None) ->
     """
     if active_before is None:
         return True
-    last_activity = parse_timestamp(project.get("last_activity_at"))
+    last_activity = project.last_activity
     if last_activity is None:
         return True
     return last_activity <= active_before
 
 
-def is_fork_project(project: dict[str, Any]) -> bool:
+def is_fork_project(project: Project | Mapping[str, Any]) -> bool:
     """
-    Determine whether the given project represents a fork.
-
-    The function checks for explicit upstream relationship indicators
-    commonly stored in the project index:
-
-    - `upstream_project_id` – direct reference to the original project,
-    - `forked_from_project` – GitLab attribute present on forked repositories.
-
-    Args:
-        project: Project dictionary loaded from the project index.
-
-    Returns:
-        True if the project is identified as a fork, otherwise False.
+    Whether the project is a fork (``forked_from_project`` in the index, or the
+    legacy ``upstream_project_id``); see Project.from_record().
     """
-    upstream_id = project.get("upstream_project_id")
-    if upstream_id:
-        return True
-
-    f = project.get("forked_from_project")
-    return bool(f and f is not False)
+    return as_project(project).is_fork
 
 
-def get_upstream_id(project: dict[str, Any]) -> int | None:
-    """
-    Extract the upstream (source) project ID for a forked project.
+def get_upstream_id(project: Project | Mapping[str, Any]) -> int | None:
+    """The id of the project a fork was forked from, when known; None otherwise."""
+    return as_project(project).upstream_id
 
-    The function attempts to resolve the identifier of the original project
-    using fields commonly stored in the project index:
-
-    1. `upstream_project_id` – explicit normalized reference if present.
-    2. `forked_from_project["id"]` – raw GitLab API structure for forks.
-
-    Args:
-        project: Project dictionary loaded from the project index.
-
-    Returns:
-        Upstream project ID as int if the project is a fork,
-        otherwise None.
-    """
-    upstream_id = project.get("upstream_project_id")
-    if upstream_id:
-        return int(upstream_id)
-
-    f = project.get("forked_from_project")
-    if isinstance(f, dict) and "id" in f:
-        return int(f["id"])
-
-    return None
 
 # Reasons a project is left out of a scan (keys of ScanPlan.skipped).
 SKIP_FILTERED = "filtered"
@@ -181,7 +144,7 @@ SKIP_TOO_RECENT = "too-recent"
 SKIP_NO_BRANCHES = "no-branches"
 
 
-def skip_reason(project: dict[str, Any], options: ScanOptions) -> str | None:
+def skip_reason(project: Project, options: ScanOptions) -> str | None:
     """
     Return why a project is excluded from the search, or None if it is scanned.
 
@@ -194,7 +157,7 @@ def skip_reason(project: dict[str, Any], options: ScanOptions) -> str | None:
     - SKIP_TOO_RECENT: projects active after options.active_before are skipped.
 
     Args:
-        project: Project dictionary from the project index.
+        project: Project of the index.
         options: ScanOptions defining fork-handling and activity rules.
 
     Returns:
@@ -202,9 +165,9 @@ def skip_reason(project: dict[str, Any], options: ScanOptions) -> str | None:
     """
     if options.project_filter and not options.projects.matches(project):
         return SKIP_FILTERED
-    if project.get("empty_repo", False):
+    if project.empty_repo:
         return SKIP_EMPTY
-    if is_fork_project(project) and options.forks_mode == "skip":
+    if project.is_fork and options.forks_mode == "skip":
         return SKIP_FORK
     if not is_active_since(project, options.started_from):
         return SKIP_INACTIVE
@@ -213,14 +176,14 @@ def skip_reason(project: dict[str, Any], options: ScanOptions) -> str | None:
     return None
 
 
-def should_scan_project(project: dict[str, Any], options: ScanOptions) -> bool:
+def should_scan_project(project: Project, options: ScanOptions) -> bool:
     """
     Determine whether a project should be included in the search process.
 
     See skip_reason() for the rules.
 
     Args:
-        project: Project dictionary from the project index.
+        project: Project of the index.
         options: ScanOptions defining fork-handling rules.
 
     Returns:
@@ -229,7 +192,7 @@ def should_scan_project(project: dict[str, Any], options: ScanOptions) -> bool:
     return skip_reason(project, options) is None
 
 
-def select_branches_from_index(project: dict[str, Any], mode: BranchesMode) -> list[str]:
+def select_branches_from_index(project: Project, mode: BranchesMode) -> list[str]:
     """
     Select a subset of branches for scanning based on the chosen scan mode.
 
@@ -246,16 +209,15 @@ def select_branches_from_index(project: dict[str, Any], mode: BranchesMode) -> l
       when available (default + N-1 others).
 
     Args:
-        project: Project entry from the index containing "branches" and
-            "default_branch" fields.
+        project: Project of the index (its branches and default branch).
         mode: Branch selection mode: "default", "all", or positive integer.
 
     Returns:
         List of branch names selected for scanning. May be empty if no
         branches are available and default_branch is not defined.
     """
-    branches = project.get("branches") or []
-    default_branch = project.get("default_branch")
+    branches = list(project.branch_names)
+    default_branch = project.default_branch
 
     if mode == "all":
         return list(branches)
@@ -280,8 +242,8 @@ def select_branches_from_index(project: dict[str, Any], mode: BranchesMode) -> l
 
 
 def select_fork_branches_diff(
-        fork_project: dict[str, Any],
-        upstream_project: dict[str, Any] | None,
+        fork_project: Project,
+        upstream_project: Project | None,
         scan_mode: BranchesMode,
         base_branches: tuple[str, ...],
 ) -> list[str]:
@@ -307,12 +269,12 @@ def select_fork_branches_diff(
         Ordered list of branch names selected for scanning according to
         diff strategy and scan_mode limits.
     """
-    fork_branches = set(fork_project.get("branches") or [])
-    upstream_branches = set(upstream_project.get("branches") or []) if upstream_project else set()
+    fork_branches = set(fork_project.branch_names)
+    upstream_branches = set(upstream_project.branch_names) if upstream_project else set()
 
     selected: list[str] = []
 
-    default_branch = fork_project.get("default_branch")
+    default_branch = fork_project.default_branch
     if default_branch and default_branch in fork_branches:
         selected.append(default_branch)
 
@@ -333,9 +295,9 @@ def select_fork_branches_diff(
 
 
 def branches_to_scan(
-    project: dict[str, Any],
+    project: Project,
     options: ScanOptions,
-    projects_by_id: dict[int, dict[str, Any]] | None = None,
+    projects_by_id: Mapping[int, Project] | None = None,
 ) -> list[str]:
     """
     Determine which branches should be scanned for a given project.
@@ -354,22 +316,22 @@ def branches_to_scan(
     select_branches_from_index() behavior.
 
     Args:
-        project: Project entry from the index.
+        project: Project of the index.
         options: ScanOptions controlling branch scope and fork behavior.
-        projects_by_id: Optional mapping of project_id -> project entry,
+        projects_by_id: Optional mapping of project_id -> Project,
             used to resolve upstream projects for forks in "branch-diff" mode.
 
     Returns:
         List of branch names to scan for the project. The list may be empty if
         no branch information is available.
     """
-    is_fork = is_fork_project(project)
+    is_fork = project.is_fork
 
     if is_fork and options.forks_mode == "all-branches":
-        return list(project.get("branches") or [])
+        return list(project.branch_names)
 
     if is_fork and options.forks_mode == "branch-diff":
-        upstream_id = get_upstream_id(project)
+        upstream_id = project.upstream_id
         upstream = projects_by_id.get(upstream_id) if (projects_by_id and upstream_id) else None
 
         selected = select_fork_branches_diff(
@@ -402,13 +364,13 @@ class ScanPlan:
         project_filter: Patterns used for SKIP_FILTERED (for messages).
         projects_by_id: Index lookup used for fork/upstream resolution.
     """
-    targets: tuple[tuple[dict[str, Any], tuple[str, ...]], ...]
+    targets: tuple[tuple[Project, tuple[str, ...]], ...]
     total_projects: int
     skipped: dict[str, int] = field(default_factory=dict)
     started_from: datetime | None = None
     active_before: datetime | None = None
     project_filter: tuple[str, ...] = ()
-    projects_by_id: dict[int, dict[str, Any]] = field(default_factory=dict, repr=False)
+    projects_by_id: dict[int, Project] = field(default_factory=dict, repr=False)
 
     @property
     def project_count(self) -> int:
@@ -447,7 +409,7 @@ class ScanPlan:
         return reasons
 
 
-def build_scan_plan(projects: list[dict[str, Any]], options: ScanOptions) -> ScanPlan:
+def build_scan_plan(projects: Iterable[Project | Mapping[str, Any]], options: ScanOptions) -> ScanPlan:
     """
     Decide once which projects and branches a search scans.
 
@@ -457,14 +419,15 @@ def build_scan_plan(projects: list[dict[str, Any]], options: ScanOptions) -> Sca
     a filter still serves "branch-diff".
 
     Args:
-        projects: The whole project index.
+        projects: The whole project index (Projects, or index records as dicts).
         options: Scan options.
 
     Returns:
         ScanPlan with targets in index order and skip counters.
     """
-    projects_by_id = {int(p["id"]): p for p in projects}
-    targets: list[tuple[dict[str, Any], tuple[str, ...]]] = []
+    projects = [as_project(p) for p in projects]
+    projects_by_id = {p.id: p for p in projects}
+    targets: list[tuple[Project, tuple[str, ...]]] = []
     skipped: Counter[str] = Counter()
 
     for project in projects:

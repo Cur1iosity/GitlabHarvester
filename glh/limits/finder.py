@@ -14,6 +14,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence, TYPE_CHECKING
 import gitlab.exceptions
 import requests.exceptions
 
+from glh.domain.models import Project
 from glh.engine.workers import MAX_WORKERS
 from glh.limits.constants import API_NAMES, DEFAULT_MARGIN, DEFAULT_MAX_REQUESTS, SEARCH, WINDOW
 from glh.limits.probe import LimitProbe, ProbeResponse, ProbeResult, Sender
@@ -68,14 +69,12 @@ def probe_project_from_index(path: str | Path) -> Any | None:
                 if not line:
                     continue
                 try:
-                    project = json.loads(line)
-                except json.JSONDecodeError:
+                    project = Project.from_record(json.loads(line))
+                except (json.JSONDecodeError, ValueError, AttributeError):
                     continue
-                if not isinstance(project, dict) or project.get("id") is None:
-                    continue
-                if not project.get("empty_repo", False):
-                    return project["id"]
-                fallback = fallback if fallback is not None else project["id"]
+                if not project.empty_repo:
+                    return project.id
+                fallback = fallback if fallback is not None else project.id
             return fallback
     except OSError:
         return None

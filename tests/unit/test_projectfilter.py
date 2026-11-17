@@ -5,12 +5,14 @@ from __future__ import annotations
 import pytest
 
 from glh.cli.parser import CliParser
+from glh.domain.models import Project
 from glh.domain.planning import build_scan_plan, ScanOptions, SKIP_FILTERED, skip_reason
 from glh.domain.project_filter import parse_patterns, project_path, ProjectFilter, ProjectFilterError
 
 
-def project(path: str, pid: int = 1, **extra) -> dict:
-    return {"id": pid, "path_with_namespace": path, "default_branch": "main", "branches": ["main"], **extra}
+def project(path: str, pid: int = 1, **extra) -> Project:
+    return Project.from_record({"id": pid, "path_with_namespace": path, "default_branch": "main",
+                                "branches": ["main"], **extra})
 
 
 @pytest.mark.parametrize(("patterns", "path", "matches"), [
@@ -34,7 +36,7 @@ def test_matching(patterns, path, matches):
 def test_empty_filter_passes_everything_and_web_url_is_a_fallback():
     assert not ProjectFilter() and ProjectFilter().matches(project("x"))
     old = {"id": 1, "web_url": "https://gitlab.test/infra/k8s-deploy"}
-    assert project_path(old) == "infra/k8s-deploy" and ProjectFilter(("k8s",)).matches(old)
+    assert project_path(old) == "infra/k8s-deploy" and ProjectFilter(("k8s",)).matches(Project.from_record(old))
     assert ProjectFilter(("k8s", "infra/*")).describe() == "k8s, infra/*"
 
 
@@ -57,6 +59,6 @@ def test_scan_plan_skips_and_describes_filtered_projects():
     options = ScanOptions(project_filter=("k8s",))
     assert skip_reason(projects[1], options) == SKIP_FILTERED
     plan = build_scan_plan(projects, options)
-    assert [p["id"] for p, _ in plan.targets] == [1]
+    assert [p.id for p, _ in plan.targets] == [1]
     assert plan.skipped == {SKIP_FILTERED: 1, "empty": 1}
     assert "1 not matching --project-filter k8s" in plan.describe()

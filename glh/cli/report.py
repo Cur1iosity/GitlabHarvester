@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from glh.cli.commands.common import UTC
-from glh.domain.timewindow import parse_timestamp, TimeWindow
+from glh.domain.models import IndexMeta
 from glh.engine.harvester import GitlabHarvester
 from glh.ui import statusline
 from glh.ui.blocks import compact_block, format_block, Row
@@ -29,36 +29,35 @@ def format_age(seconds: float) -> str:
     return f"{int(seconds // 86400)} days ago"
 
 
-def index_rows(path: str | Path, meta: dict[str, Any], projects: int,
+def index_rows(path: str | Path, meta: IndexMeta, projects: int,
                now: datetime | None = None) -> list[Row]:
     """The rows of the 'Index' block: which index a search uses and how current it is."""
-    built = parse_timestamp(meta.get("timestamp_utc"))
+    built = meta.built_at
     if built is None:
         when = "unknown"
     else:
         built_utc = built.astimezone(UTC)
         age = format_age(((now or datetime.now(UTC)) - built_utc).total_seconds())
         when = f"{built_utc:%Y-%m-%d %H:%M:%S} UTC ({age})"
-    window = TimeWindow(parse_timestamp(meta.get("last_activity_after")),
-                        parse_timestamp(meta.get("last_activity_before")))
+    window = meta.window
     return [
         ("file", str(path)),
         ("built", when),
         ("projects", f"{projects:,}"),
-        ("branches", str(meta["branches"]) if meta.get("branches") is not None else ""),
+        ("branches", str(meta.branches) if meta.branches is not None else ""),
         ("active", f"projects active {window.describe()}" if window else ""),
         ("status", "INCOMPLETE: listing failed; rebuild with --dump-projects"
-         if meta.get("is_completed") is False else ""),
+         if meta.is_completed is False else ""),
     ]
 
 
-def describe_index(path: str | Path, meta: dict[str, Any], projects: int, now: datetime | None = None) -> str:
+def describe_index(path: str | Path, meta: IndexMeta, projects: int, now: datetime | None = None) -> str:
     """
     One line about the index a search uses, so the user can judge how current it is.
 
     Example: "Index: idx.jsonl (built 2024-06-01 12:00:00 UTC, 3 h ago; 9 projects, branches: all)".
     """
-    built = parse_timestamp(meta.get("timestamp_utc"))
+    built = meta.built_at
     if built is None:
         when = "build time unknown"
     else:
@@ -67,13 +66,12 @@ def describe_index(path: str | Path, meta: dict[str, Any], projects: int, now: d
         when = f"built {built_utc:%Y-%m-%d %H:%M:%S} UTC, {format_age((now - built_utc).total_seconds())}"
 
     details = [plural(projects, "project")]
-    if meta.get("branches") is not None:
-        details.append(f"branches: {meta['branches']}")
-    window = TimeWindow(parse_timestamp(meta.get("last_activity_after")),
-                        parse_timestamp(meta.get("last_activity_before")))
+    if meta.branches is not None:
+        details.append(f"branches: {meta.branches}")
+    window = meta.window
     if window:
         details.append(f"projects active {window.describe()}")
-    if meta.get("is_completed") is False:
+    if meta.is_completed is False:
         details.append("INCOMPLETE (listing failed; rebuild with --dump-projects)")
     return f"Index: {path} ({when}; {', '.join(details)})"
 

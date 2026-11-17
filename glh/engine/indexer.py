@@ -21,8 +21,9 @@ from typing import Any, Callable, IO, Iterable, Iterator
 
 import gitlab.exceptions
 import requests.exceptions
-from gitlab.v4.objects import Project
+from gitlab.v4.objects import Project as GitlabProject
 
+from glh.domain.models import IndexMeta, Project, ProjectIndex
 from glh.domain.timewindow import format_api_time, parse_timestamp, TimeWindow
 from glh.engine import workers as pool
 from glh.gitlab.connection import GitLabConnection
@@ -89,20 +90,20 @@ class ProjectIndexer:
         """
         gl = self.connection.require()
 
-        def reduce_project_fields(project: Project) -> dict[str, Any]:
-            """Extract a minimal set of relevant fields from a GitLab project object."""
-            return {
-                "id": project.id,
-                "web_url": project.web_url,
-                "path_with_namespace": project.path_with_namespace,
-                "default_branch": getattr(project, "default_branch", None),
-                "empty_repo": project.empty_repo,
-                "forked_from_project": {"id": fork_data["id"]}
-                if (fork_data := getattr(project, "forked_from_project", None))
-                else False,
-                "created_at": project.created_at,
-                "last_activity_at": project.last_activity_at,
-            }
+        def reduce_project_fields(project: GitlabProject) -> dict[str, Any]:
+            """The index record of a GitLab project object (the few fields a search needs)."""
+            fork_data = getattr(project, "forked_from_project", None)
+            return Project(
+                id=project.id,
+                web_url=project.web_url,
+                path_with_namespace=project.path_with_namespace,
+                default_branch=getattr(project, "default_branch", None),
+                empty_repo=project.empty_repo,
+                is_fork=bool(fork_data),
+                upstream_id=fork_data["id"] if fork_data else None,
+                created_at=project.created_at,
+                last_activity_at=project.last_activity_at,
+            ).to_record()
 
         projects: list[dict[str, Any]] = []
         pr_counter = 0
@@ -125,7 +126,7 @@ class ProjectIndexer:
         window_text = f" (active {window.describe()})" if window else ""
         progress = Progress(f"Indexing {display_host}{window_text}", unit="projects").start()
 
-        def fetch_page(number: int) -> list[Project]:
+        def fetch_page(number: int) -> list[GitlabProject]:
             client = self.connection.gl or gl
             return client.projects.list(page=number, per_page=per_page, order_by=order_by, sort=sort, **activity)
 
@@ -179,21 +180,20 @@ class ProjectIndexer:
                 fp.close()
 
             if filename:
-                meta = {
-                    "type": "meta",
-                    "source": host,
-                    "timestamp_utc": datetime.now(UTC).isoformat(),
-                    "projects_count": pr_counter,
-                    "elapsed_seconds": elapsed,
-                    "order_by": order_by,
-                    "sort": sort,
-                    "per_page": per_page,
-                    "last_activity_after": activity.get("last_activity_after"),
-                    "last_activity_before": activity.get("last_activity_before"),
-                    "is_completed": is_completed,
-                }
+                meta = IndexMeta(
+                    source=host,
+                    timestamp_utc=datetime.now(UTC).isoformat(),
+                    projects_count=pr_counter,
+                    elapsed_seconds=elapsed,
+                    order_by=order_by,
+                    sort=sort,
+                    per_page=per_page,
+                    last_activity_after=activity.get("last_activity_after"),
+                    last_activity_before=activity.get("last_activity_before"),
+                    is_completed=is_completed,
+                )
                 with open(filename, "w", encoding="utf-8") as out_fp:
-                    _write_jsonl_line(out_fp, meta)
+                    _write_jsonl_line(out_fp, meta.to_record())
                     with open(tmp_filename, "r", encoding="utf-8") as in_fp:
                         for line in in_fp:
                             out_fp.write(line)
@@ -304,17 +304,18 @@ class ProjectIndexer:
             self.logger.info("Instance Project Index already exists: %s.", filename)
             try:
                 with open(filename, encoding="utf-8") as fp:
-                    meta = json.loads(fp.readline() or "{}")
+                    raw = json.loads(fp.readline() or "{}")
             except (OSError, json.JSONDecodeError):
-                meta = {}
-            if isinstance(meta, dict) and meta.get("is_completed") is False:
+                raw = None
+            meta = IndexMeta.from_record(raw)
+            if meta.is_completed is False:
                 self.logger.warning(
                     "Existing project index %s is incomplete (previous build failed). "
                     "Use --dump-projects to rebuild it.",
                     filename,
                 )
-            if isinstance(meta, dict):
-                built = (meta.get("last_activity_after"), meta.get("last_activity_before"))
+            if isinstance(raw, dict):
+                built = (meta.last_activity_after, meta.last_activity_before)
                 wanted = tuple(format_api_time(v) if v is not None else None
                                for v in (last_activity_after, last_activity_before))
                 if built != wanted:
@@ -365,15 +366,15 @@ class ProjectIndexer:
 
             limit = None if branches in ("default", "all") else int(branches)
 
-            def branches_of(project: dict[str, Any]) -> list[str]:
-                if project.get("empty_repo", False):
+            def branches_of(record: dict[str, Any]) -> list[str]:
+                project = Project.from_record(record)
+                if project.empty_repo:
                     return []
                 if not uses_api:
-                    default_branch = project.get("default_branch")
-                    return [default_branch] if default_branch else []
+                    return [project.default_branch] if project.default_branch else []
                 if self.connection.concurrency <= 1:
-                    progress.set_detail(str(project.get("path_with_namespace", project["id"])))
-                return self.get_branches(project_id=int(project["id"]), per_page=branches_per_page, limit=limit)
+                    progress.set_detail(project.path_with_namespace or str(project.id))
+                return self.get_branches(project_id=project.id, per_page=branches_per_page, limit=limit)
 
             if uses_api:
                 progress.start()
@@ -384,7 +385,7 @@ class ProjectIndexer:
                     project["branches"] = done.unwrap()
                     if uses_api and not project.get("empty_repo", False):
                         listed_branches += len(project["branches"])
-                        progress.advance(detail=str(project.get("path_with_namespace", project["id"])))
+                        progress.advance(detail=str(project.get("path_with_namespace") or project["id"]))
 
                     _write_jsonl_line(out_fp, project)
             except BaseException:
@@ -513,6 +514,46 @@ class ProjectIndexer:
         self.logger.info("Instance Project Index initialization completed.")
         return projects, meta
 
+    def load_index(self, filename: str | None) -> ProjectIndex | None:
+        """
+        Load an index file as objects (about half the memory of
+        load_projects_from_file()); None if it is missing or empty.
+
+        Broken lines and records without a project id are skipped with a warning.
+        """
+        if not filename:
+            return None
+        try:
+            with open(filename, encoding="utf-8") as fp:
+                first_line = fp.readline()
+                if not first_line:
+                    self.logger.warning(f"File '{filename}' is empty.")
+                    return None
+                meta = IndexMeta.from_record(json.loads(first_line))
+                projects: list[Project] = []
+                for line in fp:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        projects.append(Project.from_record(json.loads(line)))
+                    except (json.JSONDecodeError, ValueError, AttributeError) as e:
+                        self.logger.warning(f"Broken JSON line in '{filename}': {e}")
+        except FileNotFoundError:
+            self.logger.debug(f"File with project data ['{filename}'] was not found.")
+            return None
+        self._log_loaded(filename, len(projects), meta.timestamp_utc)
+        return ProjectIndex(meta=meta, projects=projects)
+
+    def _log_loaded(self, filename: str, count: int, timestamp: Any) -> None:
+        ts_str = "unknown"
+        if timestamp:
+            try:
+                ts_str = datetime.fromisoformat(timestamp).strftime("%d-%m-%Y %H:%M:%S")
+            except Exception:
+                ts_str = timestamp
+        self.logger.info(f"Loaded {count} projects from '{filename}'. Collecting time: {ts_str}")
+
     def load_projects_from_file(self, filename: str | None = None) -> dict[str, Any]:
         """
         Load an index file: {"meta": {...}, "projects": [...]}; {} if it is missing or empty.
@@ -544,18 +585,7 @@ class ProjectIndexer:
                         self.logger.warning(f"Broken JSON line in '{filename}': {e}")
                         continue
 
-            ts = meta.get("timestamp_utc")
-            ts_str = "unknown"
-            if ts:
-                try:
-                    ts_str = datetime.fromisoformat(ts).strftime("%d-%m-%Y %H:%M:%S")
-                except Exception:
-                    ts_str = ts
-
-            self.logger.info(
-                f"Loaded {len(projects)} projects from '{filename}'. "
-                f"Collecting time: {ts_str}"
-            )
+            self._log_loaded(filename, len(projects), meta.get("timestamp_utc") if isinstance(meta, dict) else None)
 
             return {
                 "meta": meta,

@@ -77,12 +77,12 @@ class FileLister:
         for path in dict.fromkeys(paths):
             if task.file_filter and not task.file_filter.matches(path):
                 continue
-            if task.file_window and not self.changes.changed(task.project["id"], task.branch, path,
+            if task.file_window and not self.changes.changed(task.project.id, task.branch, path,
                                                              task.file_window):
                 continue
             keep.append(path)
         local = self.fetcher.download(task, keep) if task.downloader is not None and keep else {}
-        blob_url = f"{task.project['web_url']}/-/blob/{quote(task.branch, safe='/')}"
+        blob_url = f"{task.project.web_url}/-/blob/{quote(task.branch, safe='/')}"
         hits = []
         for path in keep:
             hit: dict[str, Any] = {"url": f"{blob_url}/{quote(path, safe='/')}", "data": ""}
@@ -104,7 +104,7 @@ class FileLister:
     def _paths_by_search(self, task: BranchTask, errors: list[BaseException], *, strict: bool) -> list[str] | None:
         """Paths from a filter-only blob search of the branch, or None: let the tree answer for it (auto)."""
         query = task.file_filter.query("").strip() if task.file_filter else ""
-        project = self.connection.require().projects.get(task.project["id"], lazy=True)
+        project = self.connection.require().projects.get(task.project.id, lazy=True)
         found: dict[str, None] = {}
         page, per_page = 1, 100
         try:
@@ -145,7 +145,7 @@ class FileLister:
         paths: list[str] = []
         try:
             entries = self.connection.require().http_list(
-                f"/projects/{EncodedId(task.project['id'])}/repository/tree",
+                f"/projects/{EncodedId(task.project.id)}/repository/tree",
                 query_data={"ref": task.branch, "recursive": "true", "per_page": 100, "pagination": "keyset"},
                 iterator=True,
             )

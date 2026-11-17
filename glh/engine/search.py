@@ -15,15 +15,16 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Callable, IO
+from typing import Any, Callable, IO, Iterable, Mapping
 from urllib.parse import quote
 
 import gitlab.exceptions
 import requests.exceptions
 from gitlab.const import SearchScope
-from gitlab.v4.objects import Project
+from gitlab.v4.objects import Project as GitlabProject
 
 from glh.domain.file_filter import FileFilter
+from glh.domain.models import Project
 from glh.domain.planning import branches_to_scan, build_scan_plan, ScanOptions, ScanPlan
 from glh.domain.timewindow import TimeWindow
 from glh.engine import workers as pool
@@ -94,7 +95,7 @@ class SearchEngine:
 
     def search_keywords(
             self,
-            projects: list[dict[str, Any]],
+            projects: Iterable[Project | Mapping[str, Any]],
             keywords: list[str],
             *,
             options: ScanOptions,
@@ -109,7 +110,7 @@ class SearchEngine:
         skip, --started-from or empty repositories never inflate the totals.
 
         Args:
-            projects: The whole project index.
+            projects: The whole project index (Projects, or index records as dicts).
             keywords: Search terms.
             options: Scan options (branches, forks, activity, file filters).
             hit_counter: Initial hit counter.
@@ -156,7 +157,7 @@ class SearchEngine:
 
     def search_keyword(
             self,
-            projects: list[dict[str, Any]],
+            projects: Iterable[Project | Mapping[str, Any]],
             term: str,
             *,
             options: ScanOptions,
@@ -212,14 +213,14 @@ class SearchEngine:
     def _search_term(self, task: BranchTask) -> tuple[list[dict[str, Any]], str | None]:
         """search_branch() for a term, while the task is registered as running."""
         name = task.project_name
-        project_obj: Project = self.connection.require().projects.get(task.project["id"], lazy=True)
+        project_obj: GitlabProject = self.connection.require().projects.get(task.project.id, lazy=True)
         path_filter = self._path_filter(task) if task.file_window or task.file_filter else None
         on_files = self._file_saver(task) if task.downloader is not None else None
         query = task.file_filter.query(task.term) if task.file_filter else None
         errors: list[BaseException] = []
         try:
             hits, _ = self.scan_branch(project=project_obj, branch=task.branch, term=task.term,
-                                       project_url=task.project["web_url"], path_filter=path_filter,
+                                       project_url=task.project.web_url, path_filter=path_filter,
                                        errors=errors, query=query, on_files=on_files)
         except (gitlab.exceptions.GitlabError, requests.exceptions.RequestException) as e:
             self.logger.warning("Could not search %s @ %s (%s); skipping it, continuing",
@@ -238,7 +239,7 @@ class SearchEngine:
         def keep(path: str) -> bool:
             if task.file_filter and not task.file_filter.matches(path):
                 return False
-            return not task.file_window or self.changes.changed(task.project["id"], task.branch, path,
+            return not task.file_window or self.changes.changed(task.project.id, task.branch, path,
                                                                 task.file_window)
         return keep
 
@@ -394,10 +395,10 @@ class SearchEngine:
                 term_hits[task.term_no] += found
                 if s_res:
                     out = {
-                        "project_id": project["id"],
-                        "web_url": project["web_url"],
-                        "created_at": project.get("created_at"),
-                        "last_activity_at": project.get("last_activity_at"),
+                        "project_id": project.id,
+                        "web_url": project.web_url,
+                        "created_at": project.created_at,
+                        "last_activity_at": project.last_activity_at,
                         "project_search_result": s_res,
                     }
                     results[task.term_no].append((task.project_no, out))
@@ -425,11 +426,11 @@ class SearchEngine:
 
     def scan_project(
             self,
-            project: dict[str, Any],
+            project: Project,
             term: str,
             *,
             options: ScanOptions,
-            projects_by_id: dict[int, dict[str, Any]] | None = None,
+            projects_by_id: Mapping[int, Project] | None = None,
             branches: list[str] | tuple[str, ...] | None = None,
             progress: Progress | None = None,
             hit_counter: int = 0,
@@ -442,8 +443,8 @@ class SearchEngine:
         """
         res: list[dict[str, Any]] = []
 
-        project_obj: Project = self.connection.require().projects.get(project["id"], lazy=True)
-        project_url: str = project["web_url"]
+        project_obj: GitlabProject = self.connection.require().projects.get(project.id, lazy=True)
+        project_url: str = project.web_url
 
         if branches is None:
             branches = branches_to_scan(project, options, projects_by_id=projects_by_id)
@@ -451,7 +452,7 @@ class SearchEngine:
             return [], hit_counter
 
         br_len: int = len(branches)
-        name = project.get("path_with_namespace", project_url)
+        name = project.name
 
         for num, b in enumerate(branches):
             if progress is not None:
@@ -477,7 +478,7 @@ class SearchEngine:
 
     def scan_branch(
             self,
-            project: Project,
+            project: GitlabProject,
             branch: str,
             term: str,
             project_url: str,

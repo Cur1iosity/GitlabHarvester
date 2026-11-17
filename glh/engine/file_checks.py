@@ -100,9 +100,9 @@ class FileFetcher:
             self.active.set_step(f"downloading {path.rsplit('/', 1)[-1]}")
             try:
                 local = downloader.save(
-                    project_id=task.project["id"], project_path=name, branch=task.branch, term=task.term,
+                    project_id=task.project.id, project_path=name, branch=task.branch, term=task.term,
                     path=path,
-                    fetch=lambda p=path: self.connection.open_raw_file(task.project["id"], task.branch, p),
+                    fetch=lambda p=path: self.connection.open_raw_file(task.project.id, task.branch, p),
                 )
             except (gitlab.exceptions.GitlabError, requests.exceptions.RequestException, OSError) as e:
                 downloader.failed()

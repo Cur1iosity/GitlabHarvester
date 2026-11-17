@@ -25,11 +25,12 @@ from __future__ import annotations
 import logging
 from collections import Counter
 from datetime import datetime
-from typing import Any, Callable, IO
+from typing import Any, Callable, IO, Iterable, Mapping
 
 from gitlab import Gitlab
-from gitlab.v4.objects import Project
+from gitlab.v4.objects import Project as GitlabProject
 
+from glh.domain.models import as_project, Project, ProjectIndex
 from glh.domain.planning import ScanOptions, ScanPlan
 from glh.engine.factory import HarvesterFactory, HarvesterParts, HarvesterSettings
 from glh.gitlab.throttling import Jitter, NO_JITTER
@@ -245,28 +246,37 @@ class GitlabHarvester:
         return self.indexer.initialize_project_list(per_page, filename, enforce_dump)
 
     def load_projects_from_file(self, filename: str | None = None) -> dict[str, Any]:
+        """{"meta": {...}, "projects": [{...}, ...]} as dicts; {} if missing or empty (see load_index)."""
         return self.indexer.load_projects_from_file(filename)
+
+    def load_index(self, filename: str | None) -> ProjectIndex | None:
+        """The index file as objects (IndexMeta, Project); None if missing or empty."""
+        return self.indexer.load_index(filename)
 
     # ----------------------------------------------------------------- search
 
-    def search_keywords(self, projects: list[dict[str, Any]], keywords: list[str], *, options: ScanOptions,
+    def search_keywords(self, projects: Iterable[Project | Mapping[str, Any]], keywords: list[str], *,
+                        options: ScanOptions,
                         hit_counter: int = 0, session_file: IO | None = None,
                         output: SearchOutput | None = None) -> tuple[list[dict[str, Any]], int]:
         """See SearchEngine.search_keywords."""
         return self.search.search_keywords(projects, keywords, options=options, hit_counter=hit_counter,
                                            session_file=session_file, output=output)
 
-    def search_keyword(self, projects: list[dict[str, Any]], term: str, *, options: ScanOptions,
+    def search_keyword(self, projects: Iterable[Project | Mapping[str, Any]], term: str, *, options: ScanOptions,
                        hit_counter: int = 0, session_file: IO | None = None, plan: ScanPlan | None = None,
                        progress: Progress | None = None,
                        output: SearchOutput | None = None) -> tuple[list[dict[str, Any]], int]:
         return self.search.search_keyword(projects, term, options=options, hit_counter=hit_counter,
                                           session_file=session_file, plan=plan, progress=progress, output=output)
 
-    def scan_project(self, project: dict[str, Any], term: str, *, options: ScanOptions,
+    def scan_project(self, project: Project | Mapping[str, Any], term: str, *, options: ScanOptions,
+                     projects_by_id: Mapping[int, Project | Mapping[str, Any]] | None = None,
                      **kwargs: Any) -> tuple[list[dict[str, Any]], int]:
-        return self.search.scan_project(project, term, options=options, **kwargs)
+        """Search one project (a Project or an index record) for a term; see SearchEngine.scan_project."""
+        by_id = {k: as_project(v) for k, v in projects_by_id.items()} if projects_by_id else None
+        return self.search.scan_project(as_project(project), term, options=options, projects_by_id=by_id, **kwargs)
 
-    def scan_branch(self, project: Project, branch: str, term: str, project_url: str,
+    def scan_branch(self, project: GitlabProject, branch: str, term: str, project_url: str,
                     **kwargs: Any) -> tuple[list[dict], int]:
         return self.search.scan_branch(project, branch, term, project_url, **kwargs)

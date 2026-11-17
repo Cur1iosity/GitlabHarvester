@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -9,13 +10,8 @@ import pytest
 import requests
 
 from fakegitlab import FakeGitLab
-from tests.helpers import (
-    DEFAULT_BRANCH_OF,
-    DEFAULT_BRANCHES,
-    DEFAULT_PROJECT_IDS_DESC,
-    capture_logs,
-    load_index,
-)
+from glh.domain.models import IndexMeta, Project
+from tests.helpers import capture_logs, DEFAULT_BRANCH_OF, DEFAULT_BRANCHES, DEFAULT_PROJECT_IDS_DESC, load_index
 
 
 @pytest.mark.parametrize(("per_page", "requests_expected"), [(3, 4), (4, 4), (9, 2), (100, 2)])
@@ -29,6 +25,44 @@ def test_project_pagination_until_empty_page(fake_gitlab: FakeGitLab, make_harve
     assert meta["is_completed"] is True and meta["projects_count"] == 9 and meta["per_page"] == per_page
     pages = [int(r.arg("page")) for r in fake_gitlab.api_requests("projects")]
     assert pages == list(range(1, requests_expected + 1))
+
+
+@pytest.mark.parametrize("branches", ["default", "all"])
+def test_index_records_round_trip_through_the_models(fake_gitlab: FakeGitLab, make_harvester, tmp_path: Path,
+                                                     branches):
+    # The models read every record the index writer produces without losing a byte.
+    out = tmp_path / "idx.jsonl"
+    harvester = make_harvester()
+    harvester.build_project_index(filename=str(out), branches=branches)
+    meta_line, *project_lines = out.read_text(encoding="utf-8").splitlines()
+    assert json.dumps(IndexMeta.from_record(json.loads(meta_line)).to_record(), ensure_ascii=False) == meta_line
+    for line in project_lines:
+        assert json.dumps(Project.from_record(json.loads(line)).to_record(), ensure_ascii=False) == line
+
+    index = harvester.load_index(str(out))
+    assert index is not None and index.meta.is_completed is True
+    assert [p.to_record() for p in index.projects] == harvester.load_projects_from_file(str(out))["projects"]
+    assert harvester.load_index(str(tmp_path / "missing.jsonl")) is None
+
+
+def test_load_index_skips_broken_lines(make_harvester, tmp_path: Path):
+    out = tmp_path / "idx.jsonl"
+    out.write_text('{"type": "meta"}\n{"id": 1}\nnot json\n{"no": "id"}\n[1, 2]\n\n{"id": 2}\n', encoding="utf-8")
+    index = make_harvester(token="").load_index(str(out))
+    assert index is not None and [p.id for p in index.projects] == [1, 2]
+
+
+def test_enrichment_keeps_keys_the_models_do_not_know(fake_gitlab: FakeGitLab, make_harvester, tmp_path: Path):
+    # Adding branches rewrites the raw records, so an older index keeps its extra keys.
+    out = tmp_path / "idx.jsonl"
+    out.write_text(json.dumps({"type": "meta", "legacy": 1}) + "\n"
+                   + json.dumps({"id": 101, "upstream_project_id": 7, "custom": "x", "default_branch": "main"}) + "\n",
+                   encoding="utf-8")
+    make_harvester().enrich_project_index_with_branches(filename=str(out), branches="default")
+    meta, record = (json.loads(line) for line in out.read_text(encoding="utf-8").splitlines())
+    assert meta["legacy"] == 1 and meta["branches"] == "default"
+    assert record == {"id": 101, "upstream_project_id": 7, "custom": "x", "default_branch": "main",
+                      "branches": ["main"]}
 
 
 def test_index_record_structure(fake_gitlab: FakeGitLab, make_harvester, tmp_path: Path):

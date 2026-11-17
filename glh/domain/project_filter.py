@@ -20,8 +20,9 @@ Other characters are literal (``[`` is not a character class).
 from __future__ import annotations
 
 import re
-from typing import Any
-from urllib.parse import urlsplit
+from typing import Any, Mapping
+
+from glh.domain.models import as_project, Project
 
 
 class ProjectFilterError(ValueError):
@@ -48,13 +49,9 @@ def parse_patterns(value: str) -> tuple[str, ...]:
     return patterns
 
 
-def project_path(project: dict[str, Any]) -> str:
-    """``path_with_namespace`` of an index record (from ``web_url`` for old records)."""
-    path = project.get("path_with_namespace")
-    if isinstance(path, str) and path:
-        return path
-    url = project.get("web_url")
-    return urlsplit(url).path.strip("/") if isinstance(url, str) else ""
+def project_path(project: Project | Mapping[str, Any]) -> str:
+    """``path_with_namespace`` of a project (from ``web_url`` for old records)."""
+    return as_project(project).path
 
 
 class ProjectFilter:
@@ -69,10 +66,10 @@ class ProjectFilter:
     def __bool__(self) -> bool:
         return bool(self.patterns)
 
-    def matches(self, project: dict[str, Any]) -> bool:
+    def matches(self, project: Project) -> bool:
         if not self.patterns:
             return True
-        path = project_path(project)
+        path = project.path
         return any(rx.search(path) for rx in self._compiled)
 
     def describe(self) -> str:

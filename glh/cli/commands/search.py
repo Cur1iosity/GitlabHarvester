@@ -17,6 +17,7 @@ from glh.cli.commands.common import building_index, index_path, load_keywords, r
 from glh.cli.factory import create_harvester, create_run_output, open_session, scan_options
 from glh.cli.report import index_rows, rate_limit_row, report, Summary
 from glh.domain.file_filter import FileFilter
+from glh.domain.models import IndexMeta, ProjectIndex
 from glh.domain.planning import ScanOptions
 from glh.engine.harvester import GitlabHarvester
 from glh.limits.constants import KINDS, SEARCH
@@ -76,9 +77,9 @@ def _search(args: CliArgs, glh: GitlabHarvester, keywords: list[str], summary: S
             last_activity_before=args.index_active_before,
         )
 
-    data = glh.load_projects_from_file(index_file)
-    projects = data.get("projects", [])
-    statusline.STATUS.write_block("Index", index_rows(index_file, data.get("meta") or {}, len(projects)))
+    index = glh.load_index(index_file) or ProjectIndex(IndexMeta(), [])
+    projects = index.projects
+    statusline.STATUS.write_block("Index", index_rows(index_file, index.meta, len(projects)))
     if not projects:
         raise SystemExit(f"Project index is empty: {index_file}")
 
