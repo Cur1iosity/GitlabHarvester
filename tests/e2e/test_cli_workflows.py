@@ -648,3 +648,33 @@ def test_a_wrong_token_or_url_is_one_clear_line_not_a_traceback(fake_gitlab: Fak
     proc = run_cli("-u", "http://127.0.0.1:9", "-t", "x", "-s", "x", "--timeout", "5")
     assert proc.returncode != 0 and "Traceback" not in proc.stderr
     assert "Cannot reach http://127.0.0.1:9 (ConnectionError" in proc.stderr
+
+
+def test_dont_be_boring_changes_nothing_off_a_terminal(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
+    # The scene needs an ANSI terminal: in pipes, files and CI the run looks and writes the same.
+    args = [*gl_args(fake_gitlab), "-s", "password", "--index-file", "idx.jsonl"]
+    plain = run_cli(*args, "--session-file", "a.jsonl", check=True)
+    fun = run_cli(*args, "--session-file", "b.jsonl", "-dbb", check=True)
+    assert "\x1b" not in fun.stdout + fun.stderr
+    hits = [line for line in (tmp_path / "a.jsonl").read_text(encoding="utf-8").splitlines() if '"result"' in line]
+    assert hits == [line for line in (tmp_path / "b.jsonl").read_text(encoding="utf-8").splitlines()
+                    if '"result"' in line]
+    assert len(fun.stdout.splitlines()) == len(plain.stdout.splitlines())
+
+
+def test_branch_diff_on_an_old_index_says_it_compares_names(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
+    run_cli(*gl_args(fake_gitlab), "-m", "dump-index", "--index-file", "idx.jsonl", "-b", "all", check=True)
+    index = tmp_path / "idx.jsonl"
+    records = [json.loads(line) for line in index.read_text(encoding="utf-8").splitlines()]
+    assert all("branch_heads" in r for r in records[1:])
+    # An index from before 1.4.4: branches without their commits.
+    index.write_text("".join(json.dumps({k: v for k, v in r.items() if k != "branch_heads"}) + "\n"
+                             for r in records), encoding="utf-8")
+    old = run_cli(*gl_args(fake_gitlab), "-s", "password", "--index-file", "idx.jsonl", "-b", "all",
+                  "--forks", "branch-diff", "--session-file", "s.jsonl", check=True)
+    assert "forks     2 compared by branch name only" in old.stdout + old.stderr
+    run_cli(*gl_args(fake_gitlab), "-m", "dump-index", "--index-file", "idx.jsonl", "-b", "all", "--dump-projects",
+            check=True)
+    new = run_cli(*gl_args(fake_gitlab), "-s", "password", "--index-file", "idx.jsonl", "-b", "all",
+                  "--forks", "branch-diff", "--session-file", "s2.jsonl", check=True)
+    assert "compared by branch name only" not in new.stdout + new.stderr

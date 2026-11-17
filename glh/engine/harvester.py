@@ -164,6 +164,11 @@ class GitlabHarvester:
         return self.search.incomplete_terms
 
     @property
+    def unsearched(self) -> Counter[str]:
+        """Searches of the last search that could not run (no access, not found), per kind."""
+        return Counter(self.search.unsearched)
+
+    @property
     def file_listing_counts(self) -> Counter[str]:
         """Files-only mode: branches listed per method ('search', 'tree')."""
         return self.search.lister.counts
@@ -228,6 +233,16 @@ class GitlabHarvester:
     def get_branches(self, project_id: int, per_page: int = 100, *, limit: int | None = None) -> list[str]:
         return self.indexer.get_branches(project_id, per_page, limit=limit)
 
+    def list_branches(self, project_id: int, per_page: int = 100, *,
+                      limit: int | None = None) -> tuple[list[str], bool]:
+        """(branch names, complete): see ProjectIndexer.list_branches."""
+        return self.indexer.list_branches(project_id, per_page, limit=limit)
+
+    def list_branch_heads(self, project_id: int, per_page: int = 100, *,
+                          limit: int | None = None) -> tuple[list[tuple[str, str | None]], bool]:
+        """([(branch name, head commit SHA)], complete): see ProjectIndexer.list_branch_heads."""
+        return self.indexer.list_branch_heads(project_id, per_page, limit=limit)
+
     def build_project_index(self, **kwargs: Any) -> str:
         """See ProjectIndexer.build_project_index (per_page, filename, enforce_dump, branches, …)."""
         return self.indexer.build_project_index(**kwargs)
@@ -258,9 +273,11 @@ class GitlabHarvester:
     def search_keywords(self, projects: Iterable[Project | Mapping[str, Any]], keywords: list[str], *,
                         options: ScanOptions,
                         hit_counter: int = 0, session_file: IO | None = None,
-                        output: SearchOutput | None = None) -> tuple[list[dict[str, Any]], int]:
+                        output: SearchOutput | None = None,
+                        keep_results: bool = True) -> tuple[list[dict[str, Any]], int]:
         """See SearchEngine.search_keywords."""
         return self.search.search_keywords(projects, keywords, options=options, hit_counter=hit_counter,
+                                           keep_results=keep_results,
                                            session_file=session_file, output=output)
 
     def search_keyword(self, projects: Iterable[Project | Mapping[str, Any]], term: str, *, options: ScanOptions,

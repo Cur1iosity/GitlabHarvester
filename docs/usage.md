@@ -142,6 +142,12 @@ gitlab-harvester -u ... -t ... -s password --index-file acme.jsonl    # custom l
   (`--index-branches`, `--batch-size`) apply only when it is (re)built.
 - If listing fails midway, the index is saved with `"is_completed": false`, and
   later runs warn about it. Rebuild with `--dump-projects`.
+- The same goes for branch listing (`--index-branches all|N`): when an API error
+  (5xx, a timeout, 429 after its retries) cuts a project's branch list, the project
+  keeps the branches fetched so far plus its default branch, so it is still searched.
+  The run warns which projects are affected, and the index is saved with
+  `"is_completed": false` and `"branches_incomplete": N`. No access to a repository
+  (403/404) is not retried and doesn't make the index incomplete.
 - `-bs/--batch-size` (default 100, GitLab's maximum) is the page size for project listing.
 - While an index is being built, a tip in turquoise above the status line says how
   to reuse it (`--index-file <file>`, found automatically from the same directory;
@@ -175,7 +181,7 @@ case-insensitively:
 - It combines with the other filters (`--active-after`, `--forks skip`, file filters).
   Fork upstreams are still resolved against the whole index for `--forks branch-diff`.
 - The session `meta` stores it (`"project_filter"`), the run journal records it, and
-  `--resume` with another filter warns.
+  `--resume` with another filter is refused (see [Sessions and resume](#sessions-and-resume)).
 
 ## Branches
 
@@ -209,12 +215,19 @@ gitlab-harvester -u ... -t ... -s password -b all --forks branch-diff
 |---|---|
 | `include` (default) | forks are scanned like regular projects |
 | `skip` | forks are not scanned |
-| `branch-diff` | forks: default branch, base branches, and branches missing in the upstream |
+| `branch-diff` | forks: default branch, base branches, and branches that differ from the upstream |
 | `all-branches` | forks: every indexed branch, regardless of `--scan-branches` |
 
 - `branch-diff` avoids re-scanning branches a fork inherited from its upstream.
-  Base branches are always scanned and can be changed with
+  A fork's branch is skipped only when the upstream has a branch of the same name
+  at the same commit; a branch the fork added commits to is scanned, even if the
+  upstream has one of the same name. The index stores every branch's head commit
+  (`branch_heads`) when it lists branches, from the same API responses: no extra
+  requests. Base branches are always scanned and can be changed with
   `--fork-diff-bases main,master,develop,dev`.
+- An index built before 1.4.4 has no branch commits: `branch-diff` then compares
+  branch names only, and the `Search plan` block says so (`forks  N compared by
+  branch name only`). Rebuild the index with `--dump-projects` to compare commits.
 - If the upstream isn't in the index (for example, it isn't visible to the
   token), the fork is scanned with the regular `--scan-branches` rules.
 
@@ -305,7 +318,7 @@ gitlab-harvester -u ... -t ... -s token --filename 'config*' --extension yml
 - With `--file-changed-*`, the name check runs first, so files outside the filter
   never cost a commits request.
 - The session `meta` records `filename` and `extension`. `--resume` with other
-  filters warns: the terms already done were searched with the old ones.
+  filters is refused: the terms already done were searched with the old ones.
 
 ### Without a term: every file by name
 
@@ -347,6 +360,21 @@ gitlab-harvester -u ... -t ... -s password --download-files --session audit
 #    password/files/acme_backend_api-service_main_20261117093000_password_config_settings.py
 gitlab-harvester -u ... -t ... -f words.txt --extension yml --download-files --download-max-size 2M
 ```
+
+Why: a hit is a few lines around the match. With the whole file on disk you can:
+- **read the whole document**: the connection string next to the password, the
+  host it is for, the other keys in the same `.env`;
+- **hand the files to a secret scanner** for a detailed look, offline and without
+  more API requests, e.g. [TruffleHog](https://github.com/trufflesecurity/trufflehog):
+
+  ```bash
+  trufflehog filesystem results/password/files --no-verification
+  ```
+
+  Without `--no-verification`, TruffleHog checks the secrets it finds against the
+  services they belong to, which is a request from your machine to each of them;
+- keep the evidence: `--to-zip` packs the session, the results and the files into
+  one archive.
 
 Every file that produced a hit is saved into the term's `files` directory next to
 the session: `<dir>/<term>/files/` (`results/<term>/files/` with the default session
@@ -629,6 +657,22 @@ gitlab-harvester -u ... -t ... -f words.txt --session audit --resume
 
 - Completed terms are skipped. The term that was in progress is searched again,
   so its hits may appear twice; run `dedup` afterwards.
+- A resumed run must search the same way, or one session would mix two different
+  searches. `--resume` is refused, with nothing written, when any of these differ from
+  the session's `meta`: `--url`, `--scan-branches` (`-b`), `--forks`,
+  `--fork-diff-bases` (with `branch-diff`), `--started-from`, `--active-before`,
+  `--file-changed-after`/`-before`, `--filename`, `--extension`, `--project-filter`,
+  or files by name without a term. The message lists what changed:
+
+  ```
+  Cannot resume audit.jsonl: it was started with other search conditions:
+    --extension       py -> md
+    --project-filter  none -> acme/*
+  ```
+
+  Resume with the original options, or start a new session. Speed and outputs may
+  change: tokens, `--workers`, the rate limits, `--jitter`, the User-Agent,
+  downloads, post-processing.
 - A term is **completed** only if all its searches succeeded. If a search failed with
   an error that may hide hits (HTTP 5xx, 429 after the retries, 401, a timeout, a
   connection error, an invalid response), the run continues, but the term gets a
@@ -638,6 +682,12 @@ gitlab-harvester -u ... -t ... -f words.txt --session audit --resume
   then searches those terms again. 403 and 404 (no access, project or
   branch gone) can't be fixed by retrying: such projects are skipped with a warning and
   don't keep the term open.
+- A done term is not necessarily a covered one. Searches that could not run at all
+  (HTTP 403, HTTP 404) are counted apart from the failed ones: the term's checkpoint
+  gets `"inaccessible"`, `"not_found"` and `"unsearched"` (the first 20, as
+  `group/repo @ branch: HTTP 403 Forbidden`), the `summary` gets the totals, the term
+  line ends with `N searches NOT POSSIBLE: ...`, and the `Results` block has a
+  `NOT SEARCHED` row. A search with full access has none of these.
 - `--final-only` doesn't delete the session JSONL of an incomplete search, so it can
   still be resumed.
 - New records are appended after a `resume` marker. The final `summary` counts
@@ -930,10 +980,17 @@ All files are UTF-8 JSONL: one JSON object per line.
  "elapsed_seconds": 12.3, "order_by": "id", "sort": "desc", "per_page": 100, "is_completed": true, "branches": "all"}
 {"id": 101, "web_url": "https://gitlab.example.com/acme/api", "path_with_namespace": "acme/api",
  "default_branch": "main", "empty_repo": false, "forked_from_project": false,
- "created_at": "...", "last_activity_at": "...", "branches": ["develop", "main"]}
+ "created_at": "...", "last_activity_at": "...", "branches": ["develop", "main"],
+ "branch_heads": {"develop": "4f1c...", "main": "9a2e..."}}
 ```
 
+`branch_heads` (the commit SHA each branch points at) is written when branches are
+listed through the API (`--index-branches all|N`); `--forks branch-diff` compares
+forks with their upstream by it.
+
 `forked_from_project` is `{"id": <upstream id>}` for forks and `false` otherwise.
+`branches_incomplete` (in the meta) appears only when branch lists of that many
+projects were cut by API errors; the index is then `"is_completed": false`.
 
 **Session**: one record per line:
 
@@ -941,9 +998,10 @@ All files are UTF-8 JSONL: one JSON object per line.
 |---|---|
 | `{"type": "meta", ...}` | run parameters: url, index file, branch and fork modes, `started_from`, `filename`, `extension`, `download_files`, number of terms |
 | `{"term": ..., "result": {...}}` | hits of one term in one project (see below) |
-| `{"type": "keyword_done", "term": ..., "hit_counter": N}` | checkpoint after a term; `hit_counter` is cumulative |
+| `{"type": "keyword_done", "term": ..., "hit_counter": N}` | checkpoint after a term; `hit_counter` is cumulative; with searches that could not run, also `inaccessible`, `not_found`, `unsearched` |
+| `{"type": "keyword_incomplete", ..., "failed_searches": N, "failures": [...]}` | a term with failed (retryable) searches: `--resume` searches it again |
 | `{"type": "resume", "done_keywords": N, "remaining_keywords": M}` | start of a resumed run |
-| `{"type": "summary", "hits": N}` | end of a run |
+| `{"type": "summary", "hits": N, "completed": true, ...}` | end of a run; `inaccessible` / `not_found` when searches could not run |
 
 ```json
 {"term": "password", "result": {
@@ -951,7 +1009,7 @@ All files are UTF-8 JSONL: one JSON object per line.
   "created_at": "...", "last_activity_at": "...",
   "project_search_result": [
     {"branch": "main", "branch_search_result": [
-      {"url": "https://gitlab.example.com/acme/api/-/tree/main/config/settings.py#L2",
+      {"url": "https://gitlab.example.com/acme/api/-/blob/main/config/settings.py#L2",
        "data": "DB_HOST = ...\nDB_PASSWORD = ...\n"}]}]}}
 ```
 

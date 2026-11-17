@@ -248,7 +248,9 @@ def test_flaky_scenario_completes(fake_gitlab: FakeGitLab, run_cli, tmp_path: Pa
                    check=True)
     s = Session.load(tmp_path / "s.jsonl")
     assert s.of_type("summary")
-    assert 102 not in s.project_ids()  # branches listing failed -> nothing to scan
+    # Its branch listing failed: the default branch is still searched.
+    assert any(r.arg("ref") == "main" for r in fake_gitlab.api_requests("project_search", path=r"/projects/102/"))
+    assert "branch lists of 1 project are incomplete" in proc.stdout + proc.stderr
     applied = {name for r in fake_gitlab.requests for name in r.faults}
     assert applied == {"projects-rate-limited", "payments-branches-unavailable", "terraform-search-slow",
                        "web-app-search-garbage"}
@@ -338,3 +340,20 @@ def test_rate_limit_is_warned_once_and_counted(fake_gitlab: FakeGitLab, run_cli,
     assert (proc.stdout + proc.stderr).count("GitLab rate limit (HTTP 429)") == 1
     assert row(proc.stdout, "Results", "rate limit").startswith("4 HTTP 429 responses")
     assert "; rate limit 4 HTTP 429 responses" in (tmp_path / "run.log").read_text(encoding="utf-8")
+
+
+def test_searches_without_access_are_reported_as_not_searched(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
+    # 403/404 keep the term done (retrying won't help) but never pass for a complete coverage.
+    fake_gitlab.add_fault({"match": {"path": "^/api/v4/projects/301/search$"},
+                           "response": {"status": 403, "json": {"message": "403 Forbidden"}}})
+    fake_gitlab.add_fault({"match": {"path": "^/api/v4/projects/101/search$"},
+                           "response": {"status": 404, "json": {"message": "404 Project Not Found"}}})
+    proc = run_cli(*gl_args(fake_gitlab), "-s", "password", "--session-file", "s.jsonl", check=True)
+    assert row(proc.stdout, "Results", "NOT SEARCHED").startswith(
+        "2 searches: 1 no access (HTTP 403), 1 not found (HTTP 404)")
+    assert "INCOMPLETE" not in proc.stdout
+    s = Session.load(tmp_path / "s.jsonl")
+    [summary] = s.of_type("summary")
+    assert summary["completed"] is True and (summary["inaccessible"], summary["not_found"]) == (1, 1)
+    assert "2 searches NOT POSSIBLE: 1 no access (HTTP 403), 1 not found (HTTP 404)" in proc.stderr
+    assert load_done_keywords(tmp_path / "s.jsonl") == {"password"}

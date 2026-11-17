@@ -11,7 +11,10 @@ How the files of a branch are found (``--file-listing``):
 - ``tree``: the repository tree (any GitLab, one request per 100 entries);
 - ``auto``: the search first, the tree for a branch with no results or an
   error, until the search has found files once (then it is trusted) or
-  rejected the query as invalid (then only the tree is used).
+  rejected the query as invalid (then only the tree is used). Once trusted, a
+  failed search is a failure of that branch (warned, the term is not marked
+  done, ``--resume`` repeats it), never a fallback to the tree: the tree of a
+  large repository can take hours to list.
 """
 
 from __future__ import annotations
@@ -27,7 +30,7 @@ from gitlab.const import SearchScope
 from gitlab.utils import EncodedId
 
 from glh.engine.file_checks import FileChangeChecker, FileFetcher
-from glh.engine.tasks import BranchTask
+from glh.engine.tasks import BranchOutcome, BranchTask
 from glh.engine.workers import ActiveTasks
 from glh.gitlab.connection import GitLabConnection
 from glh.gitlab.errors import describe_api_error, is_permanent_error
@@ -57,9 +60,8 @@ class FileLister:
             self.state = "unknown"
             self.counts = Counter()
 
-    def collect(self, task: BranchTask) -> tuple[list[Hit], str | None]:
-        """One hit per matching file of the task's branch; (hits, retryable failure or None)."""
-        name = task.project_name
+    def collect(self, task: BranchTask) -> BranchOutcome:
+        """One hit per matching file of the task's branch (and the trouble met, see BranchOutcome)."""
         errors: list[BaseException] = []
         mode = task.file_listing or "auto"
         paths: list[str] | None = None
@@ -88,9 +90,7 @@ class FileLister:
             hit = Hit(url=f"{blob_url}/{quote(path, safe='/')}", file=local.get(path))
             hits.append(hit)
             self.logger.info("[+] File '%s': %s", task.term, hit.url)
-        retryable = [e for e in errors if not is_permanent_error(e)]
-        failure = f"{name} @ {task.branch}: {describe_api_error(retryable[0])}" if retryable else None
-        return hits, failure
+        return BranchOutcome.of(task, hits, errors)
 
     def _set_state(self, state: str, message: str) -> None:
         with self._lock:
@@ -118,7 +118,7 @@ class FileLister:
                 if len(batch) < per_page:
                     break
         except (gitlab.exceptions.GitlabError, requests.exceptions.RequestException) as e:
-            if strict or is_permanent_error(e):
+            if strict or self.state == "search" or is_permanent_error(e):
                 self.logger.warning("Could not search %s @ %s (%s); skipping it, continuing",
                                     task.project_name, task.branch, describe_api_error(e))
                 errors.append(e)
@@ -128,8 +128,8 @@ class FileLister:
                     "tree", "File listing: the search API rejects filter-only queries here "
                             f"({describe_api_error(e)}); listing repository trees instead")
             else:
-                self.logger.debug("Filter-only search of %s @ %s failed (%s); listing the tree",
-                                  task.project_name, task.branch, describe_api_error(e))
+                self.logger.info("Filter-only search of %s @ %s failed (%s); listing its repository tree",
+                                 task.project_name, task.branch, describe_api_error(e))
             return None
         if found:
             self._set_state("search", "File listing: the search API takes filter-only queries here; using it")

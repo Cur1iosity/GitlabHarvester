@@ -46,8 +46,8 @@ def index_rows(path: str | Path, meta: IndexMeta, projects: int,
         ("projects", f"{projects:,}"),
         ("branches", str(meta.branches) if meta.branches is not None else ""),
         ("active", f"projects active {window.describe()}" if window else ""),
-        ("status", "INCOMPLETE: listing failed; rebuild with --dump-projects"
-         if meta.is_completed is False else ""),
+        ("status", f"INCOMPLETE: {meta.incomplete_reason}; rebuild with --dump-projects"
+         if meta.incomplete_reason else ""),
     ]
 
 
@@ -71,8 +71,8 @@ def describe_index(path: str | Path, meta: IndexMeta, projects: int, now: dateti
     window = meta.window
     if window:
         details.append(f"projects active {window.describe()}")
-    if meta.is_completed is False:
-        details.append("INCOMPLETE (listing failed; rebuild with --dump-projects)")
+    if meta.incomplete_reason:
+        details.append(f"INCOMPLETE ({meta.incomplete_reason}; rebuild with --dump-projects)")
     return f"Index: {path} ({when}; {', '.join(details)})"
 
 

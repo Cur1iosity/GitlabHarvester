@@ -149,7 +149,8 @@ glh/
     ├── ansi.py           colors, styles, Windows VT mode
     ├── keys.py           key presses without Enter
     ├── logs.py           ConsoleHandler, build_logger
-    └── journal.py        RunJournal and its singleton JOURNAL
+    ├── journal.py        RunJournal and its singleton JOURNAL
+    └── dont_be_boring.py and remember: --dont-be-boring
 ```
 
 ### 3. Core objects and factories
@@ -234,9 +235,19 @@ The files a run reads and writes are defined once, as frozen slots dataclasses:
   index appends them to the raw records, so keys this version doesn't know
   survive. dedup, convert and the per-term split stream the session as dicts
   for the same reason: they pass through records of any version unchanged.
-- **Memory.** An index of 30,000 projects takes 38.7 MB as dicts and 18.8 MB as
-  `Project` objects (`ProjectIndexer.load_index`). The engine works on
-  `Project`.
+- **RAM and speed.** The engine works on `Project`. An index of 30,000
+  projects with 3 branches each takes 41.0 MB of RAM as dicts and 20.7 MB as
+  `Project` objects (`ProjectIndexer.load_index`). The CLI process peaks at 62 MB
+  of RAM instead of 84 MB, and planning a search is about 25% faster. Loading costs about 0.09 s
+  more, because `Project.from_record` runs once per line and is kept lean for that
+  reason. See the CHANGELOG of 1.4.3 for the measurements.
+- **RAM doesn't grow with the hits.** A project's hits are held in RAM until all its
+  branches are searched (the session has one record per project), then written;
+  the CLI calls `search_keywords(..., keep_results=False)`, so nothing of them
+  stays. RAM is bounded by the projects being searched at the moment (about
+  `--workers` of them), not by the run: with 300,000 hits the process peaks at
+  47 MB of RAM, as with 150,000 (1.4.3: 206 MB and 125 MB); the session file on
+  disk (59 MB for 300,000 hits) is the same either way. The facade keeps returning every hit by default.
 - **Dicts at the facade.** `GitlabHarvester` keeps its dict interface:
   - `search_keywords` and `scan_project` take Projects or index records;
   - they and `scan_branch` return dicts;
@@ -466,7 +477,7 @@ Derived from the engine (`glh/engine/`, `glh/gitlab/`) and the rate-limit probe
 |---|---|---|---|---|
 | 1 | `GET /api/v4/user` | `Gitlab.auth()` in `GitLabConnection.connect` (once per token: `_verify_extra_tokens` checks every token after the first) | none | `id`, `username`, `web_url` (python-gitlab compares `web_url` with the base URL and warns on mismatch) |
 | 2 | `GET /api/v4/projects` | `ProjectIndexer.fetch_projects` | `page`, `per_page`, `order_by=id`, `sort=desc`; `last_activity_after`/`last_activity_before` with `--index-active-*` | `id`, `web_url`, `path_with_namespace`, `default_branch`, `empty_repo`, `forked_from_project.id`, `created_at`, `last_activity_at` |
-| 3 | `GET /api/v4/projects/:id/repository/branches` | `ProjectIndexer.get_branches` (only when index branches mode ≠ `default`) | `page`, `per_page` | `name` |
+| 3 | `GET /api/v4/projects/:id/repository/branches` | `ProjectIndexer.get_branches` (only when index branches mode ≠ `default`) | `page`, `per_page` | `name`, `commit.id` |
 | 4 | `GET /api/v4/projects/:id/search` | `SearchEngine.scan_branch` | `scope=blobs`, `search` (the term, plus `filename:<pattern>` / `extension:<ext>` with `--filename` / `--extension`), `ref`, `page`, `per_page=100` | `path`, `startline`, `data` |
 | 5 | `GET /api/v4/projects/:id/repository/commits` | `FileChangeChecker.changed` (only with `--file-changed-*`) | `ref_name`, `path`, `since`, `until`, `page=1`, `per_page=1` | non-empty list = changed in the window |
 | 6 | `GET /api/v4/projects/:id/repository/files/:file_path/raw` | `GitLabConnection.open_raw_file` for `FileFetcher` (only with `--download-files`), streamed | `ref` (the branch); `file_path` URL-encoded (`/` → `%2F`) | the body (streamed, stops past `--download-max-size`), `Content-Length` if sent |
@@ -565,6 +576,7 @@ Each one is fixed minimally and pinned by tests (all of them fail on the origina
 | Defect | Effect | Fix | Tests |
 |---|---|---|---|
 | `fetch_projects` kept `is_completed=True` after a `GitlabError` mid-listing | A partial index looked complete and was silently reused | Set `is_completed=False`; warn when an existing incomplete index is reused | `test_fetch_projects_api_error_marks_index_incomplete`, `test_error_on_intermediate_page_yields_incomplete_index[*]`, `test_failed_project_listing_is_flagged_incomplete` |
+| Branch listing returned a cut list as if it were complete on a 5xx/timeout (1.4.4) | A failure on the first page left a project with no branches, so the search skipped it; a later page lost the remaining branches; the index looked complete | `list_branches()` reports completeness; a cut list keeps the default branch; the index gets `is_completed=false`, `branches_incomplete=N` and a warning names the projects | `test_branch_listing_errors_are_isolated_per_project`, `test_branch_listing_timeout_does_not_abort_index`, `test_branches_added_in_memory_keep_the_default_branch_on_errors`, `test_flaky_scenario_completes` |
 | `--resume` never skipped anything: `load_done_keywords` read `keyword`, but the harvester writes `term` | Resume re-scanned every keyword | Read `term` (keep `keyword` for compatibility) | `test_reads_keyword_done_records_written_by_harvester`, `test_interrupted_session_resumes_remaining_keywords` |
 | Resume checkpoints weren't flushed | After a hard kill, buffered `keyword_done` records were lost | `flush()` after each `keyword_done` | `test_interrupted_session_resumes_remaining_keywords` |
 | `--scan-branches default` took the *first indexed* branch. GitLab sorts branches by name, so `develop` was scanned instead of `main` | Default-branch scans missed or mis-attributed findings when the index held several branches | Prefer `default_branch` | `test_default_mode_prefers_default_branch_over_name_order`, `test_default_branch_search_results` |

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -30,8 +31,8 @@ HIT_LINE = {
         "last_activity_at": None,
         "project_search_result": [
             {"branch": "main", "branch_search_result": [
-                {"url": "https://gitlab.test/acme/api/-/tree/main/a.py#L1", "data": "password = 1", "file": "x/a.py"},
-                {"url": "https://gitlab.test/acme/api/-/tree/main/b.py#L3", "data": ""},
+                {"url": "https://gitlab.test/acme/api/-/blob/main/a.py#L1", "data": "password = 1", "file": "x/a.py"},
+                {"url": "https://gitlab.test/acme/api/-/blob/main/b.py#L3", "data": ""},
             ]},
             {"branch": "fix/#42", "branch_search_result": [{"url": "u", "data": "d"}]},
         ],
@@ -117,3 +118,60 @@ def test_session_meta_reads_old_and_new_records():
     assert list(SessionMeta().to_record()) == list(META)  # every field, in file order
     assert SummaryRecord.from_record(SUMMARY).incomplete_terms == ("token",)
     assert ResumeRecord.from_record(RESUME).remaining_keywords == 1
+
+
+# --------------------------------------------------------------------------- coverage: 403 / 404
+
+
+def test_a_done_term_counts_what_it_could_not_search():
+    unsearched = [("inaccessible", "g/a @ main: HTTP 403 Forbidden"), ("not_found", "g/b @ dev: HTTP 404 Not Found"),
+                  ("inaccessible", "g/c @ main: HTTP 403 Forbidden")]
+    checkpoint = Checkpoint.for_term("password", 7, "t", [], unsearched)
+    assert checkpoint.done
+    record = checkpoint.to_record()
+    assert record == {"type": "keyword_done", "term": "password", "hit_counter": 7, "timestamp_utc": "t",
+                      "inaccessible": 2, "not_found": 1, "unsearched": [reason for _, reason in unsearched]}
+    assert Checkpoint.from_record(record) == checkpoint
+    # The list is capped like the failures; the counts are not.
+    many = Checkpoint.for_term("t", 0, "t", [], [("not_found", f"g/{i} @ main: 404") for i in range(30)])
+    assert many.not_found == 30 and len(many.unsearched) == 20
+    # An older checkpoint without the keys.
+    assert Checkpoint.from_record({"type": "keyword_done", "term": "x", "hit_counter": 1}).inaccessible == 0
+
+
+def test_the_summary_writes_the_gaps_only_when_there_are_any():
+    plain = SummaryRecord(hits=1, completed=True, elapsed_seconds=1.0, timestamp_utc="t")
+    assert "inaccessible" not in plain.to_record() and "not_found" not in plain.to_record()
+    gaps = SummaryRecord(hits=1, completed=True, elapsed_seconds=1.0, timestamp_utc="t", inaccessible=2, not_found=0)
+    assert list(gaps.to_record())[-2:] == ["inaccessible", "not_found"]
+    assert SummaryRecord.from_record(gaps.to_record()) == gaps
+
+
+# --------------------------------------------------------------------------- --resume: the same search
+
+
+def test_scope_changes_name_what_a_resumed_run_may_not_change():
+    started = SessionMeta(url="https://gitlab.test/", scan_branches="all", forks="branch-diff",
+                          fork_diff_bases="main,dev", filename="*.env", extension=None, project_filter=("infra/*",),
+                          files_only=False, workers=1, search_rpm=10, jitter=(0.0, 0.0), download_files=False)
+    same = replace(started, url="https://gitlab.test", workers=4, search_rpm=60, jitter=(0.01, 0.05),
+                   download_files=True, index_file="other.jsonl", keywords_count=3)
+    assert started.scope_changes(same) == []  # speed, limits and outputs may change
+    changed = replace(same, scan_branches="default", fork_diff_bases="main", extension="py", project_filter=None,
+                      started_from="2024-06-01T00:00:00+00:00")
+    assert started.scope_changes(changed) == [
+        ("scan_branches", "all", "default"), ("fork_diff_bases", "main,dev", "main"),
+        ("started_from", None, "2024-06-01T00:00:00+00:00"), ("extension", None, "py"),
+        ("project_filter", ("infra/*",), None),
+    ]
+    # The bases only matter for branch-diff.
+    include = replace(started, forks="include")
+    assert include.scope_changes(replace(include, fork_diff_bases="x")) == []
+
+
+def test_scope_changes_of_an_older_session_meta():
+    # Written before the filters existed: they were off; unknown other fields are not compared.
+    old = SessionMeta.from_record({"type": "meta", "url": "https://gitlab.test", "scan_branches": "default"})
+    now = SessionMeta(url="https://gitlab.test", scan_branches="default", forks="skip", files_only=False)
+    assert old.scope_changes(now) == []
+    assert old.scope_changes(replace(now, filename="*.env")) == [("filename", None, "*.env")]

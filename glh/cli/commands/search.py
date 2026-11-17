@@ -18,12 +18,11 @@ from glh.cli.factory import create_harvester, create_run_output, open_session, s
 from glh.cli.report import index_rows, rate_limit_row, report, Summary
 from glh.domain.file_filter import FileFilter
 from glh.domain.models import IndexMeta, ProjectIndex
-from glh.domain.planning import ScanOptions
 from glh.engine.harvester import GitlabHarvester
 from glh.limits.constants import KINDS, SEARCH
 from glh.output import archive
 from glh.output.layout import OutputLayout
-from glh.output.records import ResumeRecord, SummaryRecord
+from glh.output.records import INACCESSIBLE, NOT_FOUND, ResumeRecord, SessionMeta, SummaryRecord
 from glh.output.session_reader import load_done_keywords, load_session_meta
 from glh.postprocess.pipeline import run_pipeline
 from glh.postprocess.split import split_session_by_term
@@ -92,7 +91,9 @@ def _search(args: CliArgs, glh: GitlabHarvester, keywords: list[str], summary: S
 
     done_keywords: set[str] = set()
     if args.resume:
-        _warn_changed_file_filter(glh, session_path, options)
+        _check_resume_scope(session_path, session_meta(
+            args, glh, options, index_file=index_file, keywords_count=len(keywords), files_only=files_only,
+            timestamp_utc=""))
         done_keywords = load_done_keywords(session_path)
         if done_keywords:
             keywords = [k for k in keywords if k not in done_keywords]
@@ -117,9 +118,11 @@ def _search(args: CliArgs, glh: GitlabHarvester, keywords: list[str], summary: S
             keywords=keywords,
             options=options,
             output=output,
+            keep_results=False,  # the session file has every hit: memory doesn't grow with them
         )
         search_elapsed = time.perf_counter() - search_started
         incomplete = list(glh.incomplete_terms)
+        unsearched = glh.unsearched
 
         output.summary(SummaryRecord(
             hits=hits,
@@ -127,6 +130,8 @@ def _search(args: CliArgs, glh: GitlabHarvester, keywords: list[str], summary: S
             incomplete_terms=tuple(incomplete),
             elapsed_seconds=round(search_elapsed, 2),
             timestamp_utc=datetime.now(UTC).isoformat(),
+            inaccessible=unsearched[INACCESSIBLE],
+            not_found=unsearched[NOT_FOUND],
         ))
 
     summary.add("hits", f"{hits:,}")
@@ -140,6 +145,13 @@ def _search(args: CliArgs, glh: GitlabHarvester, keywords: list[str], summary: S
         summary.add("INCOMPLETE", [f"searches failed for {len(incomplete)} of {len(keywords)} terms: "
                                    f"{', '.join(repr(t) for t in incomplete)}", "not marked done"])
         summary.note("Repeat the command with --resume to search the incomplete terms again.")
+    if unsearched_total := unsearched[INACCESSIBLE] + unsearched[NOT_FOUND]:
+        # Done (retrying won't help), but not covered: never let it pass as a complete search.
+        kinds = [f"{unsearched[INACCESSIBLE]:,} no access (HTTP 403)" if unsearched[INACCESSIBLE] else "",
+                 f"{unsearched[NOT_FOUND]:,} not found (HTTP 404)" if unsearched[NOT_FOUND] else ""]
+        summary.add("NOT SEARCHED", [f"{plural(unsearched_total, 'search', 'searches')}: "
+                                     f"{', '.join(k for k in kinds if k)}",
+                                     "the session lists them (\"unsearched\" of each term)"])
 
     # Files with hits for --to-zip: read from the session before --final-only may delete it.
     downloaded = list(dict.fromkeys(archive.downloaded_files(session_path))) if args.to_zip else []
@@ -170,26 +182,38 @@ def _zip_results(layout: OutputLayout, paths: list[Path | str], summary: Summary
         JOURNAL.write(f"Archive: missing, not archived: {path}")
 
 
-def _warn_changed_file_filter(glh: GitlabHarvester, session_path: Path, options: ScanOptions) -> None:
+# How a search condition is named when --resume refuses (SessionMeta.scope_changes).
+_SCOPE_NAMES = {"url": "--url", "files_only": "files by name without a term"}
+
+
+def _check_resume_scope(session_path: Path, now: SessionMeta) -> None:
     """
-    --resume with other --filename/--extension/--project-filter than the session's
-    first run: the completed terms were searched in other files or projects, so say so.
+    Refuse --resume when the search conditions differ from the ones the session
+    was started with: its completed terms were searched under the old ones, and
+    one session would mix the results of two different searches. Speed, tokens,
+    limits and outputs may change. A session without a meta record is resumed.
     """
     meta = load_session_meta(session_path)
-    if meta is None:
+    if meta is None or not (changes := meta.scope_changes(now)):
         return
-    before = {"filename": meta.filename, "extension": meta.extension,
-              "project_filter": list(meta.project_filter) if meta.project_filter else meta.project_filter}
-    now = {**options.file_filter.to_meta(), "project_filter": list(options.project_filter) or None}
-    if before != now:
-        def show(values: dict[str, Any]) -> str:
-            return ", ".join(f"{k.replace('_', '-')} {','.join(v) if isinstance(v, list) else v}"
-                             for k, v in values.items() if v) or "none"
-        glh.logger.warning(
-            "Resuming %s with other filters (%s) than it was started with (%s): "
-            "terms already completed were searched with the old filters.",
-            session_path, show(now), show(before),
-        )
+
+    def show(value: Any) -> str:
+        if value is None or value is False:
+            return "none" if value is None else "no"
+        if value is True:
+            return "yes"
+        return ",".join(map(str, value)) if isinstance(value, (list, tuple)) else str(value)
+
+    rows = [(_SCOPE_NAMES.get(name, "--" + name.replace("_", "-")), f"{show(before)} -> {show(after)}")
+            for name, before, after in changes]
+    width = max(len(label) for label, _ in rows)
+    raise SystemExit(
+        f"Cannot resume {session_path}: it was started with other search conditions:\n"
+        + "".join(f"  {label.ljust(width)}  {change}\n" for label, change in rows)
+        + "Its completed terms were searched under the old ones, so the session would mix two different "
+          "searches. Resume with the original options, or start a new session (another --session, or "
+          "without --resume)."
+    )
 
 
 def _separate_output(terms: list[str], layout: OutputLayout, summary: Summary) -> list[Path]:

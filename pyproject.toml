@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=77", "wheel"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "gitlab-harvester"
-version = "1.4.3"
+version = "1.4.4"
 description = "Hunt credentials, tokens and secrets across every repository of a GitLab instance through the API: no cloning, works on GitLab CE. Built for red teams and pentesters: one token, the whole instance, rate limits, jitter and User-Agent rotation to keep the noise down."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -18,19 +18,19 @@ authors = [
 keywords = [
   "gitlab",
   "gitlab-api",
+  "gitlab-ce",
   "code-search",
-  "secret-scanning",
-  "secret-detection",
-  "credential-leak",
-  "leak-detection",
-  "security-audit",
-  "devsecops",
+  "secrets",
+  "credentials",
+  "credential-hunting",
   "pentest",
+  "penetration-testing",
   "red-team",
   "redteam",
-  "osint",
+  "offensive-security",
+  "blue-team",
+  "devsecops",
   "recon",
-  "compliance",
   "cli",
 ]
 
@@ -40,6 +40,8 @@ classifiers = [
   "Intended Audience :: Developers",
   "Intended Audience :: Information Technology",
   "Intended Audience :: System Administrators",
+  "Natural Language :: English",
+  "Operating System :: OS Independent",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
@@ -49,11 +51,13 @@ classifiers = [
   "Topic :: Security",
   "Topic :: Utilities",
   "Topic :: Software Development :: Quality Assurance",
+  "Topic :: Software Development :: Version Control :: Git",
 ]
 
 dependencies = [
   "python-gitlab>=8.0.0",
   "requests>=2.32.0",  # python-gitlab 8.x requires it
+  "urllib3>=1.26",  # imported directly (--insecure silences its warning); comes with requests anyway
 ]
 
 [project.optional-dependencies]
@@ -63,6 +67,7 @@ test = [
   "pytest-httpserver>=1.1.0",
   "PyYAML>=6.0",
   "trustme>=1.0",
+  "Werkzeug>=3.0",  # imported directly by the Fake GitLab (also comes with pytest-httpserver)
 ]
 
 [project.urls]

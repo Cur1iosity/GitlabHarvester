@@ -253,10 +253,14 @@ def select_fork_branches_diff(
     The goal is to reduce redundant scanning by prioritizing:
     1) The fork's default branch (if present),
     2) A predefined set of base branches (e.g., main/master/develop),
-    3) Branches that exist in the fork but not in the upstream project.
+    3) Branches that differ from the upstream: missing there, or pointing at
+       another commit.
 
-    This approach avoids re-scanning branches identical to the upstream
-    while still covering fork-specific changes.
+    A branch is left out only when the upstream has a branch of the same name
+    at the same commit (the index stores every branch's head commit), so its
+    content is the upstream's. With an index without commits (built before
+    1.4.4, see fork_compared_by_name) a branch of the same name counts as the
+    same: commits added to it in the fork are then missed.
 
     Args:
         fork_project: Project entry representing the fork.
@@ -271,6 +275,12 @@ def select_fork_branches_diff(
     """
     fork_branches = set(fork_project.branch_names)
     upstream_branches = set(upstream_project.branch_names) if upstream_project else set()
+    same = fork_branches & upstream_branches
+    fork_heads = fork_project.heads()
+    upstream_heads = upstream_project.heads() if upstream_project else None
+    if fork_heads is not None and upstream_heads is not None:
+        # Same name is not enough: the fork may have added commits to it.
+        same = {b for b in same if fork_heads.get(b) is not None and fork_heads.get(b) == upstream_heads.get(b)}
 
     selected: list[str] = []
 
@@ -282,8 +292,7 @@ def select_fork_branches_diff(
         if b in fork_branches and b not in selected:
             selected.append(b)
 
-    unique = sorted(fork_branches - upstream_branches)
-    for b in unique:
+    for b in sorted(fork_branches - same):
         if b not in selected:
             selected.append(b)
 
@@ -292,6 +301,18 @@ def select_fork_branches_diff(
     if scan_mode == "default":
         return selected[:1]
     return selected[: int(scan_mode)]
+
+
+def fork_compared_by_name(project: Project, options: ScanOptions,
+                          projects_by_id: Mapping[int, Project] | None) -> bool:
+    """
+    True for a fork that --forks branch-diff can compare with its upstream only by
+    branch names: the index has no branch commits for one of them.
+    """
+    if not (project.is_fork and options.forks_mode == "branch-diff" and project.upstream_id and projects_by_id):
+        return False
+    upstream = projects_by_id.get(project.upstream_id)
+    return upstream is not None and (project.branch_heads is None or upstream.branch_heads is None)
 
 
 def branches_to_scan(
@@ -308,7 +329,8 @@ def branches_to_scan(
 
     - "all-branches": scan every indexed branch for forks.
     - "branch-diff": scan fork branches using diff-based selection relative
-      to upstream (default + base branches + fork-unique branches).
+      to upstream (default + base branches + branches that differ from the
+      upstream: missing there or at another commit).
       If upstream is not available in the provided index map, falls back
       to regular branch selection.
 
@@ -363,6 +385,8 @@ class ScanPlan:
         active_before: Activity bound used for SKIP_TOO_RECENT (for messages).
         project_filter: Patterns used for SKIP_FILTERED (for messages).
         projects_by_id: Index lookup used for fork/upstream resolution.
+        forks_by_name: Forks that --forks branch-diff compared with their
+            upstream by branch names only (an index without branch commits).
     """
     targets: tuple[tuple[Project, tuple[str, ...]], ...]
     total_projects: int
@@ -371,6 +395,7 @@ class ScanPlan:
     active_before: datetime | None = None
     project_filter: tuple[str, ...] = ()
     projects_by_id: dict[int, Project] = field(default_factory=dict, repr=False)
+    forks_by_name: int = 0
 
     @property
     def project_count(self) -> int:
@@ -429,6 +454,7 @@ def build_scan_plan(projects: Iterable[Project | Mapping[str, Any]], options: Sc
     projects_by_id = {p.id: p for p in projects}
     targets: list[tuple[Project, tuple[str, ...]]] = []
     skipped: Counter[str] = Counter()
+    by_name = 0
 
     for project in projects:
         reason = skip_reason(project, options)
@@ -441,6 +467,7 @@ def build_scan_plan(projects: Iterable[Project | Mapping[str, Any]], options: Sc
             skipped[reason] += 1
             continue
         targets.append((project, tuple(branches)))
+        by_name += fork_compared_by_name(project, options, projects_by_id)
 
     return ScanPlan(
         targets=tuple(targets),
@@ -450,4 +477,5 @@ def build_scan_plan(projects: Iterable[Project | Mapping[str, Any]], options: Sc
         active_before=options.active_before,
         project_filter=tuple(options.project_filter),
         projects_by_id=projects_by_id,
+        forks_by_name=by_name,
     )

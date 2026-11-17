@@ -99,6 +99,24 @@ def test_index_with_all_branches(fake_gitlab: FakeGitLab, make_harvester, tmp_pa
     assert [r.arg("page") for r in fake_gitlab.api_requests("branches", path=r"/projects/101/")] == ["1", "2", "3"]
 
 
+def test_listed_branches_keep_their_head_commits(fake_gitlab: FakeGitLab, make_harvester, tmp_path: Path):
+    out = tmp_path / "idx.jsonl"
+    glh = make_harvester()
+    glh.build_project_index(filename=str(out), branches="all", branches_per_page=2)
+    by_id = {p["id"]: p for p in load_index(out)[1]}
+    assert list(by_id[101]["branch_heads"]) == DEFAULT_BRANCHES[101]
+    assert all(len(sha) == 40 for sha in by_id[101]["branch_heads"].values())
+    assert by_id[104]["branch_heads"] == {}  # empty repository: no branches, no commits
+    # A fork's branch without commits of its own points at the upstream's commit.
+    assert by_id[201]["branch_heads"]["feature/login-v2"] == by_id[101]["branch_heads"]["feature/login-v2"]
+    assert by_id[201]["branch_heads"]["main"] == by_id[101]["branch_heads"]["main"]
+    assert glh.list_branch_heads(101, per_page=2, limit=1) == ([("develop", by_id[101]["branch_heads"]["develop"])],
+                                                                True)
+    # Back to "default": no listing, so no commits (a stale set doesn't stay).
+    glh.enrich_project_index_with_branches(filename=str(out), branches="default")
+    assert not any("branch_heads" in p for p in load_index(out)[1])
+
+
 def test_index_with_branch_limit(fake_gitlab: FakeGitLab, make_harvester, tmp_path: Path):
     out = tmp_path / "idx.jsonl"
     make_harvester().build_project_index(filename=str(out), branches=2)
@@ -206,11 +224,45 @@ def test_branch_listing_errors_are_isolated_per_project(fake_gitlab: FakeGitLab,
     logs = capture_logs(glh)
     glh.build_project_index(filename=str(out), branches="all", branches_per_page=2)
 
-    by_id = {p["id"]: p["branches"] for p in load_index(out)[1]}
-    assert by_id[102] == []
-    assert by_id[101] == ["develop", "feature/login-v2"]  # first page kept
+    meta, projects = load_index(out)
+    by_id = {p["id"]: p["branches"] for p in projects}
+    # A cut list keeps what was fetched plus the default branch: a failure on the
+    # first page used to leave [] and the search skipped the project.
+    assert by_id[102] == ["main"]
+    assert by_id[101] == ["develop", "feature/login-v2", "main"]
     assert by_id[103] == DEFAULT_BRANCHES[103]
     assert sum("branch list wasn't complete" in m for m in logs.messages(logging.ERROR)) == 2
+    # The index says so: reusing it warns, --dump-projects rebuilds it.
+    assert meta["is_completed"] is False and meta["branches_incomplete"] == 2
+    assert IndexMeta.from_record(meta).incomplete_reason == "branch lists of 2 projects failed"
+    [warning] = [m for m in logs.messages(logging.WARNING) if "incomplete" in m]
+    assert "acme/backend/payments" in warning and "default branch is kept" in warning
+
+    glh.build_project_index(filename=str(out))
+    assert any("incomplete (branch lists of 2 projects failed)" in m for m in logs.messages(logging.WARNING))
+
+
+def test_branch_listing_without_access_is_not_incomplete(fake_gitlab: FakeGitLab, make_harvester, tmp_path: Path):
+    # 403/404 won't change on a rebuild: the index stays complete.
+    fake_gitlab.add_fault({"match": {"path": "^/api/v4/projects/102/repository/branches$"},
+                           "response": {"status": 403, "json": {"message": "403 Forbidden"}}})
+    out = tmp_path / "idx.jsonl"
+    make_harvester().build_project_index(filename=str(out), branches="all")
+    meta, projects = load_index(out)
+    assert meta["is_completed"] is True and "branches_incomplete" not in meta
+    assert {p["id"]: p["branches"] for p in projects}[102] == []
+
+
+def test_branches_added_in_memory_keep_the_default_branch_on_errors(fake_gitlab: FakeGitLab, make_harvester):
+    fake_gitlab.add_fault({"match": {"path": "^/api/v4/projects/102/repository/branches$"},
+                           "response": {"status": 500, "json": {"message": "500"}}})
+    glh = make_harvester()
+    logs = capture_logs(glh)
+    projects = glh.add_branches_to_projects([{"id": 102, "default_branch": "main", "empty_repo": False,
+                                              "path_with_namespace": "acme/backend/payments"},
+                                             {"id": 103, "default_branch": "master", "empty_repo": False}])
+    assert [p["branches"] for p in projects] == [["main"], DEFAULT_BRANCHES[103]]
+    assert any("branch lists of 1 project are incomplete" in m for m in logs.messages(logging.WARNING))
 
 
 def test_branch_listing_timeout_does_not_abort_index(fake_gitlab: FakeGitLab, make_harvester, tmp_path: Path):
@@ -218,6 +270,18 @@ def test_branch_listing_timeout_does_not_abort_index(fake_gitlab: FakeGitLab, ma
                            "response": {"delay": 3}})
     out = tmp_path / "idx.jsonl"
     make_harvester(timeout=1).build_project_index(filename=str(out), branches="all")
-    by_id = {p["id"]: p["branches"] for p in load_index(out)[1]}
-    assert by_id[103] == []
+    meta, projects = load_index(out)
+    by_id = {p["id"]: p["branches"] for p in projects}
+    assert by_id[103] == ["master"]  # the default branch, kept
     assert by_id[101] == DEFAULT_BRANCHES[101]
+    assert meta["is_completed"] is False and meta["branches_incomplete"] == 1
+
+
+def test_list_branches_tells_whether_the_list_is_complete(fake_gitlab: FakeGitLab, make_harvester):
+    fake_gitlab.add_fault({"match": {"path": "^/api/v4/projects/101/repository/branches$", "query": {"page": "2"}},
+                           "response": {"status": 500, "json": {"message": "500"}}})
+    glh = make_harvester()
+    assert glh.list_branches(101, per_page=2) == (["develop", "feature/login-v2"], False)
+    assert glh.get_branches(101, per_page=2) == ["develop", "feature/login-v2"]
+    assert glh.list_branches(103) == (DEFAULT_BRANCHES[103], True)
+    assert glh.list_branches(101, per_page=2, limit=1) == (["develop"], True)

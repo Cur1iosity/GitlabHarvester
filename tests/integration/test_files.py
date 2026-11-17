@@ -41,7 +41,7 @@ def search(glh, projects, terms, *, downloader=None, **opts):
 
 def file_path(hit: dict) -> str:
     """Repository path of a hit, from its link."""
-    tree = unquote(hit["url"].split("/-/tree/", 1)[1].split("#", 1)[0])
+    tree = unquote(hit["url"].split("/-/blob/", 1)[1].split("#", 1)[0])
     return tree[len(hit["branch"]) + 1:]
 
 

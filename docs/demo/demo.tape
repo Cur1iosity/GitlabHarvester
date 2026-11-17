@@ -8,7 +8,7 @@ Output demo/out/demo.gif
 Set Shell "bash"
 Set FontSize 16
 Set Width 1300
-Set Height 900
+Set Height 840
 Set Padding 18
 Set Framerate 24
 Set TypingSpeed 28ms
@@ -28,10 +28,22 @@ Enter
 Wait+Screen@90s /done!/
 Sleep 1s
 
-Type "gitlab-harvester -u https://gitlab.example.com -t $GITLAB_TOKEN -f words.txt -b all --forks branch-diff --session audit"
+Type "gitlab-harvester -u https://gitlab.example.com -t $GITLAB_TOKEN -f words.txt -b all --session loot"
 Sleep 400ms
 Enter
 # The last row of the final 'Results' block (tests/e2e/test_demo_tape.py checks the
 # patterns against the real output, so a change of the console output fails the tests).
-Wait+Screen@90s /session +audit\.jsonl/
+Wait+Screen@90s /session +loot\.jsonl/
 Sleep 3s
+
+# The hits are not just counted: on a clean screen, the first hit of two projects from the session.
+Hide
+Type "clear"
+Enter
+Sleep 500ms
+Show
+Type `jq -nr 'limit(2; inputs.result // empty | .project_search_result[0].branch_search_result[0]) | .url, .data' loot.jsonl`
+Sleep 500ms
+Enter
+Wait+Screen@10s /DB_PASSWORD/
+Sleep 6s

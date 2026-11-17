@@ -28,6 +28,8 @@ from glh.cli.commands.search import run_search
 from glh.domain.timewindow import TimeWindow
 from glh.gitlab import throttling
 from glh.output.downloads import format_size
+from glh.ui import statusline
+from glh.ui.dont_be_boring import Show
 from glh.ui.formatting import format_duration
 from glh.ui.journal import JOURNAL
 from glh.version import get_version
@@ -116,6 +118,8 @@ def run_mode(args: CliArgs, argv: list[str] | None = None) -> None:
     whatever the log level, see glh.ui.journal.RunJournal.
     """
     started = time.perf_counter()
+    if args.dont_be_boring:
+        statusline.STATUS.set_show(Show())
     if args.log_file:
         JOURNAL.open(args.log_file)
         url = f", url={args.url}" if args.url and args.mode in ("search", "dump-index", "find-limits") else ""
@@ -156,3 +160,5 @@ def run_mode(args: CliArgs, argv: list[str] | None = None) -> None:
         JOURNAL.write(f"Run finished in {format_duration(time.perf_counter() - started)}")
     finally:
         JOURNAL.close()
+        if args.dont_be_boring:
+            statusline.STATUS.set_show(None)

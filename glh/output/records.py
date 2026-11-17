@@ -30,6 +30,10 @@ from typing import Any, Iterable, Iterator, Mapping
 from glh.domain.models import Project
 
 KEYWORD_DONE = "keyword_done"
+# Why a search could not run at all (Checkpoint, SummaryRecord, glh.engine.tasks.BranchOutcome).
+INACCESSIBLE = "inaccessible"  # HTTP 403: no access
+NOT_FOUND = "not_found"  # HTTP 404: the project or branch is gone
+
 KEYWORD_INCOMPLETE = "keyword_incomplete"
 # A keyword_incomplete record lists at most this many failed searches.
 MAX_FAILURES = 20
@@ -176,6 +180,11 @@ class Checkpoint:
     """
     A term is finished. ``keyword_done`` is the --resume checkpoint; a term with
     failed (retryable) searches gets ``keyword_incomplete`` and is searched again.
+
+    Searches that could not run at all, no access (HTTP 403) or not found (404),
+    don't keep a term open (retrying won't help) but are counted, so a done term
+    still says what it didn't cover: ``inaccessible``, ``not_found`` and the
+    first MAX_FAILURES of them in ``unsearched`` (written only when there are any).
     """
 
     term: str
@@ -184,11 +193,19 @@ class Checkpoint:
     # Number of failed searches (0: done) and the first MAX_FAILURES of them.
     failed_searches: int = 0
     failures: tuple[str, ...] = ()
+    inaccessible: int = 0
+    not_found: int = 0
+    unsearched: tuple[str, ...] = ()
 
     @classmethod
-    def for_term(cls, term: str, hit_counter: int, timestamp_utc: str, failures: list[str]) -> "Checkpoint":
+    def for_term(cls, term: str, hit_counter: int, timestamp_utc: str, failures: list[str],
+                 unsearched: list[tuple[str, str]] = ()) -> "Checkpoint":
+        """``unsearched``: (INACCESSIBLE or NOT_FOUND, "group/repo @ branch: reason") per branch not searched."""
+        kinds = [kind for kind, _ in unsearched]
         return cls(term=term, hit_counter=hit_counter, timestamp_utc=timestamp_utc,
-                   failed_searches=len(failures), failures=tuple(failures[:MAX_FAILURES]))
+                   failed_searches=len(failures), failures=tuple(failures[:MAX_FAILURES]),
+                   inaccessible=kinds.count(INACCESSIBLE), not_found=kinds.count(NOT_FOUND),
+                   unsearched=tuple(reason for _, reason in unsearched[:MAX_FAILURES]))
 
     @property
     def done(self) -> bool:
@@ -208,9 +225,13 @@ class Checkpoint:
         if record["type"] == KEYWORD_INCOMPLETE:
             failed = max(failed, len(failures), 1)
         timestamp = record.get("timestamp_utc")
+        unsearched = record.get("unsearched")
+        unsearched = tuple(u for u in unsearched if isinstance(u, str)) if isinstance(unsearched, list) else ()
         return cls(term=term, hit_counter=_int(record.get("hit_counter")),
                    timestamp_utc=timestamp if isinstance(timestamp, str) else None,
-                   failed_searches=failed if record["type"] == KEYWORD_INCOMPLETE else 0, failures=failures)
+                   failed_searches=failed if record["type"] == KEYWORD_INCOMPLETE else 0, failures=failures,
+                   inaccessible=_int(record.get("inaccessible")) or 0, not_found=_int(record.get("not_found")) or 0,
+                   unsearched=unsearched)
 
     def to_record(self) -> dict[str, Any]:
         record: dict[str, Any] = {
@@ -222,6 +243,10 @@ class Checkpoint:
         if not self.done:
             record["failed_searches"] = self.failed_searches
             record["failures"] = list(self.failures)
+        if self.inaccessible or self.not_found:
+            record["inaccessible"] = self.inaccessible
+            record["not_found"] = self.not_found
+            record["unsearched"] = list(self.unsearched)
         return record
 
 
@@ -277,6 +302,38 @@ class SessionMeta:
     def to_record(self) -> dict[str, Any]:
         return _typed_record("meta", self)
 
+    def scope_changes(self, now: "SessionMeta") -> list[tuple[str, Any, Any]]:
+        """
+        (field, this session's value, ``now``'s value) for every condition of the
+        search that differs: what was searched, where and in which files. A
+        resumed run must keep them, or one session would mix two different searches.
+        Speed, tokens, limits and outputs may change.
+
+        A field missing from an older session's meta: for SCOPE_FILTERS the option
+        didn't exist yet (= off, compared as None), for the others unknown (skipped).
+        """
+        changes: list[tuple[str, Any, Any]] = []
+        for name in SCOPE_FIELDS:
+            before, after = getattr(self, name), getattr(now, name)
+            if before is None and name not in SCOPE_FILTERS:
+                continue
+            if name == "fork_diff_bases" and not (self.forks == now.forks == "branch-diff"):
+                continue  # used by --forks branch-diff only
+            if name == "url":
+                before, after = before.rstrip("/"), (after or "").rstrip("/")
+            if before != after:
+                changes.append((name, before, after))
+        return changes
+
+
+# Fields of SessionMeta that decide what a session searched (see SessionMeta.scope_changes), in file order.
+SCOPE_FIELDS = ("url", "scan_branches", "forks", "fork_diff_bases", "started_from", "active_before",
+                "file_changed_after", "file_changed_before", "filename", "extension", "project_filter",
+                "files_only")
+# Of these, the filters that are off when an older meta doesn't record them.
+SCOPE_FILTERS = frozenset({"started_from", "active_before", "file_changed_after", "file_changed_before",
+                           "filename", "extension", "project_filter"})
+
 
 @dataclass(frozen=True, slots=True)
 class ResumeRecord:
@@ -298,13 +355,21 @@ class ResumeRecord:
 
 @dataclass(frozen=True, slots=True)
 class SummaryRecord:
-    """The ``summary`` record that ends a run."""
+    """
+    The ``summary`` record that ends a run.
+
+    ``completed``: every search that could run succeeded (else --resume has work).
+    ``inaccessible`` / ``not_found``: searches that could not run at all (HTTP 403 /
+    404) and leave gaps in the coverage; written only when there are any.
+    """
 
     hits: int | None = None
     completed: bool | None = None
     incomplete_terms: tuple[str, ...] = ()
     elapsed_seconds: float | None = None
     timestamp_utc: str | None = None
+    inaccessible: int = 0
+    not_found: int = 0
 
     @classmethod
     def from_record(cls, record: Any) -> "SummaryRecord | None":
@@ -313,7 +378,10 @@ class SummaryRecord:
         return cls(**_fields_of(cls, record))
 
     def to_record(self) -> dict[str, Any]:
-        return _typed_record("summary", self)
+        record = _typed_record("summary", self)
+        if not (self.inaccessible or self.not_found):
+            del record["inaccessible"], record["not_found"]
+        return record
 
 
 SessionRecord = SessionMeta | ResumeRecord | HitRecord | Checkpoint | SummaryRecord

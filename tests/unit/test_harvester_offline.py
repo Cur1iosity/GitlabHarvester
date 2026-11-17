@@ -292,10 +292,10 @@ def test_scan_branch_builds_encoded_links_and_counts_hits():
 
     assert hits == 12
     assert res[0] == {
-        "url": "https://gitlab.test/g/p7/-/tree/fix/%2342%20%C3%BCn%C3%AF/docs/setup%20guide.md#L3",
+        "url": "https://gitlab.test/g/p7/-/blob/fix/%2342%20%C3%BCn%C3%AF/docs/setup%20guide.md#L3",
         "data": "pw",
     }
-    assert res[1]["url"].endswith("/-/tree/fix/%2342%20%C3%BCn%C3%AF/a/b.txt#L1")
+    assert res[1]["url"].endswith("/-/blob/fix/%2342%20%C3%BCn%C3%AF/a/b.txt#L1")
 
 
 def test_scan_branch_sends_only_documented_search_parameters():

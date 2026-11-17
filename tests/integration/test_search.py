@@ -74,7 +74,7 @@ def test_hit_links_resolve_to_file_and_line(fake_gitlab: FakeGitLab, indexed):
 
     for h in session.hits():
         project = scenario.project_by_id(h["project_id"])
-        prefix = f"{fake_gitlab.url}/{project.path_with_namespace}/-/tree/"
+        prefix = f"{fake_gitlab.url}/{project.path_with_namespace}/-/blob/"
         assert h["url"].startswith(prefix)
         parts = urlsplit(h["url"])
         assert parts.fragment.startswith("L") and not parts.query
@@ -92,8 +92,8 @@ def test_special_character_links_are_url_encoded(indexed):
     glh, projects = indexed
     _, _, session = search(glh, projects, ["password"], scan_branches="all")
     urls = {h["url"] for h in session.hits() if h["project_id"] == 103}
-    assert any("/-/tree/fix/%2342-login/docs/setup%20guide.md#L1" in u for u in urls)
-    assert any("/-/tree/%C3%BCn%C3%AFcode-%D0%B2%D0%B5%D1%82%D0%BA%D0%B0/" in u for u in urls)
+    assert any("/-/blob/fix/%2342-login/docs/setup%20guide.md#L1" in u for u in urls)
+    assert any("/-/blob/%C3%BCn%C3%AFcode-%D0%B2%D0%B5%D1%82%D0%BA%D0%B0/" in u for u in urls)
     assert all(u.count("#") == 1 and " " not in u for u in urls)
 
 
@@ -119,6 +119,48 @@ def test_branch_diff_skips_branches_identical_to_upstream(fake_gitlab: FakeGitLa
     assert refs(202) == ["feature/bob", "master"]
     assert refs(203) == ["carol/wip", "develop", "main"]  # upstream invisible -> regular selection
     assert refs(101) == sorted(["develop", "feature/login-v2", "main", "release/1.0+hotfix"])
+
+
+def test_branch_diff_searches_a_branch_the_fork_changed(fake_gitlab: FakeGitLab, make_harvester, tmp_path: Path):
+    # The same branch name on both sides is not enough: the fork's feature/auth has a commit of its own.
+    fake_gitlab.reset(scenario={
+        "users": [{"id": 1, "username": "bot", "tokens": ["dev-token"]}],
+        "projects": [
+            {"id": 1, "path_with_namespace": "acme/app", "default_branch": "main", "branches": {
+                "main": {"files": {"README.md": "app\n"}},
+                "feature/auth": {"inherit": "main", "files": {"auth.py": "def login(): ...\n"}},
+                "feature/ui": {"inherit": "main", "files": {"ui.py": "pass\n"}},
+            }},
+            {"id": 2, "path_with_namespace": "eve/app", "default_branch": "main", "forked_from": 1, "branches": {
+                "main": {"inherit": "1:main"},
+                "feature/auth": {"inherit": "1:feature/auth", "files": {"debug.env": "token=FAKE-leak-0001\n"}},
+                "feature/ui": {"inherit": "1:feature/ui"},
+            }},
+        ],
+    })
+    glh = make_harvester()
+    index = glh.build_project_index(filename=str(tmp_path / "idx.jsonl"), branches="all")
+    projects = glh.load_projects_from_file(index)["projects"]
+    _, hits, session = search(glh, projects, ["token"], scan_branches="all", forks_mode="branch-diff",
+                              fork_diff_bases=("main",))
+    refs = sorted(r.arg("ref") for r in fake_gitlab.api_requests("project_search", path="/projects/2/"))
+    assert refs == ["feature/auth", "main"]  # feature/ui is the upstream's commit: skipped
+    assert hits == 1 and session.project_ids() == [2]
+
+
+def test_without_keep_results_the_hits_only_go_to_the_output(fake_gitlab: FakeGitLab, indexed):
+    # The CLI's way: the session file has every hit, so the engine keeps none of them.
+    glh, projects = indexed
+    fp = io.StringIO()
+    results, hits = glh.search_keywords(projects, ["password", "token"], options=ScanOptions(scan_branches="all"),
+                                        session_file=fp, keep_results=False)
+    assert [r["term"] for r in results] == ["password", "token"] and all(r["result"] == [] for r in results)
+    session = Session([json.loads(x) for x in fp.getvalue().splitlines()])
+    kept, kept_hits = glh.search_keywords(projects, ["password", "token"], options=ScanOptions(scan_branches="all"))
+    assert hits == kept_hits == len(session.hits())
+    assert sorted(h["url"] for h in session.hits()) == sorted(
+        hit["url"] for r in kept for project in r["result"] for branch in project["project_search_result"]
+        for hit in branch["branch_search_result"])
 
 
 def test_search_pagination_over_100_results(fake_gitlab: FakeGitLab, make_harvester):
@@ -178,9 +220,16 @@ def test_partial_success_when_one_project_fails(fake_gitlab: FakeGitLab, indexed
     assert any("ops/infra/terraform/modules" in m for m in logs.messages(logging.WARNING))
 
     if response["status"] in (403, 404):
-        # Permanent: no access / gone. Retrying can't help, so the term is done.
-        assert session.of_type("keyword_done")[0]["hit_counter"] == hits
+        # Permanent: no access / gone. Retrying can't help, so the term is done...
+        [done] = session.of_type("keyword_done")
+        assert done["hit_counter"] == hits
         assert session.of_type("keyword_incomplete") == [] and glh.incomplete_terms == []
+        # ...but not covered: the gap is counted and named.
+        kind = "inaccessible" if response["status"] == 403 else "not_found"
+        assert (done["inaccessible"], done["not_found"]) == ((1, 0) if kind == "inaccessible" else (0, 1))
+        assert done["unsearched"] == [f"ops/infra/terraform/modules @ main: HTTP {response['status']} "
+                                      f"{'Forbidden' if kind == 'inaccessible' else 'Not Found'}"]
+        assert glh.unsearched == {kind: 1}
     else:
         # Retryable: hits may be missing, so --resume must search the term again.
         assert session.of_type("keyword_done") == []
@@ -189,6 +238,14 @@ def test_partial_success_when_one_project_fails(fake_gitlab: FakeGitLab, indexed
         assert incomplete[0]["failed_searches"] == 1 and incomplete[0]["hit_counter"] == hits
         assert incomplete[0]["failures"][0].startswith("ops/infra/terraform/modules @ main: ")
         assert glh.incomplete_terms == ["password"]
+        assert "unsearched" not in incomplete[0] and not glh.unsearched
+
+
+def test_a_search_without_gaps_writes_no_coverage_keys(fake_gitlab: FakeGitLab, indexed):
+    glh, projects = indexed
+    _, _, session = search(glh, projects, ["password"], scan_branches="default")
+    [done] = session.of_type("keyword_done")
+    assert set(done) == {"type", "term", "hit_counter", "timestamp_utc"} and not glh.unsearched
 
 
 def test_error_body_is_hidden_by_default_and_shown_at_debug(fake_gitlab: FakeGitLab, indexed, make_harvester):
@@ -333,8 +390,14 @@ def test_started_from_keeps_inactive_upstream_for_branch_diff(fake_gitlab: FakeG
 # --------------------------------------------------------------------------- progress counts only planned projects
 
 
-def test_progress_counts_only_projects_that_are_scanned(fake_gitlab: FakeGitLab, indexed, monkeypatch):
-    """With filters, every 'N/M projects' shown on the terminal refers to the scan plan, not the index."""
+@pytest.mark.parametrize("ansi", [False, True], ids=["one-line", "panel"])
+def test_progress_counts_only_projects_that_are_scanned(fake_gitlab: FakeGitLab, indexed, monkeypatch, ansi):
+    """
+    With filters, every 'N/M projects' shown on the terminal refers to the scan plan, not the index.
+
+    ``ansi`` is set explicitly: a fake terminal counts as ANSI-capable on POSIX but
+    not on Windows, and the status is then a multi-line panel instead of one line.
+    """
     import re
     from datetime import datetime, timezone
 
@@ -342,7 +405,8 @@ def test_progress_counts_only_projects_that_are_scanned(fake_gitlab: FakeGitLab,
 
     glh, projects = indexed
     tty = FakeStream(True)
-    status = StatusLine(tty, columns=lambda: 400, ticker=False, refresh_interval=0)  # draw every update
+    status = StatusLine(tty, columns=lambda: 400, ticker=False, refresh_interval=0,  # draw every update
+                        ansi=ansi)
     monkeypatch.setattr(statusline, "STATUS", status)
 
     since = datetime(2024, 6, 2, tzinfo=timezone.utc)
@@ -359,9 +423,18 @@ def test_progress_counts_only_projects_that_are_scanned(fake_gitlab: FakeGitLab,
     assert (plan["terms"], plan["projects"], plan["branches"]) == (["2"], ["2 of 9"], ["4"])
     assert plan["skipped"] == ["1 empty", "3 forks", "3 inactive since 2024-06-02"]
 
+    counts = {m.group(2) for m in re.finditer(r"(\d+)/(\d+) projects", out)}
+    assert counts == {"2"}, out
+    if ansi:
+        # The panel: one row per counter, the task below them.
+        # (the label column is as wide as the labels shown: "running" comes and goes)
+        assert re.search(r"\x1b\[2K  term +2/2 projects \(100%\)", out)
+        assert re.search(r"\x1b\[2K  total +3/4 \(75%\)", out)
+        assert "ops/infra/terraform/modules @ main" in out
+        assert re.search(r"Search finished: 2 terms x 2 projects, \d+ hits? in ", out)
+        assert out.endswith("\n")
+        return
     frames = [f.strip() for f in out.split("\r") if "projects (" in f]
-    counts = {m.group(2) for f in frames for m in re.finditer(r"(\d+)/(\d+) projects", f)}
-    assert counts == {"2"}, frames
     assert any(f.startswith("Searching 'token' (2/2) | term 2/2 projects (100%)") for f in frames)
     # Two terms: per-term and overall counters ("total" counts projects x terms).
     assert any(" | total 3/4 (75%) " in f for f in frames)

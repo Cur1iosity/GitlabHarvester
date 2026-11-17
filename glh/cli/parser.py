@@ -67,6 +67,7 @@ class CliParser:
             # Help goes to stdout: the banner must be encodable there.
             description=f"{get_banner(sys.stdout)}\nSearch GitLab instances for sensitive data, secrets, and patterns "
                         f"across projects and branches using a local project index.",
+            epilog="And remember: --dont-be-boring.",
         )
 
         parser.add_argument(
@@ -182,6 +183,10 @@ class CliParser:
         parser.add_argument("--log-level", choices=("ERROR", "WARN", "INFO"), default="WARN", help="Console log level.")
         parser.add_argument("--debug", action=argparse.BooleanOptionalAction, default=False,
                             help="Enable debug logging (overrides --log-level).")
+        secret = parser.add_argument("-dbb", "--dont-be-boring", action=argparse.BooleanOptionalAction, default=False)
+        # Set afterwards: Python 3.10's BooleanOptionalAction appends " (default: ...)" to the
+        # help it is given, and a SUPPRESS with that suffix no longer hides the option.
+        secret.help = argparse.SUPPRESS
 
         # Mode
         parser.add_argument(
@@ -535,4 +540,5 @@ class CliParser:
             hash_algo=ns.hash_algo,
             normalize_hits=ns.normalize_hits,
             sort_keys=ns.sort_keys,
+            dont_be_boring=ns.dont_be_boring,
         )

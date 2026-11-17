@@ -18,6 +18,7 @@ RUN apt-get update \
       python3-wheel \
       python3-gitlab \
       python3-requests \
+      python3-urllib3 \
       python3-pytest \
       python3-pytest-httpserver \
       python3-werkzeug \

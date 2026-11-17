@@ -7,7 +7,7 @@
 FROM ghcr.io/charmbracelet/vhs:v0.12.1
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends python3-venv pipx \
+ && apt-get install -y --no-install-recommends python3-venv pipx jq \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /demo-app

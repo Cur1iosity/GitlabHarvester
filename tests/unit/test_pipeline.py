@@ -18,7 +18,7 @@ def hit(term: str, pid: int, branch: str, datas: list[str]) -> dict:
     return {"term": term, "result": {
         "project_id": pid, "web_url": f"http://gitlab.test/p{pid}",
         "project_search_result": [{"branch": branch, "branch_search_result": [
-            {"url": f"http://gitlab.test/p{pid}/-/tree/{branch}/f#L{i}", "data": d} for i, d in enumerate(datas, 1)]}],
+            {"url": f"http://gitlab.test/p{pid}/-/blob/{branch}/f#L{i}", "data": d} for i, d in enumerate(datas, 1)]}],
     }}
 
 

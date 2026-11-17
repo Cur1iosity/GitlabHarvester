@@ -93,6 +93,8 @@ def test_branches_are_sorted_by_name():
     branches = get(f"/projects/{project_path()}/repository/branches", per_page=100).json()
     names = [b["name"] for b in branches]
     assert names == sorted(names)
+    # The head commit of every branch (--forks branch-diff compares them).
+    assert all(isinstance(b["commit"]["id"], str) and len(b["commit"]["id"]) == 40 for b in branches)
     if branches:
         fake = FAKE.serialize_branch(load_scenario("default").project_by_id(101), "main", FAKE_BASE)
         assert_fake_fields_exist(branches[0], fake, "branch")

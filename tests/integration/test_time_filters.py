@@ -25,7 +25,7 @@ def run_search(glh, projects, terms, **opts):
 
 
 def paths(session: Session) -> set[tuple[int, str]]:
-    return {(h["project_id"], h["url"].split("/-/tree/", 1)[1].split("#", 1)[0]) for h in session.hits()}
+    return {(h["project_id"], h["url"].split("/-/blob/", 1)[1].split("#", 1)[0]) for h in session.hits()}
 
 
 @pytest.fixture

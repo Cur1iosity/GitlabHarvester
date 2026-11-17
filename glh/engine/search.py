@@ -14,6 +14,7 @@ progress. A term with failed retryable searches is not marked done.
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Callable, IO, Iterable, Mapping
 from urllib.parse import quote
@@ -30,12 +31,12 @@ from glh.domain.timewindow import TimeWindow
 from glh.engine import workers as pool
 from glh.engine.file_checks import FileChangeChecker, FileFetcher
 from glh.engine.file_listing import FileLister
-from glh.engine.tasks import BranchTask
+from glh.engine.tasks import BranchOutcome, BranchTask
 from glh.gitlab import throttling, user_agents
 from glh.gitlab.connection import GitLabConnection
-from glh.gitlab.errors import describe_api_error, is_permanent_error
+from glh.gitlab.errors import describe_api_error
 from glh.output.downloads import FileDownloader
-from glh.output.records import BranchResult, Checkpoint, Hit, ProjectResult
+from glh.output.records import BranchResult, Checkpoint, Hit, INACCESSIBLE, NOT_FOUND, ProjectResult
 from glh.output.sink import SearchOutput
 from glh.ui import statusline
 from glh.ui.blocks import Row
@@ -44,6 +45,16 @@ from glh.ui.progress import Progress
 
 # datetime.UTC exists only on Python 3.11+, while the package supports 3.10.
 UTC = timezone.utc
+
+
+def describe_unsearched(counts: Counter[str]) -> str:
+    """'; 3 searches NOT POSSIBLE: 2 no access (HTTP 403), 1 not found (HTTP 404)', or '' without any."""
+    total = counts[INACCESSIBLE] + counts[NOT_FOUND]
+    if not total:
+        return ""
+    kinds = [f"{counts[INACCESSIBLE]:,} no access (HTTP 403)" if counts[INACCESSIBLE] else "",
+             f"{counts[NOT_FOUND]:,} not found (HTTP 404)" if counts[NOT_FOUND] else ""]
+    return f"; {plural(total, 'search', 'searches')} NOT POSSIBLE: {', '.join(k for k in kinds if k)}"
 
 
 class SearchEngine:
@@ -60,6 +71,8 @@ class SearchEngine:
         self.logger = logger
         # Terms of the last search that had failed (retryable) searches.
         self.incomplete_terms: list[str] = []
+        # Searches of the last run that could not run at all, per kind (INACCESSIBLE, NOT_FOUND).
+        self.unsearched: Counter[str] = Counter()
         # Report a search task still running after this many seconds (and again
         # every as many seconds); 0 disables. Parallel search only.
         self.slow_task_report: float = 300.0
@@ -84,6 +97,8 @@ class SearchEngine:
             ("projects", f"{plan.project_count:,} of {plan.total_projects:,}"),
             ("skipped", plan.skipped_reasons()),
             ("branches", f"{plan.branch_count:,}"),
+            ("forks", f"{plan.forks_by_name:,} compared by branch name only: the index has no branch commits "
+                      "(rebuild it with --dump-projects)" if plan.forks_by_name else ""),
             ("files changed", options.file_window.describe() if options.file_window else ""),
             ("downloads", downloader.target() if downloader is not None else ""),
             ("parallel", self.connection.concurrency_text()),
@@ -103,6 +118,7 @@ class SearchEngine:
             hit_counter: int = 0,
             session_file: IO | None = None,
             output: SearchOutput | None = None,
+            keep_results: bool = True,
     ) -> tuple[list[dict[str, Any]], int]:
         """
         Search ``keywords`` over ``projects`` (the whole index) with the scan plan of ``options``.
@@ -120,6 +136,10 @@ class SearchEngine:
             output: Where hits, checkpoints and files go (glh/output/sink.py); its
                 ``downloader`` saves every file with hits (--download-files),
                 and each downloaded hit gets a "file" key with the local path.
+            keep_results: Also return every hit (kept in memory until the end).
+                False: the hits only go to ``output`` as they are found, each
+                term's "result" is empty, and memory doesn't grow with the hits
+                (the CLI: its session file has them).
 
         Returns:
             ([{"term", "result"}, ...], total hit counter).
@@ -140,10 +160,12 @@ class SearchEngine:
                 progress=progress, checkpoints=True, file_window=options.file_window or None,
                 file_filter=options.file_filter or None,
                 file_listing=options.file_listing if options.files_only else None,
+                keep_results=keep_results,
             )
             checks = (f", {plural(self.changes.checks, 'file check')}" if options.file_window else "")
             incomplete = (f"; INCOMPLETE: {plural(len(self.incomplete_terms), 'term')} "
                           f"with failed searches, not marked done" if self.incomplete_terms else "")
+            incomplete += describe_unsearched(self.unsearched)
             if options.files_only and self.lister.counts:
                 listed = ", ".join(f"{plural(n, 'branch', 'branches')} by {how}"
                                    for how, n in sorted(self.lister.counts.items()))
@@ -190,19 +212,22 @@ class SearchEngine:
 
     # ------------------------------------------------------------- one task
 
-    def search_branch(self, task: BranchTask) -> tuple[list[Hit], str | None]:
+    def search_branch(self, task: BranchTask) -> BranchOutcome:
         """
         Worker: search one term in one branch of one project (all result pages).
 
         Returns:
-            (hits, failure): failure describes a retryable error (5xx, 429 after
-            retries, 401, timeout, network, invalid response) that may have hidden
-            hits, else None. 403/404 are logged and treated as nothing to find.
+            The hits, and the trouble met (BranchOutcome): a retryable error
+            (5xx, 429 after retries, 401, timeout, network, invalid response)
+            that may have hidden hits keeps the term open; 403/404 (no access,
+            not found) are logged and counted as gaps in the coverage.
         """
         name = task.project_name
         n_branches = len(task.branches)
         label = f"{name} @ {task.branch}" + (f" [{task.branch_no + 1}/{n_branches}]" if n_branches > 1 else "")
-        with self.active.running(label, report=f"'{task.term}' in {name} @ {task.branch}"):
+        doing = (f"listing the files ({task.term}) of" if task.file_listing is not None
+                 else f"searching '{task.term}' in")
+        with self.active.running(label, report=f"{doing} {name} @ {task.branch}"):
             if self.connection.concurrency <= 1:
                 # Inline (main thread): show the new task now. Worker threads
                 # leave redraws to the status ticker.
@@ -211,7 +236,7 @@ class SearchEngine:
                 return self.lister.collect(task)
             return self._search_term(task)
 
-    def _search_term(self, task: BranchTask) -> tuple[list[Hit], str | None]:
+    def _search_term(self, task: BranchTask) -> BranchOutcome:
         """search_branch() for a term, while the task is registered as running."""
         name = task.project_name
         project_obj: GitlabProject = self.connection.require().projects.get(task.project.id, lazy=True)
@@ -229,11 +254,7 @@ class SearchEngine:
             self.logger.debug("Full error searching %s @ %s: %s", name, task.branch, e)
             errors.append(e)
             hits = []
-        retryable = [e for e in errors if not is_permanent_error(e)]
-        failure = None
-        if retryable:
-            failure = f"{name} @ {task.branch}: {describe_api_error(retryable[0])}"
-        return hits, failure
+        return BranchOutcome.of(task, hits, errors)
 
     def _path_filter(self, task: BranchTask) -> Callable[[str], bool]:
         """Keep a result path? The file filters first (free), then --file-changed-* (one request)."""
@@ -264,6 +285,7 @@ class SearchEngine:
             file_window: TimeWindow | None = None,
             file_filter: FileFilter | None = None,
             file_listing: str | None = None,
+            keep_results: bool = True,
     ) -> tuple[list[dict[str, Any]], int]:
         """
         Search ``terms`` over ``plan`` with the connection's worker threads.
@@ -283,6 +305,11 @@ class SearchEngine:
 
         With workers == 1 the tasks run inline, in order, exactly as a
         sequential scan.
+
+        Memory: a project's hits are held until all its branches are searched
+        (one session record per project), then handed to ``output``; with
+        ``keep_results`` False nothing of them stays, so memory is bounded by
+        the projects being searched at the moment, not by the run.
         """
         n_terms = len(terms)
         hits_before = hit_counter
@@ -293,7 +320,10 @@ class SearchEngine:
         state = {"next_term": 0, "term_started": progress.elapsed}
         # Failed (retryable) searches per term: such a term is not marked done.
         term_failures: list[list[str]] = [[] for _ in terms]
+        # Searches that could not run (403/404) per term: (kind, reason); the term is done, with gaps.
+        term_unsearched: list[list[tuple[str, str]]] = [[] for _ in terms]
         self.incomplete_terms = []
+        self.unsearched = Counter()
         # When the first task of each term was handed out (feeder thread with workers > 1).
         term_begun: dict[int, float] = {}
 
@@ -312,10 +342,11 @@ class SearchEngine:
                     # flushed, durable even if the process is killed.
                     output.checkpoint(Checkpoint.for_term(
                         terms[number], hits_before + sum(term_hits[:number + 1]), datetime.now(UTC).isoformat(),
-                        failures))
+                        failures, term_unsearched[number]))
                 failed = (f"; {plural(len(failures), 'search', 'searches')} FAILED, "
                           f"not marked done" if failures else "")
-                if checkpoints and (n_terms > 1 or failures):
+                failed += describe_unsearched(Counter(kind for kind, _ in term_unsearched[number]))
+                if checkpoints and (n_terms > 1 or failures or term_unsearched[number]):
                     progress.note(
                         f"Term {number + 1}/{n_terms} '{terms[number]}': "
                         f"{plural(plan.project_count, 'project')}, "
@@ -349,7 +380,7 @@ class SearchEngine:
                     running.reported_at = now
                     details = ", ".join(x for x in (running.step, running.waiting) if x)
                     progress.note(
-                        f"Still searching {running.report}"
+                        f"Still {running.report}"
                         f"{f' ({details})' if details else ''}: running for "
                         f"{format_duration(self.active.elapsed(running))}"
                     )
@@ -362,8 +393,10 @@ class SearchEngine:
         # The status line shows the tasks running right now (the longest-running
         # first), not the last finished one: the last task of a scan may run long
         # after all the others are done.
-        previous_provider = progress.detail_provider
+        previous_provider, previous_lines = progress.detail_provider, progress.detail_lines_provider
         progress.detail_provider = lambda: self.active.describe(format_clock)
+        progress.detail_lines_provider = lambda: self.active.lines(format_clock)
+        progress.info_label = "found"
 
         try:
             tasks_iter = pool.imap_unordered(self.search_branch, tasks(), workers=self.connection.concurrency,
@@ -371,9 +404,13 @@ class SearchEngine:
                                              on_idle=report_slow_tasks)
             for done in tasks_iter:
                 task: BranchTask = done.item
-                hits, failure = done.unwrap()
-                if failure:
-                    term_failures[task.term_no].append(failure)
+                outcome: BranchOutcome = done.unwrap()
+                hits = outcome.hits
+                if outcome.failure:
+                    term_failures[task.term_no].append(outcome.failure)
+                if outcome.unsearched:
+                    term_unsearched[task.term_no].append((outcome.unsearched, outcome.reason))
+                    self.unsearched[outcome.unsearched] += 1
                 key = (task.term_no, task.project_no)
                 got = partial.setdefault(key, {})
                 got[task.branch_no] = hits
@@ -389,13 +426,15 @@ class SearchEngine:
                 term_hits[task.term_no] += found
                 if by_branch:
                     out = ProjectResult.for_project(project, by_branch)
-                    results[task.term_no].append((task.project_no, out))
+                    if keep_results:
+                        results[task.term_no].append((task.project_no, out))
                     output.hit(task.term, out)
 
                 projects_left[task.term_no] -= 1
                 if task.term_no == state["next_term"]:
                     progress.done = plan.project_count - projects_left[task.term_no]
                 progress.completed_units = sum(plan.project_count - left for left in projects_left)
+                progress.found(found)
                 progress.set_info(f"{human_int(hit_counter)} hits")
                 progress.advance(0)
                 close_finished_terms()
@@ -404,7 +443,7 @@ class SearchEngine:
         finally:
             # An interrupted search keeps the running tasks in its "stopped" line.
             progress.detail = self.active.describe(format_clock) or progress.detail
-            progress.detail_provider = previous_provider
+            progress.detail_provider, progress.detail_lines_provider = previous_provider, previous_lines
 
         res = [{"term": term, "result": [out.to_record() for _, out in sorted(results[i], key=lambda x: x[0])]}
                for i, term in enumerate(terms)]
@@ -506,7 +545,9 @@ class SearchEngine:
         res: list[Hit] = []
         page: int = 1
 
-        search_results: list[dict[str, Any]] = []
+        # (path, first line, snippet) of each result: only what a hit needs, not
+        # the API's whole record, while the pages of a large branch come in.
+        search_results: list[tuple[str, Any, str]] = []
         try:
             while True:
                 if page > 1:
@@ -514,7 +555,7 @@ class SearchEngine:
                 batch = project.search(scope=SearchScope.BLOBS, ref=branch, search=query or term,
                                        page=page, per_page=per_page, **kwargs)
 
-                search_results.extend(batch)
+                search_results.extend((x["path"], x["startline"], x.get("data", "")) for x in batch)
                 page += 1
 
                 if len(batch) < per_page:
@@ -531,20 +572,21 @@ class SearchEngine:
         if path_filter is not None and search_results:
             verdict: dict[str, bool] = {}
             search_results = [x for x in search_results
-                              if verdict.setdefault(x["path"], path_filter(x["path"]) if x["path"] not in verdict
-                                                    else verdict[x["path"]])]
+                              if verdict.setdefault(x[0], path_filter(x[0]) if x[0] not in verdict
+                                                    else verdict[x[0]])]
 
         # Branch names and paths may contain '#', '?', '%', spaces, etc.
-        branch_url: str = f"{project_url}/-/tree/{quote(branch, safe='/')}"
+        branch_url: str = f"{project_url}/-/blob/{quote(branch, safe='/')}"
         if search_results:
             local: dict[str, str] = {}
             if on_files is not None:
-                local = on_files(list(dict.fromkeys(x["path"] for x in search_results)))
-            res = [Hit(url=f"{branch_url}/{quote(x['path'], safe='/')}#L{x['startline']}", data=x.get("data", ""),
-                       file=local.get(x["path"])) for x in search_results]
+                local = on_files(list(dict.fromkeys(path for path, _, _ in search_results)))
+            res = [Hit(url=f"{branch_url}/{quote(path, safe='/')}#L{line}", data=data, file=local.get(path))
+                   for path, line, data in search_results]
 
-            for hit in res:
-                self.logger.info(f"[+] Hitted '{term}': {hit.url}")
+            if self.logger.isEnabledFor(logging.INFO):
+                for hit in res:
+                    self.logger.info("[+] Hitted '%s': %s", term, hit.url)
             hit_counter += len(res)
 
         return res, hit_counter

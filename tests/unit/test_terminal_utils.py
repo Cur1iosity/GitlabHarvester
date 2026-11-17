@@ -394,6 +394,137 @@ def test_overlay_is_never_drawn_off_a_terminal():
     assert stream.getvalue() == ""
 
 
+def test_progress_puts_the_counters_and_the_tail_before_the_repository():
+    # The repository name changes length all the time: the numbers must not move with it.
+    stream = FakeStream(tty=True)
+    status = StatusLine(stream, interactive=True, ticker=False, columns=lambda: 200)
+    status.set_tail(lambda: "HTTP 429 x5")
+    progress = Progress("Searching", total=4, unit="projects", status=status).start()
+    progress.set_info("12 hits")
+    progress.advance(detail="group/a-very-long-repository-name @ main")
+    status.refresh(force=True)
+    line = progress.render()
+    assert line.index("12 hits") < line.index("HTTP 429 x5") < line.index("group/a-very-long")
+    assert line.count("HTTP 429") == 1 and stream.getvalue().rstrip().endswith("@ main")
+    progress.finish()
+    status.set_tail(None)
+
+
+class EncodedStream(FakeStream):
+    def __init__(self, encoding: str) -> None:
+        super().__init__(tty=True)
+        self._encoding = encoding
+
+    @property
+    def encoding(self) -> str:
+        return self._encoding
+
+
+def search_progress(status: StatusLine, clock: FakeClock) -> Progress:
+    progress = Progress("Searching 'api_key' (2/3)", total=99, unit="projects", rounds=3, status=status,
+                        clock=clock).start()
+    progress.info_label = "found"
+    progress.set_info("304 hits")
+    progress.detail_lines_provider = lambda: ["acme/team-32/service-032 @ main, page 3, 0:01",
+                                              "acme/team-33/service-033 @ main, 0:00"]
+    progress.advance(32)
+    return progress
+
+
+def panel_lines(text: str) -> list[str]:
+    """The lines of the last panel drawn (escape sequences stripped)."""
+    import re
+    last = text.rsplit("\r", 1)[-1] if "\x1b[" not in text else text[text.rindex("\r"):]
+    return [re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", x).strip("\r") for x in last.split("\n")]
+
+
+def test_on_an_ansi_terminal_the_status_is_a_panel_with_a_spinner():
+    clock = FakeClock()
+    stream = FakeStream(tty=True)
+    status = StatusLine(stream, interactive=True, ticker=False, ansi=True, columns=lambda: 120, clock=clock)
+    status.set_tail(lambda: "HTTP 429 x3")
+    progress = search_progress(status, clock)
+    status.refresh(force=True)
+    lines = panel_lines(stream.getvalue())
+    assert lines[0][0] in "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏" and lines[0][2:] == "Searching 'api_key' (2/3)"
+    assert [x.split()[0] for x in lines[1:5]] == ["term", "total", "found", "running"]
+    assert lines[3].endswith("304 hits · HTTP 429 x3")
+    assert lines[4].endswith("acme/team-32/service-032 @ main, page 3, 0:01")
+    assert lines[5].strip() == "acme/team-33/service-033 @ main, 0:00"  # one line per running task
+    # The next redraw goes back to the first line and rewrites each line in place.
+    clock.now += 0.25
+    before = len(stream.getvalue())
+    status.refresh(force=True)
+    redraw = stream.getvalue()[before:]
+    assert redraw.startswith("\x1b[5A\r\x1b[2K") and redraw.count("\x1b[2K") == 6
+    assert panel_lines(stream.getvalue())[0][0] != lines[0][0]  # the spinner moved
+    # The one-line form (summaries, heartbeats) is unchanged.
+    assert progress.render().endswith("| 304 hits | HTTP 429 x3")  # the one-line form: no task lines
+    progress.finish()
+    assert stream.getvalue().endswith("\r\x1b[2K" + "\x1b[1A\r\x1b[2K" * 5)  # all six lines erased
+    status.set_tail(None)
+
+
+def test_panel_lines_fit_a_narrow_terminal_and_a_shorter_panel_clears_the_rest():
+    clock = FakeClock()
+    stream = FakeStream(tty=True)
+    status = StatusLine(stream, interactive=True, ticker=False, ansi=True, columns=lambda: 30, clock=clock)
+    progress = search_progress(status, clock)
+    status.refresh(force=True)
+    assert all(display_width(x) <= 29 for x in panel_lines(stream.getvalue()))  # nothing wraps
+    progress.detail_lines_provider = lambda: []
+    before = len(stream.getvalue())
+    status.refresh(force=True)
+    # 6 lines shown, 4 now: the two lines left below are cleared, the cursor comes back up.
+    assert stream.getvalue()[before:].endswith("\n\x1b[2K\n\x1b[2K\x1b[2A")
+    progress.finish()
+
+
+def test_the_spinner_falls_back_to_ascii_where_braille_cannot_be_encoded():
+    clock = FakeClock()
+    stream = EncodedStream("cp1252")
+    status = StatusLine(stream, interactive=True, ticker=False, ansi=True, columns=lambda: 120, clock=clock)
+    progress = search_progress(status, clock)
+    status.refresh(force=True)
+    assert panel_lines(stream.getvalue())[0][0] in "|/-\\"
+    progress.finish()
+
+
+def test_running_tasks_as_lines():
+    import threading
+
+    from glh.engine.workers import ActiveTasks
+
+    active = ActiveTasks(clock=FakeClock())
+    assert active.lines(format_clock) == []
+    started, release = threading.Barrier(7), threading.Event()
+
+    def work(i: int) -> None:
+        with active.running(f"p{i} @ main"):
+            started.wait()
+            release.wait()
+
+    threads = [threading.Thread(target=work, args=(i,)) for i in range(6)]
+    for t in threads:
+        t.start()
+    started.wait()
+    lines = active.lines(format_clock, limit=4)
+    release.set()
+    for t in threads:
+        t.join()
+    assert len(lines) == 5 and lines[-1] == "+2 more" and all(x.endswith(", 0:00") for x in lines[:4])
+
+
+def test_without_ansi_the_status_line_stays_one_cut_line():
+    stream = FakeStream(tty=True)
+    status = StatusLine(stream, interactive=True, ticker=False, ansi=False, columns=lambda: 40)
+    progress = Progress("Searching", total=4, unit="projects", status=status).start()
+    progress.advance(detail="acme/team-32/service-032 @ main")
+    status.refresh(force=True)
+    assert "\n" not in stream.getvalue() and "…" in stream.getvalue()
+    progress.finish()
+
+
 def test_tail_is_appended_to_the_status_line_and_heartbeats():
     from tests.helpers import FakeStream
 

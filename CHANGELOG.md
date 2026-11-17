@@ -4,6 +4,126 @@ All notable changes to GitlabHarvester are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.4] - 2026-11-17
+
+### Added
+
+- **A live status panel.** On a terminal that understands ANSI, the progress of
+  a phase is a small block with a spinner instead of one long line. It is
+  readable on narrow screens too, and with `--workers` it shows every running
+  task on its own line:
+
+  ```
+  ⠹ Searching 'api_key' (2/3)
+    term     32/99 projects (32%) · 0:01 · ETA 0:02
+    total    131/297 (44%) · 0:04 · ETA 0:06
+    found    304 hits · HTTP 429 x3
+    running  acme/team-32/service-032 @ main, page 3, 0:01
+             acme/team-33/service-033 @ main, 0:00
+  ```
+
+  It is redrawn in place line by line, and every line is fitted to the terminal
+  width, so nothing wraps. Where escape sequences don't work, the one-line status
+  stays: pipes, files, CI, the run journal and old Windows consoles. The spinner
+  falls back to `|/-\` where the console can't show braille characters.
+- `GitlabHarvester.list_branches()`: the branch names and whether the listing ran
+  to its end (`get_branches()` is unchanged).
+- And remember: `--dont-be-boring`.
+
+### Changed
+
+- **Dependencies declared as used.** `urllib3` is imported directly (to silence its
+  warning with `--insecure`), so it is now a declared dependency (`>=1.26`; it already
+  came with `requests`), and `Werkzeug` joins the `test` extra (the Fake GitLab imports
+  it). The build no longer asks for `wheel`: setuptools builds wheels itself.
+- **The README on PyPI.** The use-cases picture and the links to the docs were relative
+  paths, which PyPI can't resolve: the picture showed as its alt text, the links led
+  nowhere. They now point to the repository.
+- **Loading the index is faster:** 0.26 s instead of 0.33 s for 30,000 projects
+  (1.4.2: 0.17 s), from a leaner `Project.from_record`. Memory is unchanged.
+  An index rebuilt with branch commits (see Fixed) costs a little of it back.
+
+### Fixed
+
+- **RAM no longer grows with the hits.** The search engine kept every hit of the
+  run in RAM until the end, to return them, although the CLI only needs the
+  session file on disk, where each hit is written as soon as its project is searched. The
+  CLI now searches with `keep_results=False` (`GitlabHarvester.search_keywords`,
+  default `True`: the API is unchanged), and the result pages of a branch are kept
+  as just what a hit needs. Measured on 1,000 projects with 2 branches and 150 hits
+  each (300,000 hits; the session file on disk: 59 MB, the same before and after),
+  4 workers. RAM is the peak working set of the gitlab-harvester process (the
+  Python interpreter, its libraries and the loaded index included):
+
+  | | 1.4.3 | 1.4.4 |
+  |---|---|---|
+  | peak RAM, 300,000 hits | 206 MB | 47 MB |
+  | peak RAM, 150,000 hits | 125 MB | 47 MB |
+  | search time | 26.3 s, 27.2 s | 25.6 s, 24.9 s |
+
+  RAM is now bounded by the projects being searched at the moment (one session
+  record holds a project's hits), not by the run. The time is the same within
+  the noise: it goes to the API. The session file is unchanged.
+- **Searches without access are reported, not hidden.** A search answered with
+  HTTP 403 (no access) or 404 (not found) was skipped with a warning and its term
+  marked done like a fully searched one, so a session could look complete while
+  parts of the instance were never searched. Retrying won't change such answers,
+  so the term still counts as done (`--resume` doesn't repeat it), but the gap is
+  now counted apart from the failed searches: the term's checkpoint gets
+  `inaccessible`, `not_found` and `unsearched` (which branches, first 20), the
+  `summary` the totals, the term line `N searches NOT POSSIBLE: ...`, and the
+  `Results` block a `NOT SEARCHED` row.
+- **`--resume` keeps the search the same.** Resuming with another `--filename`,
+  `--extension` or `--project-filter` only warned, and other changed conditions
+  were not noticed at all, so one session could mix the results of two different
+  searches: terms completed in Python files, the rest in every file. Now `--resume`
+  is refused, before anything is written, when the URL, the branch or fork modes
+  (`-b`/`--scan-branches`, `--forks`, `--fork-diff-bases`), the activity and file
+  time windows or the file and project filters differ from the session's `meta`;
+  the message lists what changed. Tokens, workers, rate limits, jitter, the
+  User-Agent and the outputs may still change.
+- **`--forks branch-diff` compares commits, not just branch names.** A fork's
+  branch was skipped whenever the upstream had a branch of the same name, so
+  commits the fork added to it (a token pushed to its copy of `feature/auth`)
+  were never searched. The index now stores the commit each branch points at
+  (`branch_heads`, from the same branch listing responses: no extra requests), and
+  a fork's branch is skipped only when the upstream's branch of the same name
+  points at the same commit. An index built before 1.4.4 has no commits: it is
+  compared by names as before, and the `Search plan` block says so
+  (`forks  N compared by branch name only`); `--dump-projects` rebuilds it.
+  `GitlabHarvester.list_branch_heads()` lists branches with their commits.
+  The commits are kept as raw digests in RAM: a loaded index of 30,000 projects
+  with 3 branches each takes 2.7 MB more RAM (22.7 MB instead of 20.0 MB) and
+  loads 0.11 s slower; the index file on disk grows from 9.5 MB to 14.9 MB.
+- **Hit links point at the file page.** A hit's `url` used `/-/tree/<branch>/<path>#L<line>`,
+  the address of a directory listing, not of the file. It is now `/-/blob/<branch>/<path>#L<line>`, like the links
+  of files found by name (`--filename`/`--extension` without a term) already were.
+  Deduplication compares the matched lines, not the links, so sessions from older
+  versions still deduplicate together with new ones.
+- **Branch listing errors no longer drop projects from the search.** When an API
+  error (5xx, a timeout, 429 after its retries) cut a project's branch list
+  (`--index-branches all|N`), the cut list was stored as if it were complete. A
+  failure on the first page left the project with no branches, and the search
+  skipped it without a word in the results. Now a cut list keeps its default
+  branch, so the project is still searched; a warning names the affected
+  projects; the index is saved with `"is_completed": false` and
+  `"branches_incomplete": N`, so later runs say it is incomplete and
+  `--dump-projects` rebuilds it. No access to a repository (403/404) won't change
+  on a retry and doesn't mark the index incomplete.
+- **Files by name without a term, `--file-listing auto`.** Once the search API had
+  proven to take filter-only queries, a failed search of one branch (a timeout or
+  a 5xx, typically on a very large repository) silently fell back to listing that
+  repository's whole tree. On a monorepo that took hours, while the output still
+  said the search was used. Now such a branch counts as a failed search: it is
+  warned about, the run is not marked done, and `--resume` searches it again. The
+  tree is only used while the search hasn't proven itself. A long-running task now
+  says what it does: `Still listing the files (filename:*env) of group/repo @ main
+  (45,000 tree entries)`, not `Still searching`.
+- **The status line keeps its numbers in place.** The `HTTP 429 xN` counter was
+  appended after the repository being searched, so it jumped left and right with
+  the length of each name, and a narrow terminal cut it off. All the counters
+  (hits, HTTP 429) now come before the repository name.
+
 ## [1.4.3] - 2026-11-17
 
 A technical release: the command line, the config file and every file format are
@@ -19,9 +139,25 @@ unchanged. The index and session files are byte-identical to the ones 1.4.2 writ
     `ProjectResult`, `BranchResult`, `Hit`, `Checkpoint`, `SummaryRecord`, and
     `read_record()` for any session line.
 
-  The engine works on `Project` objects, so a loaded index takes about half the
-  memory: 18.8 MB instead of 38.7 MB for 30,000 projects. See
-  [docs/architecture.md](docs/architecture.md), "Data models".
+  What it gives: one definition of each file format for its writers and
+  readers (a field can no longer be written under one name and read under
+  another), typed access instead of string keys in the engine, and less RAM.
+  See [docs/architecture.md](docs/architecture.md), "Data models".
+- **Performance**, measured against 1.4.2 on an index of 30,000 projects with
+  3 branches each:
+
+  | | 1.4.2 | 1.4.3 |
+  |---|---|---|
+  | peak RAM of the CLI process (index + plan) | 84 MB | 62 MB (−26%) |
+  | RAM of the loaded index | 41.0 MB | 20.7 MB (−50%) |
+  | planning a search (which projects and branches) | 0.044 s | 0.033 s (−25%) |
+  | loading the index | 0.17 s | 0.33 s (+0.16 s; 0.26 s in 1.4.4) |
+
+  Typed objects cost a little time to build. That is paid once per run, and
+  half the RAM is worth it on large instances. The index file on disk is unchanged. The search itself is as fast
+  as before: its time goes to API requests. A full search of a
+  1,000-project instance with 1 and 4 workers takes the same time within the
+  noise.
 - `GitlabHarvester` keeps its dict interface. `search_keywords`, `search_keyword`
   and `scan_project` take `Project` objects or index records. They and
   `scan_branch` return dicts, and so does `load_projects_from_file`.
@@ -57,6 +193,22 @@ A technical release: the command line, the config file and every file format
   `FileLister`. Its constructor and public methods are unchanged, and
   `GitlabHarvester.from_settings(HarvesterSettings(...))` is new. See
   [docs/architecture.md](docs/architecture.md), Part I.
+
+  What it gives:
+  - **One place for every client.** TLS verification, proxy, timeout,
+    User-Agent and request pacing are the same for the main client, every
+    worker thread and the rate-limit probe. A new client setting is added in
+    one place.
+  - **Replaceable parts.** Tests swap a part (`harvester.connection.use_client(stub)`)
+    instead of patching private attributes, and the layer rule is a test.
+  - **Smaller modules.** The largest module went from 2,014 lines
+    (`harvester.py`) to under 600, and `docs/architecture.md` says where new code
+    goes.
+
+  It is a structural change only: speed and RAM are the same as 1.4.1 within
+  the noise. Measured on an index of 30,000 projects (loading 0.19 s vs 0.20 s,
+  planning 0.05 s vs 0.06 s, peak RAM of the CLI 84.5 MB vs 84.2 MB) and on a
+  full search of a 1,000-project instance.
 - **Module paths.** Only `from glh import GitlabHarvester, CliParser, __version__`
   is stable. Code that imported other modules needs the new paths:
 

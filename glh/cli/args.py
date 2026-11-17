@@ -90,3 +90,5 @@ class CliArgs:
     normalize_hits: bool
 
     sort_keys: bool
+
+    dont_be_boring: bool = False
