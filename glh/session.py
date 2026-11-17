@@ -36,3 +36,25 @@ def load_done_keywords(session_path: Path) -> set[str]:
                     done.add(kw)
 
     return done
+
+
+def load_session_meta(session_path: Path) -> dict[str, Any] | None:
+    """
+    Return the first ``meta`` record of a session (the parameters of the run
+    that started it), or None if the file is missing or has none.
+
+    Only the beginning of the file is read: the meta record is its first line.
+    """
+    if not session_path.exists():
+        return None
+    with session_path.open("r", encoding="utf-8") as fp:
+        for line in fp:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                return None
+            return rec if isinstance(rec, dict) and rec.get("type") == "meta" else None
+    return None

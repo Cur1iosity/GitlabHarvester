@@ -106,3 +106,27 @@ def test_oneshot_handlers_override_the_data_driven_api(fake_gitlab: FakeGitLab):
     assert gl.user.username == "override"
     with pytest.raises(gitlab.exceptions.GitlabAuthenticationError):
         gl.auth()  # one-shot consumed; the fake rejects the unknown token
+
+
+def test_file_filters_and_downloads_use_only_known_endpoints_and_parameters(fake_gitlab: FakeGitLab, make_harvester,
+                                                                            tmp_path):
+    from glh.downloads import FileDownloader
+    from glh.output import OutputLayout, SearchOutput
+
+    glh = make_harvester()
+    index = glh.build_project_index(filename=str(tmp_path / "idx.jsonl"))
+    projects = glh.load_projects_from_file(index)["projects"]
+    downloader = FileDownloader(OutputLayout(tmp_path / "s.jsonl", ["password"]), "20260101000000")
+    glh.search_keywords(projects, ["password"], options=ScanOptions(filename="settings*", extension=".py"),
+                        output=SearchOutput(downloader=downloader))
+
+    assert fake_gitlab.unmatched_requests() == []
+    assert {r.endpoint for r in fake_gitlab.requests} == {"user", "projects", "project_search", "file_raw"}
+    for r in fake_gitlab.api_requests("project_search"):
+        assert set(r.query) == {"scope", "search", "ref", "page", "per_page"}
+        assert r.arg("search") == "password filename:settings* extension:py"
+    raws = fake_gitlab.api_requests("file_raw")
+    assert len(raws) == 2
+    for r in raws:
+        assert r.method == "GET" and r.query == {"ref": ["main"]}
+        assert r.headers.get("Private-Token") == fake_gitlab.token

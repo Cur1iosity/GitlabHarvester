@@ -355,3 +355,106 @@ def test_file_dates_are_inherited_with_the_files(api: GitLabApi):
         assert [c["committed_date"] for c in body] == ["2024-01-20T10:00:00.000Z"]
     _, body, _, _ = call(api, "/api/v4/projects/101/repository/commits", {"ref_name": "develop", "path": "scripts/debug.sh"})
     assert [c["committed_date"] for c in body] == ["2024-06-01T12:00:00.000Z"]
+
+
+# --------------------------------------------------------------------------- search filters (filename:, path:, extension:)
+
+
+from fakegitlab.api import parse_search_query  # noqa: E402
+
+
+def search_paths(api: GitLabApi, pid: int, search: str, ref: str | None = None) -> list[str]:
+    query = {"scope": "blobs", "search": search, **({"ref": ref} if ref else {})}
+    status, body, _, _ = call(api, f"/api/v4/projects/{pid}/search", query)
+    assert status == 200
+    return sorted({r["path"] for r in body})
+
+
+def test_parse_search_query_like_gitlab():
+    term, filters = parse_search_query("DB_PASSWORD  filename:*.py -path:vendor extension:")
+    # A filter with an empty value is ignored and stays in the term, like in GitLab.
+    assert term == "DB_PASSWORD extension:"
+    assert [(f.name, f.value, f.negated) for f in filters] == [("filename", "*.py", False), ("path", "vendor", True)]
+    # Only the first fragment of a filter counts; unknown names stay in the term.
+    term, filters = parse_search_query("a filename:x.py filename:y.py lang:py")
+    assert term == "a filename:y.py lang:py" and [f.value for f in filters] == ["x.py"]
+    # Without filters the query is untouched (spaces included).
+    assert parse_search_query("p@ss  w0rd!") == ("p@ss  w0rd!", [])
+
+
+@pytest.mark.parametrize(("search", "paths"), [
+    ("password", ["config/settings.py", "deploy/env.example"]),
+    ("password extension:py", ["config/settings.py"]),
+    ("password extension:PY", ["config/settings.py"]),
+    ("password filename:settings.py", ["config/settings.py"]),
+    ("password filename:*.example", ["deploy/env.example"]),
+    ("password filename:settings", []),           # filename: is anchored at the end of the path
+    ("password filename:env*", ["deploy/env.example"]),  # a trailing * matches "env" anywhere
+    ("password filename:env.*", ["deploy/env.example"]),
+    ("password path:deploy/", ["deploy/env.example"]),
+    ("password -path:deploy/", ["config/settings.py"]),
+    ("password -extension:py", ["deploy/env.example"]),
+    ("password filename:settings* extension:py", ["config/settings.py"]),
+    ("password filename:*.md", []),
+])
+def test_blob_search_filters(api: GitLabApi, search, paths):
+    assert search_paths(api, 101, search) == paths
+
+
+def test_basic_search_filename_matches_the_end_of_the_path():
+    # GitLab basic search: filename:config.yml also returns app/myconfig.yml.
+    api = GitLabApi(load_scenario({
+        "users": [{"id": 1, "username": "u", "tokens": ["dev-token"]}],
+        "projects": [{"id": 1, "path_with_namespace": "g/p", "branches": {"main": {"files": {
+            "config.yml": "secret: 1\n", "app/myconfig.yml": "secret: 2\n", "config.json": "secret: 3\n"}}}}],
+    }))
+    assert search_paths(api, 1, "secret filename:config.yml") == ["app/myconfig.yml", "config.yml"]
+    assert search_paths(api, 1, "secret filename:CONFIG.*") == ["app/myconfig.yml", "config.json", "config.yml"]
+    assert search_paths(api, 1, "secret filename:config.json") == ["config.json"]
+
+
+def test_filters_apply_to_path_matches_too(api: GitLabApi):
+    # "settings" matches config/settings.py by path (startline 1) and README.md by content.
+    assert search_paths(api, 101, "settings") == ["README.md", "config/settings.py"]
+    assert search_paths(api, 101, "settings extension:md") == ["README.md"]
+
+
+def test_filters_without_a_term_find_nothing(api: GitLabApi):
+    assert search_paths(api, 101, "filename:settings.py") == []
+    assert search_paths(api, 101, "extension:py") == []
+
+
+# --------------------------------------------------------------------------- raw files
+
+
+def raw(api: GitLabApi, pid: str, path: str, query: dict | None = None, **kw):
+    result = api.handle(req(f"/api/v4/projects/{pid}/repository/files/{path}/raw", query, **kw), BASE)
+    return result.response.status_code, result.response.get_data(), result.response.headers, result.endpoint
+
+
+def test_raw_file_content():
+    api = GitLabApi(load_scenario("default"))
+    status, body, headers, endpoint = raw(api, "101", "config%2Fsettings.py", {"ref": "main"})
+    assert (status, endpoint) == (200, "file_raw")
+    assert body == api.scenario.project_by_id(101).branches["main"]["config/settings.py"].encode()
+    assert headers["Content-Type"].startswith("text/plain")
+    assert int(headers["Content-Length"]) == len(body)
+
+
+def test_raw_file_special_characters_and_default_branch():
+    api = GitLabApi(load_scenario("default"))
+    status, body, _, _ = raw(api, "acme%2Ffrontend%2Fweb-app", "docs%2Fsetup%20guide.md")  # ref: default branch
+    assert status == 200 and body.startswith(b"Ask the admin")
+    status, body, _, _ = raw(api, "103", "i18n%2Fru.txt", {"ref": "ünïcode-ветка"})
+    assert status == 200 and "ключ".encode() in body
+    status, body, _, _ = raw(api, "103", "src%2Flogin.js", {"ref": "fix/#42-login"})
+    assert status == 200 and b"$SECRET_VAR" in body
+
+
+def test_raw_file_errors():
+    api = GitLabApi(load_scenario("default"))
+    assert raw(api, "101", "config%2Fsettings.py", {"ref": "nope"})[:2] == (404, b'{"message": "404 Commit Not Found"}')
+    assert raw(api, "101", "no%2Fsuch.txt", {"ref": "main"})[:2] == (404, b'{"message": "404 File Not Found"}')
+    assert raw(api, "999", "a.txt")[0] == 404
+    assert raw(api, "104", "a.txt")[0] == 404  # empty repository
+    assert raw(api, "101", "config%2Fsettings.py", token="wrong")[0] == 401

@@ -74,18 +74,19 @@ def test_duplicate_terms_map_to_one_name():
 # --------------------------------------------------------------------------- paths
 
 
-def test_term_file_paths_sit_next_to_the_session():
+def test_term_files_go_into_term_directories_next_to_the_session():
     session = Path("results/audit.jsonl")
     paths = term_file_paths(session, ["password", "api_key"])
-    assert paths["password"] == Path("results/audit.password.jsonl")
-    assert paths["api_key"] == Path("results/audit.api_key.jsonl")
+    assert paths["password"] == Path("results/password/audit.jsonl")
+    assert paths["api_key"] == Path("results/api_key/audit.jsonl")
 
 
-def test_term_file_path_never_equals_the_session():
-    # A pathological term that would reproduce the session name is pushed aside.
+def test_term_directory_never_takes_the_session_name():
+    # A term that sanitizes to the session's file name gets another directory name.
     session = Path("audit.jsonl")
-    paths = term_file_paths(session, ["jsonl"])
-    assert paths["jsonl"] != session
+    paths = term_file_paths(session, ["audit.jsonl", "AUDIT.JSONL"])
+    assert paths["audit.jsonl"] == Path("audit.jsonl_2/audit.jsonl")
+    assert paths["AUDIT.JSONL"] == Path("AUDIT.JSONL_3/audit.jsonl")
 
 
 # --------------------------------------------------------------------------- splitting
@@ -104,15 +105,15 @@ def test_split_routes_each_term_and_skips_control_records(tmp_path: Path):
 
     files = split_session_by_term(session, ["password", "api_key", "nohits"])
 
-    # A file per term that had hits, in the given order; "nohits" gets none.
-    assert [p.name for p in files] == ["audit.password.jsonl", "audit.api_key.jsonl"]
-    assert not (tmp_path / "audit.nohits.jsonl").exists()
+    # A file per term that had hits, in the given order; "nohits" gets none (no directory either).
+    assert files == [tmp_path / "password" / "audit.jsonl", tmp_path / "api_key" / "audit.jsonl"]
+    assert not (tmp_path / "nohits").exists()
 
-    pwd = read_jsonl(tmp_path / "audit.password.jsonl")
+    pwd = read_jsonl(tmp_path / "password" / "audit.jsonl")
     assert [r["result"]["project_id"] for r in pwd] == [1, 2]
     assert all(r["term"] == "password" and "result" in r for r in pwd)       # only hit records
     assert all(r.get("type") is None for r in pwd)                            # no meta/summary
-    assert [r["result"]["project_id"] for r in read_jsonl(tmp_path / "audit.api_key.jsonl")] == [1, 2]
+    assert [r["result"]["project_id"] for r in read_jsonl(tmp_path / "api_key" / "audit.jsonl")] == [1, 2]
 
 
 def test_split_writes_all_files_inside_the_session_directory(tmp_path: Path):
@@ -120,7 +121,8 @@ def test_split_writes_all_files_inside_the_session_directory(tmp_path: Path):
     session = write_jsonl(tmp_path / "audit.jsonl", [hit("../../evil", 1, "u1")])
     files = split_session_by_term(session, ["../../evil"])
     assert len(files) == 1
-    assert files[0].resolve().parent == tmp_path.resolve()
+    assert files[0].resolve().parent.parent == tmp_path.resolve()
+    assert files[0].parent.name == "evil"
 
 
 def test_split_of_empty_session_writes_nothing(tmp_path: Path):

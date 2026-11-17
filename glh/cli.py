@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from importlib.metadata import version, PackageNotFoundError
 
-from glh import ratelimit, user_agents
+from glh import downloads, filefilter, ratelimit, user_agents
 from glh.config import TERMS_DEST, ConfigError, load_config
 from glh.planner import parse_timestamp
 from glh.postprocess.pipeline import normalize_steps
@@ -134,6 +134,34 @@ def parse_user_agent(value: str) -> str:
         raise argparse.ArgumentTypeError(str(e)) from None
 
 
+def parse_filename(value: str) -> str:
+    """Parse --filename: a file name or a mask with '*' (no spaces)."""
+    try:
+        return filefilter.normalize_filename(value)
+    except filefilter.FileFilterError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
+
+
+def parse_extension(value: str) -> str:
+    """Parse --extension: 'py', '.py' and '*.py' all mean 'py'."""
+    try:
+        return filefilter.normalize_extension(value)
+    except filefilter.FileFilterError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
+
+
+def parse_size(value: str) -> int:
+    """Parse --download-max-size: bytes or with k/M/G (500k, 10M, 1G); 0 = no limit."""
+    try:
+        return downloads.parse_size(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "Use bytes or a size with k, M or G, e.g. 500k, 10M or 1G (0 = no limit).") from None
+
+
+DEFAULT_DOWNLOAD_MAX_SIZE = 10 * 1024 * 1024
+
+
 # (specific dest, group dest) for every request rate limit; resolved like TIME_BOUNDS.
 RATE_LIMITS: tuple[tuple[str, str], ...] = (
     ("index_rpm", "rpm"),
@@ -218,10 +246,14 @@ class CliArgs:
     search: str | None
     terms_file: str | None
     terms: tuple[str, ...]
+    filename: str | None
+    extension: str | None
     session: str | None
     session_file: str | None
     resume: bool
     output_separated: bool
+    download_files: bool
+    download_max_size: int
 
     input_file: str | None
     output_file: str | None
@@ -306,7 +338,7 @@ class CliParser:
         parser.add_argument(
             "--index-rpm", type=parse_rpm, default=None, metavar="N",
             help="Max API requests per minute per worker, except search requests: project and branch "
-                 "listing, file-change checks (default 0 = no limit).",
+                 "listing, file-change checks, file downloads (default 0 = no limit).",
         )
         parser.add_argument(
             "--search-rpm", type=parse_rpm, default=None, metavar="N",
@@ -401,6 +433,24 @@ class CliParser:
         group.add_argument("-s", "--search", default=None, help="Single search term.")
         group.add_argument("-f", "--terms-file", default=None, help="Path to file with one term per line.")
 
+        ff = parser.add_argument_group(
+            "file filters",
+            "Search the terms only in some files (case-insensitive; together, a file must match both).\n"
+            "GitLab applies them on its side (filename:/extension: in the search string) and the\n"
+            "harvester re-checks every result. They narrow a search: a term (-s/-f) is still needed.",
+        )
+        ff.add_argument(
+            "--filename", type=parse_filename, default=None, metavar="PATTERN",
+            help="Only files with this name. PATTERN is an exact name, which may include the extension "
+                 "(settings.py, .env, Dockerfile), or a mask where * matches any characters (*.env, "
+                 "config*, docker-compose*.yml, *secret*). A PATTERN with / matches the end of the "
+                 "path (config/*.yml).",
+        )
+        ff.add_argument(
+            "--extension", type=parse_extension, default=None, metavar="EXT",
+            help="Only files with this extension; the dot is optional: py, .py and *.py are the same.",
+        )
+
         sess = parser.add_mutually_exclusive_group()
         sess.add_argument("--session", default=None, help="Session name (creates <name>.jsonl in the current directory).")
         sess.add_argument("--session-file", default=None, help="Explicit session file path (JSONL).")
@@ -414,6 +464,22 @@ class CliParser:
             default=False,
             help="With several search terms, also write each term's hits to its own file "
                  "<session>.<term>.jsonl next to the session (ignored for a single term).",
+        )
+        parser.add_argument(
+            "--download-files",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help="Download every file with hits into a 'files' directory next to the session "
+                 "(results/files by default), one sub-directory per term: "
+                 "files/<term>/<project>_<branch>_<timestamp>_<path>.",
+        )
+        parser.add_argument(
+            "--download-max-size",
+            type=parse_size,
+            default=DEFAULT_DOWNLOAD_MAX_SIZE,
+            metavar="SIZE",
+            help="With --download-files: skip files larger than SIZE: bytes or with k, M, G "
+                 "(500k, 10M, 1G; 0 = no limit). Default: 10M.",
         )
 
         # Postprocess
@@ -593,10 +659,14 @@ class CliParser:
             search=ns.search,
             terms_file=ns.terms_file,
             terms=tuple(ns.terms),
+            filename=ns.filename,
+            extension=ns.extension,
             session=ns.session,
             session_file=ns.session_file,
             resume=ns.resume,
             output_separated=ns.output_separated,
+            download_files=ns.download_files,
+            download_max_size=ns.download_max_size,
             input_file=ns.input_file,
             output_file=ns.output_file,
             post_process=tuple(ns.post_process),

@@ -481,18 +481,18 @@ def test_output_separated_writes_one_file_per_term(fake_gitlab: FakeGitLab, run_
     proc = run_cli(*gl_args(fake_gitlab), "-f", "terms.txt", "-b", "all", "--index-file", "idx.jsonl",
                    "--session-file", "out/audit.jsonl", "--output-separated", check=True)
     out = tmp_path / "out"
-    assert sorted(p.name for p in out.iterdir()) == [
-        "audit.api_key.jsonl", "audit.jsonl", "audit.password.jsonl", "audit.token.jsonl",
+    assert sorted(p.relative_to(out).as_posix() for p in out.rglob("*") if p.is_file()) == [
+        "api_key/audit.jsonl", "audit.jsonl", "password/audit.jsonl", "token/audit.jsonl",
     ]
 
     session = Session.load(out / "audit.jsonl")
     for term in ("password", "api_key", "token"):
-        per = Session.load(out / f"audit.{term}.jsonl")
+        per = Session.load(out / term / "audit.jsonl")
         assert per.hits() and all(h["term"] == term for h in per.hits())   # only that term's hits
         assert all(r.get("type") is None for r in per.records)             # no meta/summary records
         assert len(per.hits()) == len(session.hits(term))
     # Every hit lands in exactly one per-term file: nothing lost or duplicated.
-    split_total = sum(len(Session.load(out / f"audit.{t}.jsonl").hits()) for t in ("password", "api_key", "token"))
+    split_total = sum(len(Session.load(out / t / "audit.jsonl").hits()) for t in ("password", "api_key", "token"))
     assert split_total == len(session.hits())
 
     assert "Separated output:" in proc.stdout
@@ -510,10 +510,11 @@ def test_output_separated_files_survive_final_only(fake_gitlab: FakeGitLab, run_
     run_cli(*gl_args(fake_gitlab), "-f", "terms.txt", "-b", "all", "--index-file", "idx.jsonl",
             "--session-file", "out/audit.jsonl", "--output-separated",
             "--post-process", "convert", "--final-only", check=True)
-    names = sorted(p.name for p in (tmp_path / "out").iterdir())
+    out = tmp_path / "out"
+    names = sorted(p.relative_to(out).as_posix() for p in out.rglob("*") if p.is_file())
     # --final-only drops the session JSONL, but the per-term files (split first) and the
     # final converted report stay.
-    assert names == ["audit.converted.json", "audit.password.jsonl", "audit.token.jsonl"]
+    assert names == ["audit.converted.json", "password/audit.jsonl", "token/audit.jsonl"]
 
 
 def test_post_process_is_skipped_when_the_search_fails(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):

@@ -13,23 +13,24 @@ The dispatcher is intentionally thin; core logic lives in GitlabHarvester and po
 
 from __future__ import annotations
 
-import json
 import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, IO
+from typing import Any
 from urllib.parse import urlparse
 
 from glh import GitlabHarvester, ratelimit, tokens, user_agents
 from glh.exceptions import GitlabHarvesterError
 from glh.cli import CliArgs, _get_version
+from glh.downloads import FileDownloader, format_size
+from glh.output import OutputLayout, SessionOutput
 from glh.planner import ScanOptions, TimeWindow, parse_timestamp
 from glh.postprocess.convert import convert_jsonl_to_json
 from glh.postprocess.dedup import dedup_session_file
 from glh.postprocess.pipeline import run_pipeline
 from glh.postprocess.split import split_session_by_term
-from glh.session import load_done_keywords
+from glh.session import load_done_keywords, load_session_meta
 from glh.utils import terminal_utils
 from glh.utils.logging_utils import JOURNAL
 from glh.utils.terminal_utils import format_duration
@@ -75,21 +76,26 @@ def _load_keywords(*, search: str | None, terms_file: str | None, terms: tuple[s
     return [t.strip() for t in terms if t.strip()]
 
 
-def _default_session_name(url: str) -> str:
+def _run_stamp() -> str:
+    """UTC timestamp of a run, as used in default session and downloaded file names."""
+    return datetime.now(UTC).strftime("%Y%m%d%H%M%S")
+
+
+def _default_session_name(url: str, stamp: str | None = None) -> str:
     """Build a stable session name prefix from the GitLab URL."""
     parsed = urlparse(url if "://" in url else f"https://{url}")
     host = (parsed.netloc or parsed.path).replace(".", "_").strip("_") or "gitlab"
-    ts = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
-    return f"{host}_session_{ts}"
+    return f"{host}_session_{stamp or _run_stamp()}"
 
 
-def _resolve_session_path(url: str, session: str | None, session_file: str | None) -> Path:
+def _resolve_session_path(url: str, session: str | None, session_file: str | None,
+                          stamp: str | None = None) -> Path:
     """Resolve session JSONL path from CLI args."""
     if session_file:
         return Path(session_file)
     if session:
         return Path(f"{session}.jsonl")
-    return Path(f"results{os.sep}{_default_session_name(url)}.jsonl")
+    return Path(f"results{os.sep}{_default_session_name(url, stamp)}.jsonl")
 
 
 def _format_age(seconds: float) -> str:
@@ -127,11 +133,6 @@ def describe_index(path: str | Path, meta: dict[str, Any], projects: int, now: d
     if meta.get("is_completed") is False:
         details.append("INCOMPLETE (listing failed; rebuild with --dump-projects)")
     return f"Index: {path} ({when}; {', '.join(details)})"
-
-
-def _write_jsonl_line(fp: IO[str], record: dict[str, Any]) -> None:
-    """Write a JSONL record to an open file."""
-    fp.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def _report(message: str) -> None:
@@ -188,6 +189,11 @@ def _describe_options(args: CliArgs) -> str:
             "terms": terms,
             "active": _when(args.started_from, args.active_before),
             "file-changed": _when(args.file_changed_after, args.file_changed_before),
+            "filename": args.filename,
+            "extension": args.extension,
+            "download-files": args.download_files or None,
+            "download-max-size": (format_size(args.download_max_size) if args.download_max_size else "no limit")
+            if args.download_files else None,
             "session": args.session_file or args.session or "(default)",
             "resume": args.resume,
             "output-separated": args.output_separated or None,
@@ -303,6 +309,7 @@ def _run_dump_index(args: CliArgs) -> None:
 def _run_search(args: CliArgs) -> None:
     """Run term search workflow and write a session JSONL file."""
     glh = _mk_harvester(args)
+    stamp = _run_stamp()
 
     keywords = _load_keywords(search=args.search, terms_file=args.terms_file, terms=args.terms)
     if not keywords:
@@ -335,13 +342,18 @@ def _run_search(args: CliArgs) -> None:
         active_before=args.active_before,
         file_changed_after=args.file_changed_after,
         file_changed_before=args.file_changed_before,
+        filename=args.filename,
+        extension=args.extension,
     )
 
-    session_path = _resolve_session_path(glh.get_instance_id(), args.session, args.session_file)
-    session_path.parent.mkdir(parents=True, exist_ok=True)
+    session_path = _resolve_session_path(glh.get_instance_id(), args.session, args.session_file, stamp)
+    layout = OutputLayout(session_path, all_keywords)
+    downloader = (FileDownloader(layout, stamp, max_size=args.download_max_size)
+                  if args.download_files else None)
 
     done_keywords: set[str] = set()
     if args.resume:
+        _warn_changed_file_filter(glh, session_path, options)
         done_keywords = load_done_keywords(session_path)
         if done_keywords:
             keywords = [k for k in keywords if k not in done_keywords]
@@ -349,49 +361,43 @@ def _run_search(args: CliArgs) -> None:
             _report(f"Nothing to resume: all keywords already completed in {session_path}")
             return
 
-    mode = "a" if args.resume else "w"
-    with session_path.open(mode, encoding="utf-8") as sess_fp:
+    with SessionOutput(layout, resume=args.resume, downloader=downloader) as output:
         if args.resume:
-            _write_jsonl_line(
-                sess_fp,
-                {
-                    "type": "resume",
-                    "timestamp_utc": datetime.now(UTC).isoformat(),
-                    "done_keywords": len(done_keywords),
-                    "remaining_keywords": len(keywords),
-                },
+            output.resumed(
+                timestamp_utc=datetime.now(UTC).isoformat(),
+                done_keywords=len(done_keywords),
+                remaining_keywords=len(keywords),
             )
         else:
-            _write_jsonl_line(
-                sess_fp,
-                {
-                    "type": "meta",
-                    "timestamp_utc": datetime.now(UTC).isoformat(),
-                    "url": args.url,
-                    "config": args.config,
-                    "index_file": str(index_file),
-                    "batch_size": args.batch_size,
-                    "tokens": len(glh.tokens),
-                    "workers": args.workers,
-                    "index_rpm": args.index_rpm,
-                    "search_rpm": args.search_rpm,
-                    "jitter": list(args.jitter),
-                    "user_agent": args.user_agent,
-                    "user_agent_file": args.user_agent_file,
-                    "branches_per_page": args.branches_per_page,
-                    "index_branches": args.index_branches,
-                    "scan_branches": args.scan_branches,
-                    "forks": args.forks,
-                    "fork_diff_bases": args.fork_diff_bases,
-                    "started_from": args.started_from.isoformat() if args.started_from else None,
-                    "active_before": args.active_before.isoformat() if args.active_before else None,
-                    "file_changed_after": args.file_changed_after.isoformat() if args.file_changed_after else None,
-                    "file_changed_before": args.file_changed_before.isoformat() if args.file_changed_before else None,
-                    "keywords_count": len(keywords),
-                    "output_separated": args.output_separated,
-                    "post_process": list(args.post_process),
-                    "final_only": args.final_only,
-                },
+            output.meta(
+                timestamp_utc=datetime.now(UTC).isoformat(),
+                url=args.url,
+                config=args.config,
+                index_file=str(index_file),
+                batch_size=args.batch_size,
+                tokens=len(glh.tokens),
+                workers=args.workers,
+                index_rpm=args.index_rpm,
+                search_rpm=args.search_rpm,
+                jitter=list(args.jitter),
+                user_agent=args.user_agent,
+                user_agent_file=args.user_agent_file,
+                branches_per_page=args.branches_per_page,
+                index_branches=args.index_branches,
+                scan_branches=args.scan_branches,
+                forks=args.forks,
+                fork_diff_bases=args.fork_diff_bases,
+                started_from=args.started_from.isoformat() if args.started_from else None,
+                active_before=args.active_before.isoformat() if args.active_before else None,
+                file_changed_after=args.file_changed_after.isoformat() if args.file_changed_after else None,
+                file_changed_before=args.file_changed_before.isoformat() if args.file_changed_before else None,
+                **options.file_filter.to_meta(),
+                keywords_count=len(keywords),
+                output_separated=args.output_separated,
+                download_files=args.download_files,
+                download_max_size=args.download_max_size if args.download_files else None,
+                post_process=list(args.post_process),
+                final_only=args.final_only,
             )
 
         search_started = time.perf_counter()
@@ -399,25 +405,23 @@ def _run_search(args: CliArgs) -> None:
             projects=projects,
             keywords=keywords,
             options=options,
-            session_file=sess_fp,
+            output=output,
         )
         search_elapsed = time.perf_counter() - search_started
         incomplete = list(glh.incomplete_terms)
 
-        _write_jsonl_line(
-            sess_fp,
-            {
-                "type": "summary",
-                "hits": hits,
-                "completed": not incomplete,
-                "incomplete_terms": incomplete,
-                "elapsed_seconds": round(search_elapsed, 2),
-                "timestamp_utc": datetime.now(UTC).isoformat(),
-            },
+        output.summary(
+            hits=hits,
+            completed=not incomplete,
+            incomplete_terms=incomplete,
+            elapsed_seconds=round(search_elapsed, 2),
+            timestamp_utc=datetime.now(UTC).isoformat(),
         )
 
     _report(f"Session saved to: {session_path}")
     _report(f"Done. Keywords: {len(keywords)} | Hits: {hits} | Search time: {format_duration(search_elapsed)}")
+    if downloader is not None:
+        _report(f"Downloaded files: {downloader.summary()}")
     if incomplete:
         _report(
             f"INCOMPLETE: searches failed for {len(incomplete)} of {len(keywords)} terms "
@@ -427,24 +431,45 @@ def _run_search(args: CliArgs) -> None:
 
     # Split before post-processing: --final-only there may delete the session.
     if args.output_separated:
-        _separate_output(all_keywords, session_path)
+        _separate_output(all_keywords, layout)
 
     if args.post_process:
         _post_process(args, session_path, keep_session=bool(incomplete))
 
 
-def _separate_output(terms: list[str], session_path: Path) -> None:
-    """Write each term's hits to its own file (--output-separated); needs several terms."""
+def _warn_changed_file_filter(glh: GitlabHarvester, session_path: Path, options: ScanOptions) -> None:
+    """
+    --resume with other --filename/--extension than the session's first run:
+    the completed terms were searched in other files, so say so.
+    """
+    meta = load_session_meta(session_path)
+    if meta is None:
+        return
+    before = {key: meta.get(key) for key in ("filename", "extension")}
+    now = options.file_filter.to_meta()
+    if before != now:
+        def show(values: dict[str, Any]) -> str:
+            return ", ".join(f"{k} {v}" for k, v in values.items() if v) or "none"
+        glh.logger.warning(
+            "Resuming %s with other file filters (%s) than it was started with (%s): "
+            "terms already completed were searched with the old filters.",
+            session_path, show(now), show(before),
+        )
+
+
+def _separate_output(terms: list[str], layout: OutputLayout) -> None:
+    """Write each term's hits to <dir>/<term>/<session>.jsonl (--output-separated); needs several terms."""
     if len(terms) < 2:
         _report("--output-separated ignored: it needs several search terms.")
         return
-    files = split_session_by_term(session_path, terms)
+    files = split_session_by_term(layout.session_path, terms, layout)
     if not files:
         _report("Separated output: no hits, no per-term files written.")
         return
-    shown = ", ".join(f.name for f in files) if len(files) <= 10 else f"{len(files)} files"
+    shown = (", ".join(f.relative_to(layout.root).as_posix() for f in files) if len(files) <= 10
+             else f"{len(files)} files")
     _report(f"Separated output: {terminal_utils.plural(len(files), 'term file')} "
-            f"in {session_path.parent} ({shown})")
+            f"in {layout.root} ({shown})")
 
 
 def _post_process(args: CliArgs, session_path: Path, keep_session: bool = False) -> None:

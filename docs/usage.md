@@ -10,6 +10,7 @@ Complete reference for the CLI. For a short introduction see the [README](../REA
 - [Forks](#forks)
 - [Time filters](#time-filters)
 - [Search terms](#search-terms)
+- [Downloading the files with hits](#downloading-the-files-with-hits---download-files)
 - [Parallel requests](#parallel-requests)
 - [Sessions and resume](#sessions-and-resume)
 - [Post-processing](#post-processing)
@@ -26,7 +27,9 @@ A search run has two phases:
    optionally the branch names. The index is built once and reused by later runs.
 2. **Scan.** For every search term, every project in the index and every selected
    branch, it calls GitLab's blob search API (`/projects/:id/search?scope=blobs`).
-   Hits are streamed to a JSONL *session* file as they are found.
+   Hits are streamed to a JSONL *session* file as they are found. The search can be
+   limited to some files (`--filename`, `--extension`), and the files with hits can be
+   saved one by one (`--download-files`).
 
 Repositories are never cloned, and memory use doesn't grow with the instance size.
 
@@ -234,6 +237,76 @@ gitlab-harvester -u ... -t ... -f words.txt
 ignored. Each term is passed to GitLab search unchanged; how it's matched
 (basic or advanced search, case sensitivity) depends on the GitLab instance.
 
+### Only some files: --filename, --extension
+
+```bash
+gitlab-harvester -u ... -t ... -s password --extension py              # .py, py and *.py are the same
+gitlab-harvester -u ... -t ... -s password --filename settings.py      # an exact name, extension included
+gitlab-harvester -u ... -t ... -f words.txt --filename '*.env'         # a mask
+gitlab-harvester -u ... -t ... -s token --filename 'config*' --extension yml
+```
+
+| Option | Matches | Examples |
+|---|---|---|
+| `--filename PATTERN` | the file name: an exact name, **which may include the extension**, or a **mask with `*`** (any characters) | `settings.py`, `.env`, `Dockerfile`, `*.env`, `config*`, `docker-compose*.yml`, `*secret*`; with `/` the end of the path: `config/*.yml` |
+| `--extension EXT` | the file name ends with `.EXT` | `py`, `.py`, `*.py` (the same), `tar.gz` |
+
+- Both are case-insensitive; with both, a file must match both. `*` is the only
+  wildcard (`?` and `[` are literal). No spaces.
+- GitLab does the filtering: the harvester sends `password filename:*.env` as the
+  search string (the code search `filename:`/`extension:` filters, supported by
+  basic and advanced search). The term in the session stays `password`.
+- Every result is re-checked on the client, by the same rules as above. That keeps
+  the session exact where GitLab is looser (basic search matches `filename:` against
+  the end of the whole path, so `filename:config.yml` also returns `myconfig.yml`)
+  or ignores a filter.
+- The filters narrow a search; a term (`-s`/`-f`) is still needed. GitLab returns
+  nothing for a query that has filters only.
+- With `--file-changed-*`, the name check runs first, so files outside the filter
+  never cost a commits request.
+- The session `meta` records `filename` and `extension`. `--resume` with other
+  filters warns: the terms already done were searched with the old ones.
+
+## Downloading the files with hits: --download-files
+
+```bash
+gitlab-harvester -u ... -t ... -s password --download-files --session audit
+# -> audit.jsonl
+#    password/files/acme_backend_api-service_main_20261117093000_password_config_settings.py
+gitlab-harvester -u ... -t ... -f words.txt --extension yml --download-files --download-max-size 2M
+```
+
+Every file that produced a hit is saved into the term's `files` directory next to
+the session: `<dir>/<term>/files/` (`results/<term>/files/` with the default session
+location), created on the first download. The name is
+
+```
+<project>_<branch>_<timestamp>_<term>_<path>
+```
+
+with `/` in the project and the path replaced by `_`, so it ends with the original
+file name and extension; the timestamp is the run's start (UTC, the same as in a
+default session name). The term directory is named like the term, sanitized for the
+file system (see `--output-separated` below). Unsafe characters become `_`, long parts
+are shortened (the path keeps its end), and a taken name gets `~2`, `~3`, … before
+the extension; existing files are never overwritten.
+
+- Every hit of a downloaded file gets a `"file"` key with the local path.
+- `--download-max-size SIZE` (default `10M`; bytes or `k`, `M`, `G`; `0` = no limit)
+  skips bigger files: by `Content-Length` before any data is read, else as soon as
+  the stream passes the limit. They are counted in the summary.
+- One request per file (`GET /projects/:id/repository/files/:path/raw?ref=<branch>`),
+  counted by `--index-rpm`. Files are streamed to `<name>.part` and renamed when
+  complete, so memory stays constant and a broken download leaves nothing behind.
+- A file found by several terms is downloaded once and copied locally for the other
+  terms; another branch or project is another file.
+- A failed download is a warning (`Could not download <path> from <project> @
+  <branch> (HTTP 500 ...)`): the hits stay in the session without a `"file"` key, and
+  the term still counts as done (the search itself missed nothing).
+- The run ends with a summary line: `Downloaded files: 12 files (340 KiB) downloaded
+  to results/<term>/files, 1 skipped: larger than 10 MiB`.
+- The copies are as sensitive as the repositories they come from.
+
 ## Parallel requests
 
 ```bash
@@ -382,23 +455,35 @@ gitlab-harvester -u ... -t ... -f words.txt --session audit --resume
 
 ```bash
 gitlab-harvester -u ... -t ... -f words.txt --session audit --output-separated
-# -> audit.jsonl (full session) + audit.password.jsonl, audit.api_key.jsonl, ...
+# -> audit.jsonl (full session) + password/audit.jsonl, api_key/audit.jsonl, ...
 ```
 
 With several search terms, `--output-separated` also writes each term's hits to its
-own file next to the session, named `<session-stem>.<term>.jsonl`, so you can triage
-one kind of finding at a time. It needs more than one term (with a single term it is
-ignored with a notice).
+own file in a directory per term next to the session, `<dir>/<term>/<session>.jsonl`
+(the same directory that holds the term's `files/` with `--download-files`), so you
+can triage one kind of finding at a time. It needs more than one term (with a single
+term it is ignored with a notice).
+
+```
+results/
+  <host>_session_<ts>.jsonl          the session: every term, --resume checkpoints
+  password/
+    <host>_session_<ts>.jsonl        --output-separated: the hits of "password"
+    files/                           --download-files: the files with hits
+  api_key/
+    ...
+```
 
 - The session file itself is still written in full — the per-term files are an extra
   view of it, each a valid session-hit file (`{"term", "result"}` lines), so
   `-m dedup` / `-m convert` work on them too.
 - Only terms that produced at least one hit get a file. The split runs after the
   search over the whole session, so with `--resume` the files cover every run.
-- The term is sanitized for the file system: characters other than letters, digits,
-  `.`, `-` and `_` become `_` (so a term like `api/key` or `BEGIN RSA PRIVATE KEY`
-  is safe on Windows, macOS and Linux and can't escape the session's directory), the
-  name is shortened, and terms that would collide get a numeric suffix.
+- The term directory name is sanitized for the file system: characters other than
+  letters, digits, `.`, `-` and `_` become `_` (so a term like `api/key` or
+  `BEGIN RSA PRIVATE KEY` is safe on Windows, macOS and Linux and can't escape the
+  session's directory), the name is shortened, and terms that would collide get a
+  numeric suffix.
 - It combines with `--post-process`: the per-term split happens first, so `--final-only`
   (which deletes the session) still leaves the per-term files.
 
@@ -571,7 +656,7 @@ All files are UTF-8 JSONL: one JSON object per line.
 
 | Record | Content |
 |---|---|
-| `{"type": "meta", ...}` | run parameters: url, index file, branch and fork modes, `started_from`, number of terms |
+| `{"type": "meta", ...}` | run parameters: url, index file, branch and fork modes, `started_from`, `filename`, `extension`, `download_files`, number of terms |
 | `{"term": ..., "result": {...}}` | hits of one term in one project (see below) |
 | `{"type": "keyword_done", "term": ..., "hit_counter": N}` | checkpoint after a term; `hit_counter` is cumulative |
 | `{"type": "resume", "done_keywords": N, "remaining_keywords": M}` | start of a resumed run |
@@ -588,7 +673,8 @@ All files are UTF-8 JSONL: one JSON object per line.
 ```
 
 `url` links to the file and starting line of the snippet. Branch names and paths
-are URL-encoded.
+are URL-encoded. With `--download-files`, a hit whose file was saved also has
+`"file": "results/password/files/<name>"`, the local copy.
 
 ## Option reference
 
@@ -604,7 +690,7 @@ are URL-encoded.
 | `--[no-]insecure` | off | disable TLS verification explicitly (never automatic) |
 | `-w, --workers N` | 1 | parallel API requests per token (1-64); only for instances without rate limits |
 | `--rpm N` | 0 | shortcut for `--index-rpm` and `--search-rpm` |
-| `--index-rpm N` | 0 | max non-search API requests per minute per worker (0 = no limit) |
+| `--index-rpm N` | 0 | max non-search API requests per minute per worker, file downloads included (0 = no limit) |
 | `--search-rpm N` | 0 | max search API requests per minute per worker (0 = no limit) |
 | `--jitter RANGE` | off | random delay before every request: `MAX` or `MIN-MAX` seconds (`0.03`, `0.01-0.05`, `10ms-50ms`) |
 | `-A, --user-agent STRING` | python-gitlab's | fixed User-Agent of every request |
@@ -616,6 +702,8 @@ are URL-encoded.
 | `-m, --mode` | `search` | `search`, `dump-index`, `dedup`, `convert` |
 | `-s, --search TERM` | — | single term |
 | `-f, --terms-file FILE` | — | file with one term per line |
+| `--filename PATTERN` | — | search only files with this name: exact (`settings.py`, extension included) or a mask with `*` (`*.env`, `config*`) |
+| `--extension EXT` | — | search only files with this extension (`py`, `.py` and `*.py` are the same) |
 | `--index-file FILE` | `<host>_project_index.jsonl` | project index location |
 | `--dump-projects` | off | rebuild the index before searching |
 | `-bs, --batch-size N` | 100 | page size for project listing |
@@ -629,7 +717,9 @@ are URL-encoded.
 | `--session NAME` | — | session file `NAME.jsonl` |
 | `--session-file FILE` | `results/<host>_session_<ts>.jsonl` | explicit session file |
 | `--resume` | off | continue a session, skipping completed terms |
-| `--[no-]output-separated` | off | with several terms, also write each term's hits to `<session>.<term>.jsonl` |
+| `--[no-]output-separated` | off | with several terms, also write each term's hits to `<term>/<session>.jsonl` |
+| `--[no-]download-files` | off | save every file with hits to `<term>/files/` next to the session |
+| `--download-max-size SIZE` | `10M` | with `--download-files`: skip bigger files (`500k`, `10M`, `1G`; `0` = no limit) |
 | `--input-file`, `--output-file` | — | files for `dedup` and `convert` |
 | `--hash-algo` | `blake2b` | dedup hash |
 | `--[no-]normalize-hits` | on | collapse whitespace before comparing hits in dedup (`--no-normalize-hits` = exact) |

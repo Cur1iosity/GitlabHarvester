@@ -4,6 +4,73 @@ All notable changes to GitlabHarvester are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] - 2026-11-17
+
+### Added
+
+- **Search only in specific files**: `--filename PATTERN` and `--extension EXT`.
+  `--filename` takes an exact file name, which may include the extension
+  (`settings.py`, `.env`, `Dockerfile`), or a mask where `*` matches any characters
+  (`*.env`, `config*`, `docker-compose*.yml`); a pattern with `/` matches the end of
+  the path (`config/*.yml`). `--extension` drops the extra dots, so `py`, `.py` and
+  `*.py` are the same. Both are case-insensitive and combine (a file must match
+  both). GitLab does the filtering — the options become the code search
+  `filename:`/`extension:` filters in the search string, so there are fewer result
+  pages — and the harvester re-checks every result path, so the session holds only
+  the files asked for even where GitLab is looser (basic search matches `filename:`
+  against the end of the whole path) or ignores a filter. The term in the session
+  stays as typed; the filters are recorded in the session `meta`, and `--resume`
+  with other filters warns. With `--file-changed-*`, files outside the filter never
+  cost a commits request.
+- **Download the files with hits** for offline analysis: `--download-files` saves
+  every file that produced a hit to `<term>/files/` next to the session
+  (`results/<term>/files/` by default), named
+  `<project>_<branch>_<timestamp>_<term>_<path>` (file-system-safe, the original
+  file name and extension at the end, never overwriting an existing file). Every hit
+  of a downloaded file gets a `"file"` key with the local path. Files are streamed
+  (constant memory, no half-written files left behind), go through the same client,
+  token, proxy, TLS settings and `--index-rpm` limit as the other requests, run in
+  the search workers, and a file found by several terms is downloaded once and
+  copied locally. A failed download is a one-line warning: the hits are kept and the
+  term still counts as done. The run ends with a `Downloaded files: …` summary.
+- **Size limit for downloads**: `--download-max-size SIZE` (default `10M`; bytes or
+  `k`, `M`, `G`; `0` = no limit) skips big files — by `Content-Length` before any
+  data is read, else as soon as the stream passes the limit.
+- New options in `config.example.ini`: `filename`, `extension`, `download-files`,
+  `download-max-size`.
+- Use cases "Search only in specific files" and "Save the files with hits for deeper
+  analysis" in `docs/USE_CASES.md`; `docs/usage.md` documents the filters, the
+  downloads and the output layout.
+
+### Changed
+
+- **Per-term output directories.** `--output-separated` now writes each term's hits
+  to `<dir>/<term>/<session>.jsonl` (was `<dir>/<session>.<term>.jsonl`), the same
+  term directory that holds the term's downloaded `files/`:
+
+  ```
+  results/
+    <host>_session_<ts>.jsonl          the session (every term, --resume)
+    password/
+      <host>_session_<ts>.jsonl        --output-separated
+      files/                           --download-files
+  ```
+
+  The session file itself stays where it was. Scripts that read
+  `<session>.<term>.jsonl` need the new path.
+- **Output kept apart from the search engine.** A new module `glh/output.py` owns
+  everything a run writes: `OutputLayout` (where the session, per-term files and
+  downloads go), `SearchOutput` (the sink the engine hands hit records, checkpoints
+  and files to) and `SessionOutput` (the session file with its `meta`, `resume` and
+  `summary` records). `GitlabHarvester.search_keywords()` takes `output=` (the
+  `session_file=` stream still works), so the engine can feed any sink.
+- Fake GitLab: blob search parses the `filename:`, `path:` and `extension:` filters
+  like GitLab basic search, and serves `GET /projects/:id/repository/files/:path/raw`.
+
+**Compatibility:** Python 3.10–3.14. No new dependencies. Existing commands, config
+files and sessions keep working; only the location of the `--output-separated` files
+changed.
+
 ## [1.2.2] - 2026-11-13
 
 ### Added
