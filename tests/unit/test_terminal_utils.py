@@ -1,4 +1,4 @@
-"""Console progress output (glh.utils.terminal_utils) and its log handler."""
+"""Console progress output (glh.ui: statusline, progress, formatting, ansi) and its log handler."""
 
 from __future__ import annotations
 
@@ -6,17 +6,12 @@ import logging
 
 import pytest
 
-from glh.utils import logging_utils, terminal_utils
-from glh.utils.terminal_utils import (
-    Progress,
-    StatusLine,
-    display_width,
-    fit_width,
-    format_clock,
-    format_duration,
-    human_int,
-    plural,
-)
+from glh.ui import ansi, statusline
+from glh.ui.ansi import HINT_COLOR, RESET
+from glh.ui.formatting import display_width, fit_width, format_clock, format_duration, human_int, plural
+from glh.ui.logs import build_logger
+from glh.ui.progress import Progress
+from glh.ui.statusline import StatusLine
 from tests.helpers import FakeStream
 
 
@@ -326,10 +321,10 @@ def test_progress_context_manager_is_silent_on_success_without_summary():
 def test_console_log_handler_goes_to_stdout_around_the_status_line(monkeypatch):
     status, err = make_status()
     out = FakeStream(True)
-    monkeypatch.setattr(terminal_utils, "STATUS", status)
+    monkeypatch.setattr(statusline, "STATUS", status)
     monkeypatch.setattr("sys.stdout", out)
 
-    logger = logging_utils.build_logger(name="glh-test-console", level=logging.WARNING, fmt="%(levelname)s %(message)s")
+    logger = build_logger(name="glh-test-console", level=logging.WARNING, fmt="%(levelname)s %(message)s")
     try:
         status.attach(lambda: "Searching | 1/2 projects")
         logger.warning("500 | http://gitlab.test/p Branch: main")
@@ -436,7 +431,7 @@ def test_hint_is_a_turquoise_line_above_the_status_line_and_is_erased(monkeypatc
     status.attach(lambda: "Listing projects")
     status.set_hint("Tip: reuse the index")
     out = stream.getvalue()
-    assert terminal_utils.HINT_COLOR + "Tip: reuse the index" + terminal_utils.RESET + "\n" in out
+    assert HINT_COLOR + "Tip: reuse the index" + RESET + "\n" in out
     assert out.endswith("Listing projects")
     status.write_line("Indexed 9 projects")
     tail = stream.getvalue()[len(out):]
@@ -474,6 +469,6 @@ def test_no_color_keeps_the_hint_plain(monkeypatch):
 def test_supports_ansi_needs_a_terminal(monkeypatch):
     from tests.helpers import FakeStream
 
-    assert not terminal_utils.supports_ansi(FakeStream(tty=False))
+    assert not ansi.supports_ansi(FakeStream(tty=False))
     monkeypatch.setenv("TERM", "dumb")
-    assert not terminal_utils.supports_ansi(FakeStream(tty=True))
+    assert not ansi.supports_ansi(FakeStream(tty=True))

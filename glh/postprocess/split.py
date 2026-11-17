@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import IO
 
 # Re-exported: the term names live with the rest of the output layout.
-from glh.output import MAX_TERM_LEN, OutputLayout, safe_term_filenames
+from glh.output.layout import MAX_TERM_LEN, OutputLayout, safe_term_filenames
 
 __all__ = ["MAX_TERM_LEN", "safe_term_filenames", "split_session_by_term", "term_file_paths"]
 

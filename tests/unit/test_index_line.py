@@ -1,4 +1,4 @@
-"""The 'Index: ...' line shown before the search plan (glh.modes.describe_index)."""
+"""The 'Index: ...' line shown before the search plan (glh.cli.report)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from glh.modes import describe_index
+from glh.cli.report import describe_index
 
 NOW = datetime(2024, 6, 10, 12, 0, tzinfo=timezone.utc)
 
@@ -49,7 +49,7 @@ def test_missing_build_time():
 
 
 def test_index_hint_names_the_file_and_how_to_reuse_it():
-    from glh.modes import index_hint
+    from glh.cli.commands.common import index_hint
 
     assert "--index-file idx.jsonl" in index_hint("idx.jsonl", mode="search", rebuild=False)
     assert "--dump-projects rebuilds idx.jsonl" in index_hint("idx.jsonl", mode="search", rebuild=True)

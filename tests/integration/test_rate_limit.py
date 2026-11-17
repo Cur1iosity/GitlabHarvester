@@ -7,8 +7,10 @@ import io
 import pytest
 
 from fakegitlab import FakeGitLab
-from glh import ratelimit
-from glh.planner import ScanOptions
+from glh.domain.planning import ScanOptions
+from glh.gitlab import throttling
+from glh.ui import statusline
+from glh.ui.statusline import StatusLine
 from tests.helpers import load_index
 
 
@@ -28,8 +30,8 @@ def waits(monkeypatch) -> list[float]:
             recorded.append(seconds)
         local.offset = getattr(local, "offset", 0.0) + seconds
 
-    monkeypatch.setattr(ratelimit, "_sleep", sleep)
-    monkeypatch.setattr(ratelimit, "_now", lambda: time.monotonic() + getattr(local, "offset", 0.0))
+    monkeypatch.setattr(throttling, "_sleep", sleep)
+    monkeypatch.setattr(throttling, "_now", lambda: time.monotonic() + getattr(local, "offset", 0.0))
     return recorded
 
 
@@ -85,12 +87,11 @@ def test_every_worker_has_its_own_budget(fake_gitlab: FakeGitLab, make_harvester
 
 
 def test_search_plan_names_the_limits(make_harvester, tmp_path, waits, capsys, monkeypatch):
-    from glh.utils import terminal_utils
     from tests.helpers import FakeStream
 
     projects = index_of(make_harvester, tmp_path)
     err = FakeStream(False)
-    monkeypatch.setattr(terminal_utils, "STATUS", terminal_utils.StatusLine(err, ticker=False))
+    monkeypatch.setattr(statusline, "STATUS", StatusLine(err, ticker=False))
     search(make_harvester(workers=2, index_rpm=300, search_rpm=30), projects, terms=["password"])
     from tests.helpers import row
 
@@ -116,12 +117,11 @@ def test_jitter_delays_every_request(fake_gitlab: FakeGitLab, make_harvester, tm
 
 
 def test_search_plan_names_the_jitter(make_harvester, tmp_path, waits, monkeypatch):
-    from glh.utils import terminal_utils
     from tests.helpers import FakeStream
 
     projects = index_of(make_harvester, tmp_path)
     err = FakeStream(False)
-    monkeypatch.setattr(terminal_utils, "STATUS", terminal_utils.StatusLine(err, ticker=False))
+    monkeypatch.setattr(statusline, "STATUS", StatusLine(err, ticker=False))
     search(make_harvester(search_rpm=30, jitter=(0.0, 0.03)), projects, terms=["password"])
     from tests.helpers import row
 

@@ -1,4 +1,4 @@
-"""--to-zip (glh.archive): which files of a run go into the archive, and under which names."""
+"""--to-zip (glh.output.archive): which files of a run go into the archive, and under which names."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from glh import archive
+from glh.output import archive
 
 
 def hit_record(term: str, *files: str | None) -> dict:

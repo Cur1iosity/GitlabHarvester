@@ -1,4 +1,4 @@
-"""--auto-limits during a run (glh.autolimit): proposals after HTTP 429 and the non-blocking prompt."""
+"""--auto-limits during a run (glh.limits.advisor, glh.limits.console): proposals after HTTP 429 and the non-blocking prompt."""
 
 from __future__ import annotations
 
@@ -7,8 +7,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from glh.autolimit import BADGE, PENDING_BADGE, LimitAdvisor, LimiterConsole
-from glh.utils.terminal_utils import StatusLine
+from glh.limits.advisor import LimitAdvisor
+from glh.limits.console import BADGE, LimiterConsole, PENDING_BADGE
+from glh.ui.statusline import StatusLine
 from tests.helpers import FakeStream, LogCapture
 
 SEARCH_URL = "https://gitlab.test/api/v4/projects/1/search?scope=blobs&search=x"

@@ -16,13 +16,13 @@ from fakegitlab import FakeGitLab
 from tests.helpers import (
     DEFAULT_BRANCHES,
     DEFAULT_PROJECT_IDS_DESC,
-    PASSWORD_HITS_DEFAULT_BRANCH,
-    PASSWORD_HITS_PER_BRANCH,
-    Session,
     load_index,
     parse_blocks,
+    PASSWORD_HITS_DEFAULT_BRANCH,
+    PASSWORD_HITS_PER_BRANCH,
     read_jsonl,
     row,
+    Session,
 )
 
 

@@ -1,10 +1,12 @@
-"""Output blocks (glh.utils.terminal_utils.format_block), the echoed command and its masking."""
+"""Output blocks (glh.ui.blocks), the echoed command and its masking."""
 
 from __future__ import annotations
 
-from glh.tokens import mask_argv
-from glh.utils import terminal_utils
-from glh.utils.terminal_utils import StatusLine, compact_block, format_block, style
+from glh.cli.tokens import mask_argv
+from glh.ui import ansi
+from glh.ui.ansi import style
+from glh.ui.blocks import compact_block, format_block
+from glh.ui.statusline import StatusLine
 from tests.helpers import FakeStream, parse_blocks
 
 ROWS = [("terms", 1), ("projects", "23,982 of 30,639"), ("skipped", ["496 empty", "2,087 forks"]),
@@ -58,10 +60,10 @@ def test_mask_argv_hides_tokens_and_proxy_passwords():
 
 def test_style_only_on_an_ansi_terminal(monkeypatch):
     monkeypatch.delenv("NO_COLOR", raising=False)
-    monkeypatch.setattr(terminal_utils, "supports_ansi", lambda stream: True)
+    monkeypatch.setattr(ansi, "supports_ansi", lambda stream: True)
     assert style("$ cmd", "1;94", FakeStream(tty=True)) == "\x1b[1;94m$ cmd\x1b[0m"
     monkeypatch.setenv("NO_COLOR", "1")
     assert style("$ cmd", "1;94", FakeStream(tty=True)) == "$ cmd"
     monkeypatch.delenv("NO_COLOR")
-    monkeypatch.setattr(terminal_utils, "supports_ansi", lambda stream: False)
+    monkeypatch.setattr(ansi, "supports_ansi", lambda stream: False)
     assert style("$ cmd", "1;94", FakeStream(tty=False)) == "$ cmd"

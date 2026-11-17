@@ -6,8 +6,9 @@ import io
 import json
 from pathlib import Path
 
-from glh.output import OutputLayout, SearchOutput, SessionOutput
-from glh.session import load_session_meta
+from glh.output.layout import OutputLayout
+from glh.output.session_reader import load_session_meta
+from glh.output.sink import SearchOutput, SessionOutput
 from tests.helpers import read_jsonl
 
 

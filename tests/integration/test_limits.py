@@ -7,11 +7,12 @@ import io
 import pytest
 
 from fakegitlab import FakeGitLab
-from glh import limits
-from glh.autolimit import LimitAdvisor
-from glh.limits import INDEX, SEARCH, LimitFinder, Settings
-from glh.planner import ScanOptions
-from glh.utils.terminal_utils import StatusLine
+from glh.domain.planning import ScanOptions
+from glh.limits.advisor import LimitAdvisor
+from glh.limits.constants import INDEX, SEARCH
+from glh.limits.finder import LimitFinder
+from glh.limits.recommend import recommend, Settings
+from glh.ui.statusline import StatusLine
 from tests.helpers import FakeStream, load_index
 
 
@@ -110,4 +111,4 @@ def test_advisor_proposes_limits_during_a_rate_limited_search(fake_gitlab: FakeG
 def test_find_without_a_project_reports_an_error(make_harvester, kinds):
     results = finder_for(make_harvester(), max_requests=20).find(kinds, project_id=None)
     assert results[SEARCH].source == "error"
-    assert limits.recommend(results, current=Settings()).search_rpm == 0
+    assert recommend(results, current=Settings()).search_rpm == 0

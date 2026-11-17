@@ -10,8 +10,8 @@ from datetime import datetime, timezone
 import pytest
 
 from fakegitlab import FakeGitLab
-from glh.planner import ScanOptions
-from tests.helpers import Session, capture_logs, load_index
+from glh.domain.planning import ScanOptions
+from tests.helpers import capture_logs, load_index, Session
 
 
 def utc(*args: int) -> datetime:

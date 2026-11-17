@@ -11,13 +11,10 @@ from urllib.parse import unquote, urlsplit
 import pytest
 
 from fakegitlab import FakeGitLab
-from glh.planner import ScanOptions
-from tests.helpers import (
-    PASSWORD_HITS_DEFAULT_BRANCH,
-    PASSWORD_HITS_PER_BRANCH,
-    Session,
-    capture_logs,
-)
+from glh.domain.planning import ScanOptions
+from glh.ui import statusline
+from glh.ui.statusline import StatusLine
+from tests.helpers import capture_logs, PASSWORD_HITS_DEFAULT_BRANCH, PASSWORD_HITS_PER_BRANCH, Session
 
 
 @pytest.fixture
@@ -218,7 +215,7 @@ def test_error_body_is_hidden_by_default_and_shown_at_debug(fake_gitlab: FakeGit
 
 def test_failed_term_is_not_a_resume_checkpoint(fake_gitlab: FakeGitLab, indexed, tmp_path: Path):
     """Regression: a term whose searches failed used to be marked done, so --resume skipped it."""
-    from glh.session import load_done_keywords
+    from glh.output.session_reader import load_done_keywords
 
     glh, projects = indexed
     fake_gitlab.add_fault({"match": {"path": "^/api/v4/projects/301/search$", "query": {"search": "api_key"}},
@@ -341,13 +338,12 @@ def test_progress_counts_only_projects_that_are_scanned(fake_gitlab: FakeGitLab,
     import re
     from datetime import datetime, timezone
 
-    from glh.utils import terminal_utils
     from tests.helpers import FakeStream
 
     glh, projects = indexed
     tty = FakeStream(True)
-    status = terminal_utils.StatusLine(tty, columns=lambda: 400, ticker=False, refresh_interval=0)  # draw every update
-    monkeypatch.setattr(terminal_utils, "STATUS", status)
+    status = StatusLine(tty, columns=lambda: 400, ticker=False, refresh_interval=0)  # draw every update
+    monkeypatch.setattr(statusline, "STATUS", status)
 
     since = datetime(2024, 6, 2, tzinfo=timezone.utc)
     _, _, session = search(glh, projects, ["password", "token"], scan_branches="all", forks_mode="skip",

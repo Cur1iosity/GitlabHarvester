@@ -14,10 +14,9 @@ import gitlab
 import gitlab.exceptions
 import pytest
 
-from glh.exceptions import GitlabHarvesterError
-
 from fakegitlab import FakeGitLab
-from glh.planner import ScanOptions
+from glh.domain.planning import ScanOptions
+from glh.exceptions import GitlabHarvesterError
 
 EXPECTED_ENDPOINTS = {"user", "projects", "branches", "project_search"}
 
@@ -112,8 +111,9 @@ def test_oneshot_handlers_override_the_data_driven_api(fake_gitlab: FakeGitLab):
 
 def test_file_filters_and_downloads_use_only_known_endpoints_and_parameters(fake_gitlab: FakeGitLab, make_harvester,
                                                                             tmp_path):
-    from glh.downloads import FileDownloader
-    from glh.output import OutputLayout, SearchOutput
+    from glh.output.downloads import FileDownloader
+    from glh.output.layout import OutputLayout
+    from glh.output.sink import SearchOutput
 
     glh = make_harvester()
     index = glh.build_project_index(filename=str(tmp_path / "idx.jsonl"))

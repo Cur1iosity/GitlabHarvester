@@ -6,7 +6,8 @@ import argparse
 
 import pytest
 
-from glh.cli import CliParser, parse_branches
+from glh.cli.parser import CliParser
+from glh.cli.values import parse_branches
 
 
 @pytest.mark.parametrize(("raw", "expected"), [("default", "default"), (" ALL ", "all"), ("10", 10), ("1", 1)])
@@ -164,7 +165,7 @@ def test_config_alias_and_option_together_is_a_duplicate(tmp_path: Path, capsys)
 
 import io  # noqa: E402
 
-from glh.cli import _BANNER, get_banner  # noqa: E402
+from glh.cli.banner import _BANNER, get_banner
 
 
 @pytest.mark.parametrize("encoding", ["utf-8", "utf-16"])
@@ -254,7 +255,7 @@ def test_output_separated_flag():
 def test_token_options():
     a = CliParser.parse([])
     assert a.token is None and a.token_file is None
-    # -t keeps the raw value; the ';' split into a token list happens in modes._resolve_tokens.
+    # -t keeps the raw value; the ';' split into a token list happens in glh.cli.commands.common.resolve_tokens.
     assert CliParser.parse(["-t", "glpat-a;glpat-b"]).token == "glpat-a;glpat-b"
     assert CliParser.parse(["--token-file", "tokens.txt"]).token_file == "tokens.txt"
 

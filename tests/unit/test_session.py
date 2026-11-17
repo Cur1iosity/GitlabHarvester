@@ -1,11 +1,11 @@
-"""Session resume support (glh.session) and CLI session path resolution."""
+"""Session resume support (glh.output.session_reader) and CLI session path resolution."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from glh.modes import _load_keywords, _resolve_session_path
-from glh.session import load_done_keywords
+from glh.cli.commands.common import load_keywords, resolve_session_path
+from glh.output.session_reader import load_done_keywords
 from tests.helpers import write_jsonl
 
 
@@ -48,15 +48,15 @@ def test_ignores_broken_and_truncated_lines(tmp_path: Path):
 def test_keywords_file_skips_comments_and_blanks(tmp_path: Path):
     terms = tmp_path / "terms.txt"
     terms.write_text("# comment\npassword\n\n  api_key  \n#x\nключ\n", encoding="utf-8")
-    assert _load_keywords(search=None, terms_file=str(terms)) == ["password", "api_key", "ключ"]
-    assert _load_keywords(search="  token ", terms_file=None) == ["token"]
-    assert _load_keywords(search="   ", terms_file=None) == []
+    assert load_keywords(search=None, terms_file=str(terms)) == ["password", "api_key", "ключ"]
+    assert load_keywords(search="  token ", terms_file=None) == ["token"]
+    assert load_keywords(search="   ", terms_file=None) == []
 
 
 def test_session_path_resolution(tmp_path: Path):
-    assert _resolve_session_path("h", None, str(tmp_path / "x.jsonl")) == tmp_path / "x.jsonl"
-    assert _resolve_session_path("h", "audit", None) == Path("audit.jsonl")
-    default = _resolve_session_path("gitlab_example_com", None, None)
+    assert resolve_session_path("h", None, str(tmp_path / "x.jsonl")) == tmp_path / "x.jsonl"
+    assert resolve_session_path("h", "audit", None) == Path("audit.jsonl")
+    default = resolve_session_path("gitlab_example_com", None, None)
     assert default.parent == Path("results")
     assert default.name.startswith("gitlab_example_com_session_")
     assert ":" not in default.name

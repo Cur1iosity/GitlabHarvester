@@ -15,10 +15,11 @@ from urllib.parse import unquote
 import pytest
 
 from fakegitlab import FakeGitLab
-from glh.downloads import FileDownloader
-from glh.output import OutputLayout, SearchOutput
-from glh.planner import ScanOptions
-from tests.helpers import Session, capture_logs
+from glh.domain.planning import ScanOptions
+from glh.output.downloads import FileDownloader
+from glh.output.layout import OutputLayout
+from glh.output.sink import SearchOutput
+from tests.helpers import capture_logs, Session
 
 STAMP = "20261117093000"
 

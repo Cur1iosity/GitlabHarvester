@@ -1,12 +1,12 @@
-"""--project-filter (glh.projectfilter) and its place in the scan plan."""
+"""--project-filter (glh.domain.project_filter) and its place in the scan plan."""
 
 from __future__ import annotations
 
 import pytest
 
-from glh.cli import CliParser
-from glh.planner import SKIP_FILTERED, ScanOptions, build_scan_plan, skip_reason
-from glh.projectfilter import ProjectFilter, ProjectFilterError, parse_patterns, project_path
+from glh.cli.parser import CliParser
+from glh.domain.planning import build_scan_plan, ScanOptions, SKIP_FILTERED, skip_reason
+from glh.domain.project_filter import parse_patterns, project_path, ProjectFilter, ProjectFilterError
 
 
 def project(path: str, pid: int = 1, **extra) -> dict:

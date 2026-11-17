@@ -31,7 +31,7 @@ TERM = os.environ.get("GLH_CONTRACT_TERM", "")
 
 pytestmark = pytest.mark.skipif(not (URL and TOKEN), reason="GLH_CONTRACT_URL / GLH_CONTRACT_TOKEN not set")
 
-# Fields GitlabHarvester reads (glh/harvester.py: reduce_project_fields, scan_branch, get_branches).
+# Fields GitlabHarvester reads (glh/engine/harvester.py: reduce_project_fields, scan_branch, get_branches).
 HARVESTER_PROJECT_FIELDS = {"id", "web_url", "path_with_namespace", "default_branch", "empty_repo",
                             "created_at", "last_activity_at"}
 HARVESTER_BLOB_FIELDS = {"path", "startline", "data"}

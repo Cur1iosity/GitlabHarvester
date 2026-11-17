@@ -83,13 +83,13 @@ def test_api_methods_require_initialized_client():
     (requests.exceptions.ConnectTimeout("timed out"), "ConnectTimeout: timed out"),
 ])
 def test_describe_api_error_is_a_short_line(error, expected):
-    from glh.harvester import describe_api_error
+    from glh.gitlab.errors import describe_api_error
 
     assert describe_api_error(error) == expected
 
 
 def test_describe_api_error_omits_the_response_body():
-    from glh.harvester import describe_api_error
+    from glh.gitlab.errors import describe_api_error
 
     e = gitlab.exceptions.GitlabError("<html><h1>500</h1><p>Whoops, something went wrong</p></html>",
                                       response_code=500)

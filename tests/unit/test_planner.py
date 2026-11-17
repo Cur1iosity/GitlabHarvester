@@ -1,14 +1,14 @@
-"""Project selection, branch strategies and fork handling (glh.planner)."""
+"""Project selection, branch strategies and fork handling (glh.domain.planning)."""
 
 from __future__ import annotations
 
 import pytest
 
-from glh.planner import (
-    ScanOptions,
+from glh.domain.planning import (
     branches_to_scan,
     get_upstream_id,
     is_fork_project,
+    ScanOptions,
     select_branches_from_index,
     select_fork_branches_diff,
     should_scan_project,
@@ -162,7 +162,8 @@ def test_branches_to_scan_include_treats_forks_as_regular(mode):
 
 from datetime import datetime, timedelta, timezone  # noqa: E402
 
-from glh.planner import is_active_since, parse_timestamp  # noqa: E402
+from glh.domain.planning import is_active_since
+from glh.domain.timewindow import parse_timestamp
 
 UTC = timezone.utc
 
@@ -215,14 +216,7 @@ def test_should_scan_project_applies_started_from(mode):
 
 # --------------------------------------------------------------------------- scan plan (what progress counts)
 
-from glh.planner import (  # noqa: E402
-    SKIP_EMPTY,
-    SKIP_FORK,
-    SKIP_INACTIVE,
-    SKIP_NO_BRANCHES,
-    build_scan_plan,
-    skip_reason,
-)
+from glh.domain.planning import SKIP_EMPTY, SKIP_FORK, SKIP_INACTIVE, SKIP_NO_BRANCHES, build_scan_plan, skip_reason
 
 
 def test_skip_reason_order_and_values():

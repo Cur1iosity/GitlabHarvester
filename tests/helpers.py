@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import io
 import json
-import re
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -152,7 +152,7 @@ PASSWORD_HITS_PER_BRANCH = {
 
 def parse_blocks(text: str) -> dict[str, dict[str, list[str]]]:
     """
-    The blocks of CLI output (glh.utils.terminal_utils.format_block):
+    The blocks of CLI output (glh.ui.blocks.format_block):
     {title: {label: [value lines]}}. A title starting with a known prefix is
     also stored under that prefix ('Rate limits at http://... (token #1)' ->
     'Rate limits').

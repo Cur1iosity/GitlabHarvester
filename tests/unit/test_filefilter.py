@@ -1,12 +1,12 @@
-"""File filters (glh.filefilter, --filename / --extension)."""
+"""File filters (glh.domain.file_filter, --filename / --extension)."""
 
 from __future__ import annotations
 
 import pytest
 
-from glh.cli import CliParser
-from glh.filefilter import FileFilter, FileFilterError, normalize_extension, normalize_filename
-from glh.planner import ScanOptions
+from glh.cli.parser import CliParser
+from glh.domain.file_filter import FileFilter, FileFilterError, normalize_extension, normalize_filename
+from glh.domain.planning import ScanOptions
 
 
 # --------------------------------------------------------------------------- normalization

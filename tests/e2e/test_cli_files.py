@@ -9,7 +9,7 @@ import re
 from pathlib import Path
 
 from fakegitlab import FakeGitLab
-from tests.helpers import Session, row
+from tests.helpers import row, Session
 
 
 def gl_args(fake: FakeGitLab) -> list[str]:

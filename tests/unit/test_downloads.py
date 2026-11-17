@@ -1,4 +1,4 @@
-"""Downloads of files with hits (glh.downloads, --download-files / --download-max-size)."""
+"""Downloads of files with hits (glh.output.downloads, --download-files / --download-max-size)."""
 
 from __future__ import annotations
 
@@ -7,9 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from glh.cli import DEFAULT_DOWNLOAD_MAX_SIZE, CliParser
-from glh.downloads import CHUNK_SIZE, FileDownloader, file_name, format_size, parse_size
-from glh.output import OutputLayout
+from glh.cli.args import DEFAULT_DOWNLOAD_MAX_SIZE
+from glh.cli.parser import CliParser
+from glh.output.downloads import CHUNK_SIZE, file_name, FileDownloader, format_size, parse_size
+from glh.output.layout import OutputLayout
 
 STAMP = "20261117093000"
 PREFIX = "acme_backend_api-service_main_20261117093000_password_"

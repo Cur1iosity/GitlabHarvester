@@ -16,12 +16,11 @@ from collections import Counter
 
 import pytest
 
-import gitlab.exceptions
 from fakegitlab import FakeGitLab
 from glh import GitlabHarvester
+from glh.domain.planning import ScanOptions
 from glh.exceptions import GitlabHarvesterError
-from glh.planner import ScanOptions
-from tests.helpers import Session, load_index
+from tests.helpers import load_index, Session
 
 TOKENS = ["dev-token", "readonly-token"]
 TERMS = ["password", "token"]
@@ -146,7 +145,7 @@ def test_results_match_a_single_token_run(fake_gitlab: FakeGitLab, make_harveste
 
 def test_token_file_runs_like_inline_tokens(fake_gitlab: FakeGitLab, make_harvester, tmp_path):
     # The harvester takes a resolved token list; the CLI resolves -t/--token-file into it.
-    from glh import tokens as token_utils
+    from glh.cli import tokens as token_utils
 
     token_file = tmp_path / "tokens.txt"
     token_file.write_text("# colleagues\ndev-token\nreadonly-token\n", encoding="utf-8")

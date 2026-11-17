@@ -26,6 +26,7 @@ from typing import Callable, Iterator
 import pytest
 
 from fakegitlab import FakeGitLab
+from glh.ui import statusline
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 _LAYER_MARKERS = {"unit": "unit", "fakeserver": "unit", "integration": "integration", "e2e": "e2e", "contract": "contract"}
@@ -155,9 +156,8 @@ def make_harvester(fake_gitlab: FakeGitLab) -> Callable[..., object]:
 def _reset_harvester_logger() -> Iterator[None]:
     """Drop handlers added to the shared harvester logger during a test (and the status line tail)."""
     yield
-    from glh.utils import terminal_utils
 
-    terminal_utils.STATUS.set_tail(None)
+    statusline.STATUS.set_tail(None)
     logger = logging.getLogger("GitlabHarvesterLogger")
     for h in list(logger.handlers):
         logger.removeHandler(h)

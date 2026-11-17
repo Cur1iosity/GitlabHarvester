@@ -1,4 +1,4 @@
-"""Token parsing/loading (glh.tokens): several tokens from -t and --token-file."""
+"""Token parsing/loading (glh.cli.tokens): several tokens from -t and --token-file."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from glh import tokens
+from glh.cli import tokens
 
 
 # --------------------------------------------------------------------------- check_token

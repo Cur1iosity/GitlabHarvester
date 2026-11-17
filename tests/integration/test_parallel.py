@@ -14,8 +14,10 @@ import pytest
 
 from fakegitlab import FakeGitLab
 from glh import GitlabHarvester
-from glh.planner import ScanOptions
-from tests.helpers import Session, load_index
+from glh.domain.planning import ScanOptions
+from glh.ui import statusline
+from glh.ui.statusline import StatusLine
+from tests.helpers import load_index, Session
 
 TERMS = ["password", "api_key", "token", "nothing-matches-this"]
 
@@ -140,12 +142,11 @@ def test_workers_run_concurrently_with_their_own_clients(fake_gitlab: FakeGitLab
 def test_parallel_progress_counts_planned_projects(fake_gitlab: FakeGitLab, make_harvester, index, monkeypatch):
     import re
 
-    from glh.utils import terminal_utils
     from tests.helpers import FakeStream
 
     tty = FakeStream(True)
-    monkeypatch.setattr(terminal_utils, "STATUS",
-                        terminal_utils.StatusLine(tty, columns=lambda: 400, ticker=False, refresh_interval=0))
+    monkeypatch.setattr(statusline, "STATUS",
+                        StatusLine(tty, columns=lambda: 400, ticker=False, refresh_interval=0))
     run_search(make_harvester(workers=4), index, terms=["password", "token"], scan_branches="all",
                forks_mode="skip")
 
@@ -164,12 +165,11 @@ def test_parallel_progress_counts_planned_projects(fake_gitlab: FakeGitLab, make
 def test_status_line_shows_the_running_task_not_the_last_finished_one(fake_gitlab: FakeGitLab, make_harvester,
                                                                        index, monkeypatch):
     """Regression: with workers > 1 a slow last project looked hung (status showed a finished project)."""
-    from glh.utils import terminal_utils
     from tests.helpers import FakeStream
 
     tty = FakeStream(True)
-    status = terminal_utils.StatusLine(tty, columns=lambda: 400, tick_interval=0.05, refresh_interval=0)
-    monkeypatch.setattr(terminal_utils, "STATUS", status)
+    status = StatusLine(tty, columns=lambda: 400, tick_interval=0.05, refresh_interval=0)
+    monkeypatch.setattr(statusline, "STATUS", status)
     fake_gitlab.add_fault({"match": {"path": "^/api/v4/projects/301/search$"}, "response": {"delay": 1.0}})
     glh = make_harvester(workers=4)
     glh.slow_task_report = 0.3

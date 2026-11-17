@@ -1,12 +1,12 @@
-"""Client-side request rate limits (glh.ratelimit)."""
+"""Client-side request rate limits (glh.gitlab.throttling)."""
 
 from __future__ import annotations
 
 import pytest
 from requests import Session
 
-from glh import ratelimit
-from glh.ratelimit import RateLimiter, ThrottledAdapter, describe, is_search_request, limit_session
+from glh.gitlab import throttling
+from glh.gitlab.throttling import describe, is_search_request, limit_session, RateLimiter, ThrottledAdapter
 
 
 class Clock:
@@ -102,7 +102,7 @@ def test_describe():
 
 def test_default_sleep_is_patchable(monkeypatch):
     slept: list[float] = []
-    monkeypatch.setattr(ratelimit, "_sleep", slept.append)
+    monkeypatch.setattr(throttling, "_sleep", slept.append)
     clock = Clock()
     limiter = RateLimiter(60, clock=clock)
     limiter.wait()
@@ -158,13 +158,13 @@ def test_jitter_adds_to_the_rpm_spacing():
     ("1-1", (1.0, 1.0)),
 ])
 def test_parse_jitter(value, parsed):
-    assert ratelimit.parse_jitter(value) == pytest.approx(parsed)
+    assert throttling.parse_jitter(value) == pytest.approx(parsed)
 
 
 @pytest.mark.parametrize("value", ["", "abc", "-0.1", "0.05-0.01", "1-2-3", "0.1m", "5000"])
 def test_invalid_jitter_is_rejected(value):
     with pytest.raises(ValueError):
-        ratelimit.parse_jitter(value)
+        throttling.parse_jitter(value)
 
 
 def test_jitter_alone_mounts_the_adapter_for_both_kinds():
@@ -179,14 +179,14 @@ def test_jitter_alone_mounts_the_adapter_for_both_kinds():
 def test_describe_with_jitter():
     assert describe(0, 0, (0.0, 0.03)) == "jitter 0-0.03s"
     assert describe(0, 30, (0.01, 0.05)) == "search 30/min per worker, jitter 0.01-0.05s"
-    assert ratelimit.format_jitter((0.0, 0.0)) == ""
+    assert throttling.format_jitter((0.0, 0.0)) == ""
 
 
 # --------------------------------------------------------------------------- adjustable limits (--auto-limits)
 
 
 def test_set_limits_swaps_limiters_and_keeps_unchanged_ones():
-    adapter = ratelimit.ThrottledAdapter(index_rpm=100, search_rpm=0)
+    adapter = throttling.ThrottledAdapter(index_rpm=100, search_rpm=0)
     index_limiter = adapter.index_limiter
     assert adapter.search_limiter is None
     adapter.set_limits(index_rpm=100, search_rpm=20)
@@ -200,7 +200,7 @@ def test_limit_session_always_mounts_an_adapter():
     import requests
 
     session = requests.Session()
-    assert ratelimit.limit_session(session) is None
-    adapter = ratelimit.limit_session(session, always=True)
+    assert throttling.limit_session(session) is None
+    adapter = throttling.limit_session(session, always=True)
     assert adapter is not None and session.get_adapter("https://x") is adapter
     assert adapter.index_limiter is None and adapter.search_limiter is None

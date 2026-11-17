@@ -10,7 +10,7 @@ import pytest
 
 from glh.postprocess.convert import convert_jsonl_to_json, iter_json_objects
 from glh.postprocess.dedup import _content_hash, _normalize_text, dedup_session_file
-from tests.helpers import Session, read_jsonl, write_jsonl
+from tests.helpers import read_jsonl, Session, write_jsonl
 
 
 def hit_record(term: str, pid: int, branches: dict[str, list[str]]) -> dict:
