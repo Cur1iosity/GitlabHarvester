@@ -1,8 +1,11 @@
+"""Reading a session back: the terms already done (--resume) and the parameters of its first run."""
+
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+
+from glh.output.records import Checkpoint, SessionMeta
 
 
 def load_done_keywords(session_path: Path) -> set[str]:
@@ -26,19 +29,17 @@ def load_done_keywords(session_path: Path) -> set[str]:
                 continue
 
             try:
-                rec: dict[str, Any] = json.loads(line)
+                checkpoint = Checkpoint.from_record(json.loads(line))
             except json.JSONDecodeError:
                 continue
 
-            if isinstance(rec, dict) and rec.get("type") == "keyword_done":
-                kw = rec.get("term", rec.get("keyword"))
-                if isinstance(kw, str) and kw:
-                    done.add(kw)
+            if checkpoint is not None and checkpoint.done:
+                done.add(checkpoint.term)
 
     return done
 
 
-def load_session_meta(session_path: Path) -> dict[str, Any] | None:
+def load_session_meta(session_path: Path) -> SessionMeta | None:
     """
     Return the first ``meta`` record of a session (the parameters of the run
     that started it), or None if the file is missing or has none.
@@ -53,8 +54,7 @@ def load_session_meta(session_path: Path) -> dict[str, Any] | None:
             if not line:
                 continue
             try:
-                rec = json.loads(line)
+                return SessionMeta.from_record(json.loads(line))
             except json.JSONDecodeError:
                 return None
-            return rec if isinstance(rec, dict) and rec.get("type") == "meta" else None
     return None

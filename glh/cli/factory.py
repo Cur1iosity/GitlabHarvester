@@ -9,7 +9,8 @@ use objects and never assemble them.
 - :func:`scan_options` — what a search scans (branches, forks, time and file
   filters, project filter, files-only mode);
 - :func:`create_run_output` / :func:`open_session` — where a search writes
-  (layout, session file, downloaded files);
+  (layout, session file, downloaded files); :func:`session_meta` — the
+  ``meta`` record of a new session;
 - :func:`create_limit_finder`, :func:`create_limit_watch` — the experimental
   rate-limit detection (probe, then the advisor and its console during the run).
 """
@@ -17,6 +18,7 @@ use objects and never assemble them.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from glh.cli import tokens
@@ -31,6 +33,7 @@ from glh.limits.console import LimiterConsole
 from glh.limits.finder import LimitFinder
 from glh.output.downloads import FileDownloader
 from glh.output.layout import OutputLayout
+from glh.output.records import SessionMeta
 from glh.output.sink import SessionOutput
 
 # --------------------------------------------------------------------------- harvester
@@ -134,6 +137,50 @@ def create_run_output(args: CliArgs, session_path: Path, terms: list[str], stamp
     layout = OutputLayout(session_path, terms)
     downloader = FileDownloader(layout, stamp, max_size=args.download_max_size) if args.download_files else None
     return RunOutput(layout=layout, downloader=downloader)
+
+
+def session_meta(args: CliArgs, harvester: GitlabHarvester, options: ScanOptions, *, index_file: str | Path,
+                 keywords_count: int, files_only: bool, timestamp_utc: str) -> SessionMeta:
+    """The ``meta`` record of a new session: the parameters of this run."""
+    def iso(value: datetime | None) -> str | None:
+        return value.isoformat() if value else None
+
+    return SessionMeta(
+        timestamp_utc=timestamp_utc,
+        url=args.url,
+        config=args.config,
+        index_file=str(index_file),
+        batch_size=args.batch_size,
+        tokens=len(harvester.tokens),
+        workers=harvester.workers,
+        index_rpm=harvester.index_rpm,
+        search_rpm=harvester.search_rpm,
+        auto_limits=args.auto_limits,
+        jitter=tuple(args.jitter),
+        user_agent=args.user_agent,
+        user_agent_file=args.user_agent_file,
+        branches_per_page=args.branches_per_page,
+        index_branches=args.index_branches,
+        scan_branches=args.scan_branches,
+        forks=args.forks,
+        fork_diff_bases=args.fork_diff_bases,
+        started_from=iso(args.started_from),
+        active_before=iso(args.active_before),
+        file_changed_after=iso(args.file_changed_after),
+        file_changed_before=iso(args.file_changed_before),
+        filename=options.file_filter.filename,
+        extension=options.file_filter.extension,
+        project_filter=tuple(args.project_filter) or None,
+        files_only=files_only,
+        file_listing=args.file_listing if files_only else None,
+        keywords_count=keywords_count,
+        output_separated=args.output_separated,
+        download_files=args.download_files,
+        download_max_size=args.download_max_size if args.download_files else None,
+        post_process=tuple(args.post_process),
+        to_zip=args.to_zip,
+        final_only=args.final_only,
+    )
 
 
 def open_session(run: RunOutput, *, resume: bool) -> SessionOutput:

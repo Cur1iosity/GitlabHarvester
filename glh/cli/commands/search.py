@@ -14,7 +14,7 @@ from typing import Any
 from glh.cli.args import CliArgs
 from glh.cli.commands.auto_limits import start_auto_limits, stop_auto_limits
 from glh.cli.commands.common import building_index, index_path, load_keywords, resolve_session_path, run_stamp, UTC
-from glh.cli.factory import create_harvester, create_run_output, open_session, scan_options
+from glh.cli.factory import create_harvester, create_run_output, open_session, scan_options, session_meta
 from glh.cli.report import index_rows, rate_limit_row, report, Summary
 from glh.domain.file_filter import FileFilter
 from glh.domain.models import IndexMeta, ProjectIndex
@@ -23,6 +23,7 @@ from glh.engine.harvester import GitlabHarvester
 from glh.limits.constants import KINDS, SEARCH
 from glh.output import archive
 from glh.output.layout import OutputLayout
+from glh.output.records import ResumeRecord, SummaryRecord
 from glh.output.session_reader import load_done_keywords, load_session_meta
 from glh.postprocess.pipeline import run_pipeline
 from glh.postprocess.split import split_session_by_term
@@ -101,47 +102,14 @@ def _search(args: CliArgs, glh: GitlabHarvester, keywords: list[str], summary: S
 
     with open_session(run, resume=args.resume) as output:
         if args.resume:
-            output.resumed(
+            output.resumed(ResumeRecord(
                 timestamp_utc=datetime.now(UTC).isoformat(),
                 done_keywords=len(done_keywords),
                 remaining_keywords=len(keywords),
-            )
+            ))
         else:
-            output.meta(
-                timestamp_utc=datetime.now(UTC).isoformat(),
-                url=args.url,
-                config=args.config,
-                index_file=str(index_file),
-                batch_size=args.batch_size,
-                tokens=len(glh.tokens),
-                workers=glh.workers,
-                index_rpm=glh.index_rpm,
-                search_rpm=glh.search_rpm,
-                auto_limits=args.auto_limits,
-                jitter=list(args.jitter),
-                user_agent=args.user_agent,
-                user_agent_file=args.user_agent_file,
-                branches_per_page=args.branches_per_page,
-                index_branches=args.index_branches,
-                scan_branches=args.scan_branches,
-                forks=args.forks,
-                fork_diff_bases=args.fork_diff_bases,
-                started_from=args.started_from.isoformat() if args.started_from else None,
-                active_before=args.active_before.isoformat() if args.active_before else None,
-                file_changed_after=args.file_changed_after.isoformat() if args.file_changed_after else None,
-                file_changed_before=args.file_changed_before.isoformat() if args.file_changed_before else None,
-                **options.file_filter.to_meta(),
-                project_filter=list(args.project_filter) or None,
-                files_only=files_only,
-                file_listing=args.file_listing if files_only else None,
-                keywords_count=len(keywords),
-                output_separated=args.output_separated,
-                download_files=args.download_files,
-                download_max_size=args.download_max_size if args.download_files else None,
-                post_process=list(args.post_process),
-                to_zip=args.to_zip,
-                final_only=args.final_only,
-            )
+            output.meta(session_meta(args, glh, options, index_file=index_file, keywords_count=len(keywords),
+                                     files_only=files_only, timestamp_utc=datetime.now(UTC).isoformat()))
 
         search_started = time.perf_counter()
         _, hits = glh.search_keywords(
@@ -153,13 +121,13 @@ def _search(args: CliArgs, glh: GitlabHarvester, keywords: list[str], summary: S
         search_elapsed = time.perf_counter() - search_started
         incomplete = list(glh.incomplete_terms)
 
-        output.summary(
+        output.summary(SummaryRecord(
             hits=hits,
             completed=not incomplete,
-            incomplete_terms=incomplete,
+            incomplete_terms=tuple(incomplete),
             elapsed_seconds=round(search_elapsed, 2),
             timestamp_utc=datetime.now(UTC).isoformat(),
-        )
+        ))
 
     summary.add("hits", f"{hits:,}")
     summary.add("files" if files_only else "terms", keywords[0] if files_only else f"{len(keywords):,}")
@@ -210,7 +178,8 @@ def _warn_changed_file_filter(glh: GitlabHarvester, session_path: Path, options:
     meta = load_session_meta(session_path)
     if meta is None:
         return
-    before = {key: meta.get(key) for key in ("filename", "extension", "project_filter")}
+    before = {"filename": meta.filename, "extension": meta.extension,
+              "project_filter": list(meta.project_filter) if meta.project_filter else meta.project_filter}
     now = {**options.file_filter.to_meta(), "project_filter": list(options.project_filter) or None}
     if before != now:
         def show(values: dict[str, Any]) -> str:

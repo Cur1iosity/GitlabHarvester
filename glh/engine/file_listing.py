@@ -19,7 +19,6 @@ from __future__ import annotations
 import logging
 import threading
 from collections import Counter
-from typing import Any
 from urllib.parse import quote
 
 import gitlab.exceptions
@@ -32,6 +31,7 @@ from glh.engine.tasks import BranchTask
 from glh.engine.workers import ActiveTasks
 from glh.gitlab.connection import GitLabConnection
 from glh.gitlab.errors import describe_api_error, is_permanent_error
+from glh.output.records import Hit
 from glh.ui import statusline
 
 
@@ -57,7 +57,7 @@ class FileLister:
             self.state = "unknown"
             self.counts = Counter()
 
-    def collect(self, task: BranchTask) -> tuple[list[dict[str, Any]], str | None]:
+    def collect(self, task: BranchTask) -> tuple[list[Hit], str | None]:
         """One hit per matching file of the task's branch; (hits, retryable failure or None)."""
         name = task.project_name
         errors: list[BaseException] = []
@@ -85,11 +85,9 @@ class FileLister:
         blob_url = f"{task.project.web_url}/-/blob/{quote(task.branch, safe='/')}"
         hits = []
         for path in keep:
-            hit: dict[str, Any] = {"url": f"{blob_url}/{quote(path, safe='/')}", "data": ""}
-            if path in local:
-                hit["file"] = local[path]
+            hit = Hit(url=f"{blob_url}/{quote(path, safe='/')}", file=local.get(path))
             hits.append(hit)
-            self.logger.info("[+] File '%s': %s", task.term, hit["url"])
+            self.logger.info("[+] File '%s': %s", task.term, hit.url)
         retryable = [e for e in errors if not is_permanent_error(e)]
         failure = f"{name} @ {task.branch}: {describe_api_error(retryable[0])}" if retryable else None
         return hits, failure

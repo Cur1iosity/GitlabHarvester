@@ -1,7 +1,8 @@
 # glh/output/sink.py
 """
 Where the search engine puts its results: a JSONL stream (SearchOutput) or the session file
-of a CLI run with its meta/resume/summary records (SessionOutput).
+of a CLI run with its meta/resume/summary records (SessionOutput). The records are the
+objects of glh/output/records.py.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ import json
 from typing import Any, IO, TYPE_CHECKING
 
 from glh.output.layout import OutputLayout
+from glh.output.records import Checkpoint, HitRecord, ProjectResult, ResumeRecord, SessionMeta, SummaryRecord
 
 if TYPE_CHECKING:
     from glh.output.downloads import FileDownloader
@@ -35,13 +37,13 @@ class SearchOutput:
             self.stream.write(json.dumps(record, ensure_ascii=False))
             self.stream.write("\n")
 
-    def hit(self, term: str, result: dict[str, Any]) -> None:
+    def hit(self, term: str, result: ProjectResult) -> None:
         """The hits of one term in one project."""
-        self.write({"term": term, "result": result})
+        self.write(HitRecord(term, result).to_record())
 
-    def checkpoint(self, record: dict[str, Any]) -> None:
+    def checkpoint(self, checkpoint: Checkpoint) -> None:
         """A term finished (``keyword_done``/``keyword_incomplete``): written and flushed to disk."""
-        self.write(record)
+        self.write(checkpoint.to_record())
         if self.stream is not None:
             self.stream.flush()
 
@@ -69,14 +71,14 @@ class SessionOutput(SearchOutput):
         if self.stream is not None:
             self.stream.close()
 
-    def meta(self, **fields: Any) -> None:
+    def meta(self, meta: SessionMeta) -> None:
         """The ``meta`` record that starts a new session (the run's parameters)."""
-        self.write({"type": "meta", **fields})
+        self.write(meta.to_record())
 
-    def resumed(self, **fields: Any) -> None:
+    def resumed(self, record: ResumeRecord) -> None:
         """The ``resume`` record that starts the appended part of a resumed session."""
-        self.write({"type": "resume", **fields})
+        self.write(record.to_record())
 
-    def summary(self, **fields: Any) -> None:
+    def summary(self, record: SummaryRecord) -> None:
         """The ``summary`` record that ends a run."""
-        self.write({"type": "summary", **fields})
+        self.write(record.to_record())

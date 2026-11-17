@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Iterable, Iterator
 
 from glh.output.downloads import format_size
+from glh.output.records import HitRecord
 
 ZIP_SUFFIX = ".zip"
 PART_SUFFIX = ".part"
@@ -62,16 +63,11 @@ def downloaded_files(session_path: Path | str) -> Iterator[str]:
             if not line or '"file"' not in line:
                 continue
             try:
-                record = json.loads(line)
+                record = HitRecord.from_record(json.loads(line))
             except json.JSONDecodeError:
                 continue
-            result = record.get("result") if isinstance(record, dict) and "term" in record else None
-            if not isinstance(result, dict):
-                continue
-            for branch in result.get("project_search_result") or ():
-                for hit in (branch.get("branch_search_result") or ()) if isinstance(branch, dict) else ():
-                    if isinstance(hit, dict) and isinstance(hit.get("file"), str) and hit["file"]:
-                        yield hit["file"]
+            if record is not None:
+                yield from record.result.files()
 
 
 @dataclass(slots=True)

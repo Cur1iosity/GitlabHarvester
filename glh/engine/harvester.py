@@ -275,8 +275,12 @@ class GitlabHarvester:
                      **kwargs: Any) -> tuple[list[dict[str, Any]], int]:
         """Search one project (a Project or an index record) for a term; see SearchEngine.scan_project."""
         by_id = {k: as_project(v) for k, v in projects_by_id.items()} if projects_by_id else None
-        return self.search.scan_project(as_project(project), term, options=options, projects_by_id=by_id, **kwargs)
+        found, hits = self.search.scan_project(as_project(project), term, options=options, projects_by_id=by_id,
+                                               **kwargs)
+        return [b.to_record() for b in found], hits
 
     def scan_branch(self, project: GitlabProject, branch: str, term: str, project_url: str,
                     **kwargs: Any) -> tuple[list[dict], int]:
-        return self.search.scan_branch(project, branch, term, project_url, **kwargs)
+        """Search one branch; the hits as session dicts ({"url", "data"[, "file"]})."""
+        found, hits = self.search.scan_branch(project, branch, term, project_url, **kwargs)
+        return [h.to_record() for h in found], hits

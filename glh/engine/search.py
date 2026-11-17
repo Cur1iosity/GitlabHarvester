@@ -35,6 +35,7 @@ from glh.gitlab import throttling, user_agents
 from glh.gitlab.connection import GitLabConnection
 from glh.gitlab.errors import describe_api_error, is_permanent_error
 from glh.output.downloads import FileDownloader
+from glh.output.records import BranchResult, Checkpoint, Hit, ProjectResult
 from glh.output.sink import SearchOutput
 from glh.ui import statusline
 from glh.ui.blocks import Row
@@ -189,7 +190,7 @@ class SearchEngine:
 
     # ------------------------------------------------------------- one task
 
-    def search_branch(self, task: BranchTask) -> tuple[list[dict[str, Any]], str | None]:
+    def search_branch(self, task: BranchTask) -> tuple[list[Hit], str | None]:
         """
         Worker: search one term in one branch of one project (all result pages).
 
@@ -210,7 +211,7 @@ class SearchEngine:
                 return self.lister.collect(task)
             return self._search_term(task)
 
-    def _search_term(self, task: BranchTask) -> tuple[list[dict[str, Any]], str | None]:
+    def _search_term(self, task: BranchTask) -> tuple[list[Hit], str | None]:
         """search_branch() for a term, while the task is registered as running."""
         name = task.project_name
         project_obj: GitlabProject = self.connection.require().projects.get(task.project.id, lazy=True)
@@ -287,8 +288,8 @@ class SearchEngine:
         hits_before = hit_counter
         term_hits = [0] * n_terms
         projects_left = [plan.project_count] * n_terms
-        results: list[list[tuple[int, dict[str, Any]]]] = [[] for _ in terms]
-        partial: dict[tuple[int, int], dict[int, list[dict[str, Any]]]] = {}
+        results: list[list[tuple[int, ProjectResult]]] = [[] for _ in terms]
+        partial: dict[tuple[int, int], dict[int, list[Hit]]] = {}
         state = {"next_term": 0, "term_started": progress.elapsed}
         # Failed (retryable) searches per term: such a term is not marked done.
         term_failures: list[list[str]] = [[] for _ in terms]
@@ -307,18 +308,11 @@ class SearchEngine:
                 if failures:
                     self.incomplete_terms.append(terms[number])
                 if checkpoints:
-                    record: dict[str, Any] = {
-                        # keyword_done is the --resume checkpoint: only for terms searched completely.
-                        "type": "keyword_incomplete" if failures else "keyword_done",
-                        "term": terms[number],
-                        "hit_counter": hits_before + sum(term_hits[:number + 1]),
-                        "timestamp_utc": datetime.now(UTC).isoformat(),
-                    }
-                    if failures:
-                        record["failed_searches"] = len(failures)
-                        record["failures"] = failures[:20]
-                    # Resume checkpoint: flushed, durable even if the process is killed.
-                    output.checkpoint(record)
+                    # keyword_done (the --resume checkpoint) only for terms searched completely;
+                    # flushed, durable even if the process is killed.
+                    output.checkpoint(Checkpoint.for_term(
+                        terms[number], hits_before + sum(term_hits[:number + 1]), datetime.now(UTC).isoformat(),
+                        failures))
                 failed = (f"; {plural(len(failures), 'search', 'searches')} FAILED, "
                           f"not marked done" if failures else "")
                 if checkpoints and (n_terms > 1 or failures):
@@ -389,18 +383,12 @@ class SearchEngine:
                 # All branches of this (term, project) are done: one session record.
                 del partial[key]
                 project = task.project
-                s_res = [{"branch": b, "branch_search_result": got[i]} for i, b in enumerate(task.branches) if got[i]]
+                by_branch = [BranchResult(b, tuple(got[i])) for i, b in enumerate(task.branches) if got[i]]
                 found = sum(len(h) for h in got.values())
                 hit_counter += found
                 term_hits[task.term_no] += found
-                if s_res:
-                    out = {
-                        "project_id": project.id,
-                        "web_url": project.web_url,
-                        "created_at": project.created_at,
-                        "last_activity_at": project.last_activity_at,
-                        "project_search_result": s_res,
-                    }
+                if by_branch:
+                    out = ProjectResult.for_project(project, by_branch)
                     results[task.term_no].append((task.project_no, out))
                     output.hit(task.term, out)
 
@@ -418,7 +406,7 @@ class SearchEngine:
             progress.detail = self.active.describe(format_clock) or progress.detail
             progress.detail_provider = previous_provider
 
-        res = [{"term": term, "result": [out for _, out in sorted(results[i], key=lambda x: x[0])]}
+        res = [{"term": term, "result": [out.to_record() for _, out in sorted(results[i], key=lambda x: x[0])]}
                for i, term in enumerate(terms)]
         return res, hit_counter
 
@@ -434,14 +422,14 @@ class SearchEngine:
             branches: list[str] | tuple[str, ...] | None = None,
             progress: Progress | None = None,
             hit_counter: int = 0,
-    ) -> tuple[list[dict[str, Any]], int]:
+    ) -> tuple[list[BranchResult], int]:
         """
         Scan one project for a term across its selected branches (branches_to_scan() if None).
 
         Returns:
-            ([{"branch", "branch_search_result"}, ...], updated hit counter).
+            (the branches with hits, updated hit counter).
         """
-        res: list[dict[str, Any]] = []
+        res: list[BranchResult] = []
 
         project_obj: GitlabProject = self.connection.require().projects.get(project.id, lazy=True)
         project_url: str = project.web_url
@@ -468,7 +456,7 @@ class SearchEngine:
                     hit_counter=hit_counter,
                 )
                 if s_res:
-                    res.append({"branch": b, "branch_search_result": s_res})
+                    res.append(BranchResult(b, tuple(s_res)))
             except (gitlab.exceptions.GitlabError, requests.exceptions.RequestException) as e:
                 self.logger.warning("Could not search %s @ %s (%s); skipping it, continuing",
                                     project_url, b, describe_api_error(e))
@@ -489,7 +477,7 @@ class SearchEngine:
             query: str | None = None,
             on_files: Callable[[list[str]], dict[str, str]] | None = None,
             **kwargs: Any,
-    ) -> tuple[list[dict], int]:
+    ) -> tuple[list[Hit], int]:
         """
         Search for a term inside a specific branch using GitLab blob search.
 
@@ -512,10 +500,10 @@ class SearchEngine:
             **kwargs: Additional parameters passed to GitLab search API.
 
         Returns:
-            (matches with "url" and "data" snippet, updated hit counter).
+            (the hits: link, snippet and downloaded file; updated hit counter).
         """
         self.connection.require()
-        res: list[dict] = []
+        res: list[Hit] = []
         page: int = 1
 
         search_results: list[dict[str, Any]] = []
@@ -552,15 +540,11 @@ class SearchEngine:
             local: dict[str, str] = {}
             if on_files is not None:
                 local = on_files(list(dict.fromkeys(x["path"] for x in search_results)))
-            res = []
-            for x in search_results:
-                hit = {"url": f"{branch_url}/{quote(x['path'], safe='/')}#L{x['startline']}", "data": x.get("data", "")}
-                if x["path"] in local:
-                    hit["file"] = local[x["path"]]
-                res.append(hit)
+            res = [Hit(url=f"{branch_url}/{quote(x['path'], safe='/')}#L{x['startline']}", data=x.get("data", ""),
+                       file=local.get(x["path"])) for x in search_results]
 
-            for x in res:
-                self.logger.info(f"[+] Hitted '{term}': {x['url']}")
+            for hit in res:
+                self.logger.info(f"[+] Hitted '{term}': {hit.url}")
             hit_counter += len(res)
 
         return res, hit_counter
