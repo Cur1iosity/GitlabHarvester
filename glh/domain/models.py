@@ -76,28 +76,42 @@ class Project:
         Raises:
             ValueError: The record has no usable ``id``.
         """
-        pid = _int(record.get("id"))
-        if pid is None:
-            raise ValueError(f"project record without an id: {record.get('id')!r}")
-        legacy_upstream = record.get("upstream_project_id")
-        fork = record.get("forked_from_project")
+        # Called once per line of an index of tens of thousands of projects: kept lean.
+        get = record.get
+        pid = get("id")
+        if pid.__class__ is not int:
+            pid = _int(pid)
+            if pid is None:
+                raise ValueError(f"project record without an id: {get('id')!r}")
+        legacy_upstream = get("upstream_project_id")
+        fork = get("forked_from_project")
         if legacy_upstream:
             is_fork, upstream = True, _int(legacy_upstream)
+        elif not fork:
+            is_fork, upstream = False, None
         else:
-            is_fork = bool(fork)
+            is_fork = True
             upstream = _int(fork.get("id")) if isinstance(fork, Mapping) else None
-        branches = record.get("branches")
+        branches = get("branches")
+        if branches.__class__ is list or branches.__class__ is tuple:
+            branches = tuple(branches)
+            if not all(b.__class__ is str for b in branches):
+                branches = tuple(b for b in branches if isinstance(b, str))
+        else:
+            branches = None
+        web_url, path, default = get("web_url"), get("path_with_namespace"), get("default_branch")
+        created, active = get("created_at"), get("last_activity_at")
         return cls(
             id=pid,
-            web_url=_str(record.get("web_url")) or "",
-            path_with_namespace=_str(record.get("path_with_namespace")),
-            default_branch=_str(record.get("default_branch")),
-            empty_repo=bool(record.get("empty_repo", False)),
+            web_url=web_url if web_url.__class__ is str else "",
+            path_with_namespace=path if path.__class__ is str else None,
+            default_branch=default if default.__class__ is str else None,
+            empty_repo=bool(get("empty_repo", False)),
             is_fork=is_fork,
             upstream_id=upstream,
-            created_at=_str(record.get("created_at")),
-            last_activity_at=_str(record.get("last_activity_at")),
-            branches=tuple(b for b in branches if isinstance(b, str)) if isinstance(branches, (list, tuple)) else None,
+            created_at=created if created.__class__ is str else None,
+            last_activity_at=active if active.__class__ is str else None,
+            branches=branches,
         )
 
     def to_record(self) -> dict[str, Any]:
