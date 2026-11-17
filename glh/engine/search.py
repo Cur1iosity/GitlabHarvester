@@ -400,6 +400,7 @@ class SearchEngine:
                 if task.term_no == state["next_term"]:
                     progress.done = plan.project_count - projects_left[task.term_no]
                 progress.completed_units = sum(plan.project_count - left for left in projects_left)
+                progress.found(found)
                 progress.set_info(f"{human_int(hit_counter)} hits")
                 progress.advance(0)
                 close_finished_terms()

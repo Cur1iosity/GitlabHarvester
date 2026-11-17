@@ -648,3 +648,15 @@ def test_a_wrong_token_or_url_is_one_clear_line_not_a_traceback(fake_gitlab: Fak
     proc = run_cli("-u", "http://127.0.0.1:9", "-t", "x", "-s", "x", "--timeout", "5")
     assert proc.returncode != 0 and "Traceback" not in proc.stderr
     assert "Cannot reach http://127.0.0.1:9 (ConnectionError" in proc.stderr
+
+
+def test_dont_be_boring_changes_nothing_off_a_terminal(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
+    # The scene needs an ANSI terminal: in pipes, files and CI the run looks and writes the same.
+    args = [*gl_args(fake_gitlab), "-s", "password", "--index-file", "idx.jsonl"]
+    plain = run_cli(*args, "--session-file", "a.jsonl", check=True)
+    fun = run_cli(*args, "--session-file", "b.jsonl", "-dbb", check=True)
+    assert "\x1b" not in fun.stdout + fun.stderr
+    hits = [line for line in (tmp_path / "a.jsonl").read_text(encoding="utf-8").splitlines() if '"result"' in line]
+    assert hits == [line for line in (tmp_path / "b.jsonl").read_text(encoding="utf-8").splitlines()
+                    if '"result"' in line]
+    assert len(fun.stdout.splitlines()) == len(plain.stdout.splitlines())

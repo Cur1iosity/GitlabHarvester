@@ -43,6 +43,10 @@ and log records are written above it, and removing it erases it from the screen,
 so it never stays in the scrollback. It needs a terminal that understands ANSI
 escape sequences (on Windows the console's VT mode is switched on); elsewhere it
 is not shown at all. ``NO_COLOR`` keeps it uncoloured.
+
+A *show* (:meth:`StatusLine.set_show`, ``--dont-be-boring``) draws an animated
+ASCII scene above the panel while it fits the terminal, and :meth:`StatusLine.hit`
+plays a strike in it for every hit, with a flash in the panel (``burst_text``).
 """
 
 from __future__ import annotations
@@ -56,6 +60,7 @@ from typing import Callable, TextIO
 
 from glh.ui.ansi import _CURSOR_UP_CLEAR, HINT_COLOR, RESET, supports_ansi
 from glh.ui.blocks import compact_block, format_block, Row
+from glh.ui.dont_be_boring import Show
 from glh.ui.formatting import _single_line, display_width, fit_width
 
 # --------------------------------------------------------------------------- status line
@@ -82,11 +87,16 @@ class StatusLine:
             ticker: bool = True,
             clock: Callable[[], float] = time.monotonic,
             ansi: bool | None = None,
+            rows: Callable[[], int] | None = None,
+            show_interval: float = 0.05,
     ) -> None:
         self._stream = stream
         self._interactive = interactive
         self._ansi = ansi
         self._columns = columns
+        self._rows = rows
+        self._show: Show | None = None
+        self._show_interval = show_interval
         self._refresh_interval = refresh_interval
         self._tick_interval = tick_interval
         self._heartbeat_interval = heartbeat_interval
@@ -150,6 +160,9 @@ class StatusLine:
         # Writing into the last column makes some terminals wrap; stay one cell short.
         return max(cols - 1, 1)
 
+    def _height(self) -> int:
+        return self._rows() if self._rows else shutil.get_terminal_size(fallback=(80, 24)).lines
+
     # --------------------------------------------------------------------- drawing
 
     def _write(self, stream: TextIO, text: str) -> None:
@@ -196,6 +209,14 @@ class StatusLine:
         """Redraw the panel in place: back to its first line, then every line cleared and rewritten."""
         columns = self._width()
         lines = [fit_width(x, columns) for x in lines]
+        if (burst := self._burst()) is not None:
+            # The flash of a hit, colored once the line has its final width.
+            text, style = burst
+            lines = [x.replace(text, f"\x1b[{style}m{text}{RESET}", 1) if text in x else x for x in lines]
+        if self._show is not None:
+            # The scene above the panel, if it fits with it (the scene's lines fit the width already).
+            scene = self._show.lines(columns, self._height() - len(lines) - 1, color=not os.environ.get("NO_COLOR"))
+            lines = (scene or []) + lines
         out = [f"\x1b[{self._shown_lines - 1}A" if self._shown_lines > 1 else "", "\r"]
         out.append("\n".join("\x1b[2K" + x for x in lines))
         if (extra := self._shown_lines - len(lines)) > 0:
@@ -204,6 +225,14 @@ class StatusLine:
         self._write(self.stream, "".join(out))
         self._shown_lines = len(lines)
         self._shown_width = display_width(lines[-1])
+
+    def _burst(self) -> tuple[str, str] | None:
+        if self._show is None or not self.ansi:
+            return None
+        try:
+            return self._show.burst()
+        except Exception:  # noqa: BLE001 - the status line must never break the run
+            return None
 
     def _show_hint(self) -> None:
         """Lock held, status line erased: write the hint line; the status line goes below it."""
@@ -342,6 +371,28 @@ class StatusLine:
     def badge(self) -> str:
         return self._badge
 
+    def set_show(self, show: Show | None) -> None:
+        """Animate ``show`` above the panel (ANSI terminals; None stops it)."""
+        with self._lock:
+            self._show = show
+            if self.interactive and self._provider is not None:
+                self._draw()
+
+    @property
+    def show(self) -> Show | None:
+        return self._show
+
+    def hit(self, count: int = 1) -> None:
+        """``count`` new hits: the show plays a strike (nothing without a show)."""
+        if self._show is not None and count > 0 and self.ansi:
+            self._show.hit(count)
+            self._ensure_ticker()
+
+    def burst_text(self) -> str:
+        """The flash of the last hit for the panel ('' without one): the status line colors it."""
+        burst = self._burst()
+        return burst[0] if burst else ""
+
     def set_hint(self, text: str | None) -> None:
         """
         Show ``text`` in turquoise on its own line above the status line until
@@ -450,8 +501,16 @@ class StatusLine:
         # Event.wait instead of time.sleep: tests patch time.sleep to skip
         # python-gitlab's retry pauses, and the ticker must not depend on it.
         never_set = threading.Event()
-        while not never_set.wait(self._spin_interval if self._spinning() else self._tick_interval):
+        while not never_set.wait(self._next_tick()):
             self.tick()
+
+    def _next_tick(self) -> float:
+        """Seconds to the next redraw: the show's frame rate, the spinner's, or once a second."""
+        if not self._spinning():
+            return self._tick_interval
+        if self._show is not None and self._show.busy:
+            return self._show_interval  # a strike or a flash is on: a smooth frame rate
+        return self._spin_interval
 
     def _spinning(self) -> bool:
         """A panel with its spinner is on the screen: redraw it often."""

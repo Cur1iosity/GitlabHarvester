@@ -28,6 +28,7 @@ All notable changes to GitlabHarvester are documented here. The format follows
   falls back to `|/-\` where the console can't show braille characters.
 - `GitlabHarvester.list_branches()`: the branch names and whether the listing ran
   to its end (`get_branches()` is unchanged).
+- And remember: `--dont-be-boring`.
 
 ### Changed
 

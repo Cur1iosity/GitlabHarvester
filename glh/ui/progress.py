@@ -114,6 +114,11 @@ class Progress:
         self.detail = detail
         self._status.refresh()
 
+    def found(self, count: int) -> None:
+        """``count`` new hits (an animation on the status line plays them, if one is on)."""
+        if count > 0:
+            self._status.hit(count)
+
     def set_info(self, info: str) -> None:
         """Set the extra counter shown after the item count (e.g. hits)."""
         self.info = info
@@ -216,7 +221,9 @@ class Progress:
                                                 self.eta())))
         else:
             rows.append(("progress", self._counter(self.done, self.total, self.unit, self.elapsed, self.eta())))
-        rows.append((self.info_label, " · ".join(x for x in (self.info, self._status.tail_text()) if x)))
+        # The flash of a new hit goes last, so the other numbers keep their place.
+        info = (self.info, self._status.tail_text(), self._status.burst_text())
+        rows.append((self.info_label, " · ".join(x for x in info if x)))
         rows.append(("running", self.render_detail_lines()))
         return format_block(self.label, rows)
 

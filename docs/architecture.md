@@ -149,7 +149,8 @@ glh/
     ├── ansi.py           colors, styles, Windows VT mode
     ├── keys.py           key presses without Enter
     ├── logs.py           ConsoleHandler, build_logger
-    └── journal.py        RunJournal and its singleton JOURNAL
+    ├── journal.py        RunJournal and its singleton JOURNAL
+    └── dont_be_boring.py and remember: --dont-be-boring
 ```
 
 ### 3. Core objects and factories
