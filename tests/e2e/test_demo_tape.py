@@ -15,6 +15,7 @@ and that every pattern the tape waits for appears on it.
 
 from __future__ import annotations
 
+import json
 import math
 import re
 import shlex
@@ -36,6 +37,9 @@ COL_PX_PER_FONT_PX = 0.64
 # Rows above the scan: '$ pipx install gitlab-harvester', 'installed package ...',
 # 'These apps are now globally available', '- gitlab-harvester', 'done!'.
 PIPX_ROWS = 5
+# Rows of the live status panel during the search (label, term, total, found, one
+# running task: the demo runs sequentially; glh.ui.progress.Progress.render_panel).
+PANEL_ROWS = 5
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
@@ -48,8 +52,8 @@ def read_tape() -> tuple[dict[str, str], list[tuple[str, list[str]]]]:
         line = raw.strip()
         if m := re.fullmatch(r"Set (\w+) (.+)", line):
             settings[m[1]] = m[2].strip('"')
-        elif m := re.fullmatch(r'Type "(.*)"', line):
-            commands.append((m[1], []))
+        elif m := re.fullmatch(r'Type (["`])(.*)\1', line):
+            commands.append((m[2], []))
         elif m := re.fullmatch(r"Wait(?:\+\w+)?(?:@\S+)? /(.*)/", line):
             commands[-1][1].append(m[1])
     return settings, commands
@@ -111,3 +115,37 @@ def test_demo_tape_fits_the_terminal_and_sees_its_patterns(fake_gitlab: FakeGitL
     visible = "\n".join(screen[:rows])
     for pattern in patterns:
         assert re.search(pattern, visible), f"the tape waits for /{pattern}/, which the output doesn't show:\n{visible}"
+    # While the search runs, the status panel sits below the lines printed so far: the
+    # screen must not scroll then either (a scrolled-off top never comes back).
+    finished = next(i for i, line in enumerate(screen) if line.startswith("Search finished"))
+    assert finished + PANEL_ROWS <= rows, f"the status panel would scroll the screen ({finished + PANEL_ROWS} > {rows})"
+
+    # The last screen: after a clear, jq shows the first hits of the session.
+    [(jq, jq_patterns)] = [c for c in commands if c[0].startswith("jq ")]
+    assert "clear" in [c[0] for c in commands], "the hits are shown on a cleared screen"
+    shown = jq_output(tmp_path / "audit.jsonl", jq)
+    jq_screen = [f"$ {jq}", *shown, "$ "]
+    assert len(f"$ {jq}") <= cols, f"the jq command is wider than the terminal ({cols} columns)"
+    assert len(jq_screen) <= rows and all(len(line) <= cols for line in jq_screen), "\n".join(jq_screen)
+    for pattern in jq_patterns:
+        assert re.search(pattern, "\n".join(jq_screen)), f"/{pattern}/ not in the jq output:\n" + "\n".join(shown)
+    # What makes the point of the demo: a technical account and its password.
+    assert any("DB_USER" in line for line in shown) and any("DB_PASSWORD" in line for line in shown)
+
+
+def jq_output(session: Path, command: str) -> list[str]:
+    """
+    What the tape's jq command prints, in Python: the url and the data of the first
+    hit of the first N records with a ``result`` (``limit(N; inputs.result // empty
+    | ...[0]...[0])``; ``jq -r`` prints strings raw, so a snippet spans its lines and
+    its final newline leaves an empty line).
+    """
+    limit = re.search(r"limit\((\d+); inputs\.result // empty \| "
+                      r"\.project_search_result\[0\]\.branch_search_result\[0\]\) \| \.url, \.data'", command)
+    assert limit, f"update jq_output() for: {command}"
+    lines: list[str] = []
+    records = (json.loads(raw) for raw in session.read_text(encoding="utf-8").splitlines())
+    for record in [r for r in records if r.get("result")][:int(limit[1])]:
+        hit = record["result"]["project_search_result"][0]["branch_search_result"][0]
+        lines += [hit["url"], *hit["data"].split("\n")]
+    return lines

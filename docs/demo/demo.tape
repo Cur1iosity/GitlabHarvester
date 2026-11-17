@@ -35,3 +35,15 @@ Enter
 # patterns against the real output, so a change of the console output fails the tests).
 Wait+Screen@90s /session +audit\.jsonl/
 Sleep 3s
+
+# The hits are not just counted: on a clean screen, the first hit of two projects from the session.
+Hide
+Type "clear"
+Enter
+Sleep 500ms
+Show
+Type `jq -nr 'limit(2; inputs.result // empty | .project_search_result[0].branch_search_result[0]) | .url, .data' audit.jsonl`
+Sleep 500ms
+Enter
+Wait+Screen@10s /DB_PASSWORD/
+Sleep 6s

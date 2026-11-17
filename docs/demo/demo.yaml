@@ -8,6 +8,8 @@
 # (format specs allowed, e.g. {n:03d}) and {id} is the project id. The terms
 # searched in the demo (password, api_key, token; see setup.sh) appear in every
 # generated project, so the hit counter climbs steadily across the scan.
+# The settings file holds what a real finding looks like: a technical account
+# and a generated password (artificial: the demo shows them with jq at the end).
 name: demo
 description: Default dataset plus ~90 generated projects with hits, for a fuller demo.
 extends: default
@@ -28,7 +30,8 @@ generate:
             config/settings.py: |
               DEBUG = False
               DB_HOST = "db-{n:03d}.internal.example"
-              DB_PASSWORD = "FAKE-db-password-{n:04d}"
+              DB_USER = "svc_billing_{n:03d}"
+              DB_PASSWORD = "Xk9#{n:03d}vQ!m2Lp"
               API_KEY = "FAKE-api-key-{n:04d}"
             deploy/.env.example: |
               SERVICE_URL=https://svc-{n:03d}.internal.example

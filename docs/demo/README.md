@@ -12,10 +12,10 @@ the version of the checkout, not whatever is on PyPI at recording time.
 
 | File | Purpose |
 |---|---|
-| `demo.tape` | what is typed; waits for the output (`Wait /done!/`, then the last row of the final `Results` block) instead of fixed pauses. `tests/e2e/test_demo_tape.py` checks the patterns against the real CLI output, and that the output fits the terminal height |
-| `demo.yaml` | Fake GitLab scenario: the default dataset plus ~90 generated projects (~100 total, hundreds of hits) with small response delays, so the scan looks substantial and the progress line stays readable |
+| `demo.tape` | what is typed, in two screens. First `pipx install` and the scan, which waits for the output (`Wait /done!/`, then the last row of the final `Results` block) instead of fixed pauses. Then a cleared screen where `jq` shows the first hit of two projects from the session (a technical account and its password), so the point is the findings, not just their count. `tests/e2e/test_demo_tape.py` runs the scan against the demo data and checks that both screens fit the terminal, that the live status panel doesn't scroll it, and that every waited-for pattern shows up |
+| `demo.yaml` | Fake GitLab scenario: the default dataset plus ~90 generated projects (~100 total, hundreds of hits) with small response delays, so the scan looks substantial and the progress panel stays readable. Their `config/settings.py` holds an artificial technical account (`svc_billing_NNN`) and a generated-looking password |
 | `setup.sh` | hidden setup: private CA and certificate, HTTPS Fake GitLab, term list, token |
-| `Dockerfile` | VHS image with pipx, a local wheel directory for GitlabHarvester, and the Fake GitLab |
+| `Dockerfile` | VHS image with pipx, jq, a local wheel directory for GitlabHarvester, and the Fake GitLab |
 
 ## Where the GIF lives
 
@@ -50,6 +50,6 @@ MSYS_NO_PATHCONV=1 docker run --rm -v "$PWD/docs:/vhs" gitlab-harvester/demo dem
 
 The GIF is written to `docs/demo/out/demo.gif`, which is git-ignored: local recordings never
 touch what the README shows. The scan of ~100 projects takes roughly 15 s on its own (about
-600 search requests), so the whole clip runs ~20-25 s; most of the length now comes from the
+600 search requests), so the whole clip runs ~40 s with the hits screen; most of the length now comes from the
 dataset, not the delays. Tune the `demo.yaml` delays and the final `Sleep` in `demo.tape` to
 taste, or lower the generated `count` for a shorter clip.
