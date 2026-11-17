@@ -9,6 +9,7 @@ import time
 from typing import Callable
 
 from glh.ui import statusline
+from glh.ui.blocks import format_block, Row
 from glh.ui.formatting import format_clock
 from glh.ui.statusline import StatusLine
 
@@ -54,6 +55,10 @@ class Progress:
         # Called on every redraw (also by the ticker thread) to describe the
         # work running right now; its non-empty text replaces ``detail``.
         self.detail_provider: Callable[[], str] | None = None
+        # The same as several lines for the panel (e.g. one per running task); empty: the detail.
+        self.detail_lines_provider: Callable[[], list[str]] | None = None
+        # Label of the info row of the panel ("found" for the hits of a search).
+        self.info_label = "status"
         # Work done across all rounds when rounds overlap (parallel search);
         # None = derive it from round/done.
         self.completed_units: int | None = None
@@ -77,7 +82,8 @@ class Progress:
         """Start the clock and show the status line."""
         self._started = self._clock()
         self._round_started = self._started
-        self._status.attach(self.render, places_tail=True)
+        self._status.attach(self.render_counters, places_tail=True, detail=self.render_detail,
+                            panel=self.render_panel)
         return self
 
     def finish(self, summary: str | None = None) -> float:
@@ -176,7 +182,61 @@ class Progress:
         return self._estimate(self.round_elapsed, self.done, self.total)
 
     def render(self) -> str:
-        """Status line text."""
+        """The whole status text as one line: the counters, then the detail."""
+        counters, detail = self.render_counters(), self.render_detail()
+        return f"{counters} | {detail}" if detail else counters
+
+    def render_detail(self) -> str:
+        """What is being worked on (the provider's text when set, else the last detail)."""
+        if self.detail_provider is not None:
+            try:
+                return self.detail_provider() or self.detail
+            except Exception:  # noqa: BLE001 - the status line must never break the phase
+                pass
+        return self.detail
+
+    def render_panel(self) -> list[str]:
+        """
+        The status as a block of short lines for terminals that can redraw
+        several lines (see glh.ui.statusline)::
+
+            Searching 'api_key' (2/3)
+              term     32/99 projects (32%) · 0:01 · ETA 0:02
+              total    131/297 (44%) · 0:04 · ETA 0:06
+              found    304 hits · HTTP 429 x3
+              running  acme/api @ main, page 3, 0:01
+        """
+        rows: list[Row] = []
+        if self.total is None:
+            rows.append(("done", f"{self.done:,} {self.unit} · {format_clock(self.elapsed)}"))
+        elif self.rounds > 1:
+            rows.append(("term", self._counter(self.done, self.total, self.unit, self.round_elapsed,
+                                               self.round_eta())))
+            rows.append(("total", self._counter(self.units_done, self.total * self.rounds, "", self.elapsed,
+                                                self.eta())))
+        else:
+            rows.append(("progress", self._counter(self.done, self.total, self.unit, self.elapsed, self.eta())))
+        rows.append((self.info_label, " · ".join(x for x in (self.info, self._status.tail_text()) if x)))
+        rows.append(("running", self.render_detail_lines()))
+        return format_block(self.label, rows)
+
+    def _counter(self, done: int, total: int, unit: str, elapsed: float, eta: float | None) -> str:
+        text = f"{done:,}/{total:,}{' ' + unit if unit else ''}{self._percent(done, total)} · {format_clock(elapsed)}"
+        return text + (f" · ETA {format_clock(eta)}" if eta is not None else "")
+
+    def render_detail_lines(self) -> list[str]:
+        """The detail as lines (one per running task when the provider gives them)."""
+        if self.detail_lines_provider is not None:
+            try:
+                if lines := self.detail_lines_provider():
+                    return list(lines)
+            except Exception:  # noqa: BLE001 - the status line must never break the phase
+                pass
+        detail = self.render_detail()
+        return [detail] if detail else []
+
+    def render_counters(self) -> str:
+        """Everything but the detail: label, counters, times, info and the status line's tail."""
         parts = [self.label]
         if self.total is None:
             parts += [f"{self.done:,} {self.unit}"]
@@ -203,12 +263,4 @@ class Progress:
                 parts += [f"ETA {format_clock(eta)}"]
         if tail := self._status.tail_text():
             parts.append(tail)
-        detail = self.detail
-        if self.detail_provider is not None:
-            try:
-                detail = self.detail_provider() or detail
-            except Exception:  # noqa: BLE001 - the status line must never break the phase
-                pass
-        if detail:
-            parts.append(detail)
         return " | ".join(parts)

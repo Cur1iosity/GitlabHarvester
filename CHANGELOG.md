@@ -55,6 +55,24 @@ unchanged. The index and session files are byte-identical to the ones 1.4.2 writ
 
 - `GitlabHarvester.load_index()`: the index file as `IndexMeta` and `Project`
   objects.
+- **A live status panel.** On a terminal that understands ANSI, the progress of
+  a phase is a small block with a spinner instead of one long line. It is
+  readable on narrow screens too, and with `--workers` it shows every running
+  task on its own line:
+
+  ```
+  ⠹ Searching 'api_key' (2/3)
+    term     32/99 projects (32%) · 0:01 · ETA 0:02
+    total    131/297 (44%) · 0:04 · ETA 0:06
+    found    304 hits · HTTP 429 x3
+    running  acme/team-32/service-032 @ main, page 3, 0:01
+             acme/team-33/service-033 @ main, 0:00
+  ```
+
+  It is redrawn in place line by line, and every line is fitted to the terminal
+  width, so nothing wraps. Where escape sequences don't work, the one-line status
+  stays: pipes, files, CI, the run journal and old Windows consoles. The spinner
+  falls back to `|/-\` where the console can't show braille characters.
 
 ### Fixed
 

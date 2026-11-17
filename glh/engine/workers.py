@@ -126,6 +126,17 @@ class ActiveTasks:
         """'label, step, waiting' without empty parts."""
         return ", ".join(x for x in (task.label, task.step, task.waiting) if x)
 
+    def lines(self, format_clock: Callable[[float], str], *, limit: int = 4) -> list[str]:
+        """
+        One line per running task, the longest-running first (at most ``limit``,
+        then '+N more'), e.g. ``group/repo @ main, page 37, 14:02``; [] when idle.
+        """
+        tasks = self.snapshot()
+        shown = [f"{self.text(t)}, {format_clock(self.elapsed(t))}" for t in tasks[:limit]]
+        if len(tasks) > limit:
+            shown.append(f"+{len(tasks) - limit} more")
+        return shown
+
     def describe(self, format_clock: Callable[[float], str]) -> str:
         """
         One-line summary of the longest-running task, e.g.

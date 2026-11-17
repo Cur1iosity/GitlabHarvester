@@ -364,8 +364,10 @@ class SearchEngine:
         # The status line shows the tasks running right now (the longest-running
         # first), not the last finished one: the last task of a scan may run long
         # after all the others are done.
-        previous_provider = progress.detail_provider
+        previous_provider, previous_lines = progress.detail_provider, progress.detail_lines_provider
         progress.detail_provider = lambda: self.active.describe(format_clock)
+        progress.detail_lines_provider = lambda: self.active.lines(format_clock)
+        progress.info_label = "found"
 
         try:
             tasks_iter = pool.imap_unordered(self.search_branch, tasks(), workers=self.connection.concurrency,
@@ -406,7 +408,7 @@ class SearchEngine:
         finally:
             # An interrupted search keeps the running tasks in its "stopped" line.
             progress.detail = self.active.describe(format_clock) or progress.detail
-            progress.detail_provider = previous_provider
+            progress.detail_provider, progress.detail_lines_provider = previous_provider, previous_lines
 
         res = [{"term": term, "result": [out.to_record() for _, out in sorted(results[i], key=lambda x: x[0])]}
                for i, term in enumerate(terms)]
