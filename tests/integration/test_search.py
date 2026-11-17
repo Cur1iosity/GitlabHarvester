@@ -333,8 +333,14 @@ def test_started_from_keeps_inactive_upstream_for_branch_diff(fake_gitlab: FakeG
 # --------------------------------------------------------------------------- progress counts only planned projects
 
 
-def test_progress_counts_only_projects_that_are_scanned(fake_gitlab: FakeGitLab, indexed, monkeypatch):
-    """With filters, every 'N/M projects' shown on the terminal refers to the scan plan, not the index."""
+@pytest.mark.parametrize("ansi", [False, True], ids=["one-line", "panel"])
+def test_progress_counts_only_projects_that_are_scanned(fake_gitlab: FakeGitLab, indexed, monkeypatch, ansi):
+    """
+    With filters, every 'N/M projects' shown on the terminal refers to the scan plan, not the index.
+
+    ``ansi`` is set explicitly: a fake terminal counts as ANSI-capable on POSIX but
+    not on Windows, and the status is then a multi-line panel instead of one line.
+    """
     import re
     from datetime import datetime, timezone
 
@@ -342,7 +348,8 @@ def test_progress_counts_only_projects_that_are_scanned(fake_gitlab: FakeGitLab,
 
     glh, projects = indexed
     tty = FakeStream(True)
-    status = StatusLine(tty, columns=lambda: 400, ticker=False, refresh_interval=0)  # draw every update
+    status = StatusLine(tty, columns=lambda: 400, ticker=False, refresh_interval=0,  # draw every update
+                        ansi=ansi)
     monkeypatch.setattr(statusline, "STATUS", status)
 
     since = datetime(2024, 6, 2, tzinfo=timezone.utc)
@@ -359,9 +366,18 @@ def test_progress_counts_only_projects_that_are_scanned(fake_gitlab: FakeGitLab,
     assert (plan["terms"], plan["projects"], plan["branches"]) == (["2"], ["2 of 9"], ["4"])
     assert plan["skipped"] == ["1 empty", "3 forks", "3 inactive since 2024-06-02"]
 
+    counts = {m.group(2) for m in re.finditer(r"(\d+)/(\d+) projects", out)}
+    assert counts == {"2"}, out
+    if ansi:
+        # The panel: one row per counter, the task below them.
+        # (the label column is as wide as the labels shown: "running" comes and goes)
+        assert re.search(r"\x1b\[2K  term +2/2 projects \(100%\)", out)
+        assert re.search(r"\x1b\[2K  total +3/4 \(75%\)", out)
+        assert "ops/infra/terraform/modules @ main" in out
+        assert re.search(r"Search finished: 2 terms x 2 projects, \d+ hits? in ", out)
+        assert out.endswith("\n")
+        return
     frames = [f.strip() for f in out.split("\r") if "projects (" in f]
-    counts = {m.group(2) for f in frames for m in re.finditer(r"(\d+)/(\d+) projects", f)}
-    assert counts == {"2"}, frames
     assert any(f.startswith("Searching 'token' (2/2) | term 2/2 projects (100%)") for f in frames)
     # Two terms: per-term and overall counters ("total" counts projects x terms).
     assert any(" | total 3/4 (75%) " in f for f in frames)
