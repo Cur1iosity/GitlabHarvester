@@ -118,6 +118,7 @@ def _search(args: CliArgs, glh: GitlabHarvester, keywords: list[str], summary: S
             keywords=keywords,
             options=options,
             output=output,
+            keep_results=False,  # the session file has every hit: memory doesn't grow with them
         )
         search_elapsed = time.perf_counter() - search_started
         incomplete = list(glh.incomplete_terms)

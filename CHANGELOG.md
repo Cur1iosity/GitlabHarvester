@@ -38,6 +38,23 @@ All notable changes to GitlabHarvester are documented here. The format follows
 
 ### Fixed
 
+- **Memory no longer grows with the hits.** The search engine kept every hit of the
+  run in memory until the end, to return them, although the CLI only needs the
+  session file, where each hit is written as soon as its project is searched. The
+  CLI now searches with `keep_results=False` (`GitlabHarvester.search_keywords`,
+  default `True`: the API is unchanged), and the result pages of a branch are kept
+  as just what a hit needs. Measured on 1,000 projects with 2 branches and 150 hits
+  each (300,000 hits, a 59 MB session), 4 workers:
+
+  | | 1.4.3 | 1.4.4 |
+  |---|---|---|
+  | peak memory, 300,000 hits | 206 MB | 47 MB |
+  | peak memory, 150,000 hits | 125 MB | 47 MB |
+  | search time | 26.3 s, 27.2 s | 25.6 s, 24.9 s |
+
+  Memory is now bounded by the projects being searched at the moment (one
+  session record holds a project's hits), not by the run. The time is the same
+  within the noise: it goes to the API. The session file is unchanged.
 - **Searches without access are reported, not hidden.** A search answered with
   HTTP 403 (no access) or 404 (not found) was skipped with a warning and its term
   marked done like a fully searched one, so a session could look complete while

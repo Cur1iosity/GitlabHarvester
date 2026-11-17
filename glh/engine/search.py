@@ -118,6 +118,7 @@ class SearchEngine:
             hit_counter: int = 0,
             session_file: IO | None = None,
             output: SearchOutput | None = None,
+            keep_results: bool = True,
     ) -> tuple[list[dict[str, Any]], int]:
         """
         Search ``keywords`` over ``projects`` (the whole index) with the scan plan of ``options``.
@@ -135,6 +136,10 @@ class SearchEngine:
             output: Where hits, checkpoints and files go (glh/output/sink.py); its
                 ``downloader`` saves every file with hits (--download-files),
                 and each downloaded hit gets a "file" key with the local path.
+            keep_results: Also return every hit (kept in memory until the end).
+                False: the hits only go to ``output`` as they are found, each
+                term's "result" is empty, and memory doesn't grow with the hits
+                (the CLI: its session file has them).
 
         Returns:
             ([{"term", "result"}, ...], total hit counter).
@@ -155,6 +160,7 @@ class SearchEngine:
                 progress=progress, checkpoints=True, file_window=options.file_window or None,
                 file_filter=options.file_filter or None,
                 file_listing=options.file_listing if options.files_only else None,
+                keep_results=keep_results,
             )
             checks = (f", {plural(self.changes.checks, 'file check')}" if options.file_window else "")
             incomplete = (f"; INCOMPLETE: {plural(len(self.incomplete_terms), 'term')} "
@@ -279,6 +285,7 @@ class SearchEngine:
             file_window: TimeWindow | None = None,
             file_filter: FileFilter | None = None,
             file_listing: str | None = None,
+            keep_results: bool = True,
     ) -> tuple[list[dict[str, Any]], int]:
         """
         Search ``terms`` over ``plan`` with the connection's worker threads.
@@ -298,6 +305,11 @@ class SearchEngine:
 
         With workers == 1 the tasks run inline, in order, exactly as a
         sequential scan.
+
+        Memory: a project's hits are held until all its branches are searched
+        (one session record per project), then handed to ``output``; with
+        ``keep_results`` False nothing of them stays, so memory is bounded by
+        the projects being searched at the moment, not by the run.
         """
         n_terms = len(terms)
         hits_before = hit_counter
@@ -414,7 +426,8 @@ class SearchEngine:
                 term_hits[task.term_no] += found
                 if by_branch:
                     out = ProjectResult.for_project(project, by_branch)
-                    results[task.term_no].append((task.project_no, out))
+                    if keep_results:
+                        results[task.term_no].append((task.project_no, out))
                     output.hit(task.term, out)
 
                 projects_left[task.term_no] -= 1
@@ -532,7 +545,9 @@ class SearchEngine:
         res: list[Hit] = []
         page: int = 1
 
-        search_results: list[dict[str, Any]] = []
+        # (path, first line, snippet) of each result: only what a hit needs, not
+        # the API's whole record, while the pages of a large branch come in.
+        search_results: list[tuple[str, Any, str]] = []
         try:
             while True:
                 if page > 1:
@@ -540,7 +555,7 @@ class SearchEngine:
                 batch = project.search(scope=SearchScope.BLOBS, ref=branch, search=query or term,
                                        page=page, per_page=per_page, **kwargs)
 
-                search_results.extend(batch)
+                search_results.extend((x["path"], x["startline"], x.get("data", "")) for x in batch)
                 page += 1
 
                 if len(batch) < per_page:
@@ -557,20 +572,21 @@ class SearchEngine:
         if path_filter is not None and search_results:
             verdict: dict[str, bool] = {}
             search_results = [x for x in search_results
-                              if verdict.setdefault(x["path"], path_filter(x["path"]) if x["path"] not in verdict
-                                                    else verdict[x["path"]])]
+                              if verdict.setdefault(x[0], path_filter(x[0]) if x[0] not in verdict
+                                                    else verdict[x[0]])]
 
         # Branch names and paths may contain '#', '?', '%', spaces, etc.
         branch_url: str = f"{project_url}/-/blob/{quote(branch, safe='/')}"
         if search_results:
             local: dict[str, str] = {}
             if on_files is not None:
-                local = on_files(list(dict.fromkeys(x["path"] for x in search_results)))
-            res = [Hit(url=f"{branch_url}/{quote(x['path'], safe='/')}#L{x['startline']}", data=x.get("data", ""),
-                       file=local.get(x["path"])) for x in search_results]
+                local = on_files(list(dict.fromkeys(path for path, _, _ in search_results)))
+            res = [Hit(url=f"{branch_url}/{quote(path, safe='/')}#L{line}", data=data, file=local.get(path))
+                   for path, line, data in search_results]
 
-            for hit in res:
-                self.logger.info(f"[+] Hitted '{term}': {hit.url}")
+            if self.logger.isEnabledFor(logging.INFO):
+                for hit in res:
+                    self.logger.info("[+] Hitted '%s': %s", term, hit.url)
             hit_counter += len(res)
 
         return res, hit_counter

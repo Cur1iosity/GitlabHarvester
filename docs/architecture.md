@@ -241,6 +241,12 @@ The files a run reads and writes are defined once, as frozen slots dataclasses:
   of 84 MB, and planning a search is about 25% faster. Loading costs about 0.09 s
   more, because `Project.from_record` runs once per line and is kept lean for that
   reason. See the CHANGELOG of 1.4.3 for the measurements.
+- **Memory doesn't grow with the hits.** A project's hits are held until all its
+  branches are searched (the session has one record per project), then written;
+  the CLI calls `search_keywords(..., keep_results=False)`, so nothing of them
+  stays. Memory is bounded by the projects being searched at the moment (about
+  `--workers` of them), not by the run: 300,000 hits peak at 47 MB, like 150,000
+  (1.4.3: 206 MB and 125 MB). The facade keeps returning every hit by default.
 - **Dicts at the facade.** `GitlabHarvester` keeps its dict interface:
   - `search_keywords` and `scan_project` take Projects or index records;
   - they and `scan_branch` return dicts;

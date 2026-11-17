@@ -273,9 +273,11 @@ class GitlabHarvester:
     def search_keywords(self, projects: Iterable[Project | Mapping[str, Any]], keywords: list[str], *,
                         options: ScanOptions,
                         hit_counter: int = 0, session_file: IO | None = None,
-                        output: SearchOutput | None = None) -> tuple[list[dict[str, Any]], int]:
+                        output: SearchOutput | None = None,
+                        keep_results: bool = True) -> tuple[list[dict[str, Any]], int]:
         """See SearchEngine.search_keywords."""
         return self.search.search_keywords(projects, keywords, options=options, hit_counter=hit_counter,
+                                           keep_results=keep_results,
                                            session_file=session_file, output=output)
 
     def search_keyword(self, projects: Iterable[Project | Mapping[str, Any]], term: str, *, options: ScanOptions,

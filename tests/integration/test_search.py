@@ -148,6 +148,21 @@ def test_branch_diff_searches_a_branch_the_fork_changed(fake_gitlab: FakeGitLab,
     assert hits == 1 and session.project_ids() == [2]
 
 
+def test_without_keep_results_the_hits_only_go_to_the_output(fake_gitlab: FakeGitLab, indexed):
+    # The CLI's way: the session file has every hit, so the engine keeps none of them.
+    glh, projects = indexed
+    fp = io.StringIO()
+    results, hits = glh.search_keywords(projects, ["password", "token"], options=ScanOptions(scan_branches="all"),
+                                        session_file=fp, keep_results=False)
+    assert [r["term"] for r in results] == ["password", "token"] and all(r["result"] == [] for r in results)
+    session = Session([json.loads(x) for x in fp.getvalue().splitlines()])
+    kept, kept_hits = glh.search_keywords(projects, ["password", "token"], options=ScanOptions(scan_branches="all"))
+    assert hits == kept_hits == len(session.hits())
+    assert sorted(h["url"] for h in session.hits()) == sorted(
+        hit["url"] for r in kept for project in r["result"] for branch in project["project_search_result"]
+        for hit in branch["branch_search_result"])
+
+
 def test_search_pagination_over_100_results(fake_gitlab: FakeGitLab, make_harvester):
     lines = "\n".join(f"secret {i}" if i % 2 == 0 else "filler" for i in range(500)) + "\n"
     fake_gitlab.reset({
