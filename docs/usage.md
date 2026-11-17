@@ -639,6 +639,45 @@ gitlab-harvester -u ... -t ... -f words.txt --session audit --post-process dedup
   succeeded: after Ctrl+C or an error everything stays in place.
 - The result equals running `-m dedup` and `-m convert` by hand.
 
+### Everything in one archive: --to-zip
+
+```bash
+gitlab-harvester -u ... -t ... -f words.txt -b all --output-separated --download-files \
+    --post-process dedup --to-zip
+# -> results/<host>_session_<ts>.zip
+```
+
+After a long run the results are many files: the session, the post-processing
+outputs, a directory per term with its hits and the downloaded files. `--to-zip`
+packs them into one ZIP next to the session, `<dir>/<session>.zip`, with the same
+layout inside:
+
+```text
+audit.zip
+├── audit.jsonl                  the session (unless --final-only removed it)
+├── audit.deduped.jsonl          --post-process outputs left on disk
+├── password/
+│   ├── audit.jsonl              --output-separated
+│   └── files/…                  --download-files
+└── api_key/…
+```
+
+- It runs last: after the search, `--output-separated` and `--post-process`, so with
+  `--final-only` the archive holds the final file and the downloaded files.
+- Only this session's files go in, not everything in the directory: the default
+  `results/` is shared by all sessions. The downloaded files are the ones the
+  session's hits point to (their `"file"` key), so after `--resume` the files of the
+  earlier runs are in it too. A file outside the session's directory goes under
+  `external/`.
+- The original files stay in place (the session is still needed for `--resume`);
+  an archive of the same session from an earlier run is replaced.
+- Files are compressed one at a time (constant memory, ZIP64 for archives over
+  4 GiB) into `<session>.zip.part`, renamed when complete: an interrupted run leaves
+  no half-written archive. If the archive can't be written (e.g. the disk is full),
+  the run ends with an error and the results are unchanged.
+- The run ends with `Archive: results/....zip (14 files, 16.7 KiB -> 7.2 KiB)`; the
+  run journal records it, and the session `meta` has `"to_zip": true`.
+
 ## Progress output
 
 Progress goes to stderr; results and final summaries go to stdout.
@@ -835,5 +874,6 @@ are URL-encoded. With `--download-files`, a hit whose file was saved also has
 | `--sort-keys` | off | sorted keys in `convert` output |
 | `--post-process STEPS` | — | after the search: `dedup`, `convert` or `dedup,convert` on the session file |
 | `--[no-]final-only` | off | with `--post-process`: keep only the last file |
+| `--[no-]to-zip` | off | after the run, pack its results into `<session>.zip` next to the session, same layout |
 | `--log-level`, `--debug`, `--log-file` | `WARN` | logging |
 | `-V, --version` | | print version |

@@ -84,6 +84,7 @@ config files:
 | `-m dump-index`, `--dump-projects` | build or rebuild the project index |
 | `--session NAME`, `--resume` | name a session and continue it later |
 | `--post-process dedup,convert`, `--final-only` | deduplicate and convert the session right after the search |
+| `--to-zip` | pack the run's results (session, term files, downloaded files) into `<session>.zip` |
 | `-c, --config FILE` | read options from an INI file ([config.example.ini](config.example.ini)) |
 
 See [docs/usage.md](docs/usage.md) for every option, branch and fork strategies, and the output formats,

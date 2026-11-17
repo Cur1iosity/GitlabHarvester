@@ -35,6 +35,22 @@ minor release. Runs that use it say so.
   and `L` shows the proposal again. Without a terminal proposals are logged. The run
   ends with the limits to start the next run with.
 - `-m dump-index --auto-limits` measures the other API only.
+- **All results in one archive**: `--to-zip` packs the results of a search run into
+  `<session>.zip` next to the session, with the same layout inside — the session,
+  the `--post-process` outputs, the `--output-separated` term files and the
+  `--download-files` files (`<term>/files/…`). Only this session's files go in (the
+  downloaded files are those its hits point to, earlier runs before `--resume`
+  included), not the rest of `results/`. It runs last (with `--final-only`: the final
+  file and the downloads), streams one file at a time (ZIP64), writes
+  `<session>.zip.part` and renames it when complete, and keeps the original files.
+  New `to-zip` key in `config.example.ini`; the session `meta` records `to_zip`.
+- New options in `config.example.ini` (`[limits]`): `auto-limits`, `probe-apis`,
+  `probe-max`, `probe-margin`. `workers` is empty there now (still 1 by default), so
+  `--auto-limits` may choose it.
+- Fake GitLab: per-user rate limits (`rate_limits` in a scenario,
+  `FakeGitLab.set_rate_limits`, `/__admin/rate-limits`) with GitLab's 429 headers,
+  and a `ratelimited` scenario.
+
 ## [1.3.0] - 2026-11-17
 
 ### Added

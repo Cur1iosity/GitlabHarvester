@@ -132,3 +132,55 @@ def test_run_journal_records_filters_and_downloads(fake_gitlab: FakeGitLab, run_
     assert "Search plan:" in journal and "files: filename *.py" in journal
     assert "Downloaded files: 2 files" in journal
     assert fake_gitlab.token not in journal
+
+
+# --------------------------------------------------------------------------- --to-zip
+
+
+def zip_names(path: Path) -> list[str]:
+    import zipfile
+
+    with zipfile.ZipFile(path) as zf:
+        assert zf.testzip() is None
+        return sorted(zf.namelist())
+
+
+def test_to_zip_packs_session_term_files_and_downloads(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
+    (tmp_path / "terms.txt").write_text("password\napi_key\n", encoding="utf-8")
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "older_session.jsonl").write_text("{}\n", encoding="utf-8")  # not this run: left out
+    proc = run_cli(*gl_args(fake_gitlab), "-f", "terms.txt", "--session-file", "out/audit.jsonl",
+                   "--output-separated", "--download-files", "--post-process", "dedup", "--to-zip",
+                   "--log-file", "run.log", check=True)
+    assert re.search(r"Archive: out[\\/]audit\.zip \(\d+ files, .* -> .*\)", proc.stdout)
+    members = zip_names(out / "audit.zip")
+    on_disk = [t for t in files_under(out) if t not in ("audit.zip", "older_session.jsonl")]
+    assert members == on_disk  # everything this run wrote, in the same layout
+    assert {"audit.jsonl", "audit.deduped.jsonl", "password/audit.jsonl", "api_key/audit.jsonl"} <= set(members)
+    assert any(m.startswith("password/files/") for m in members)
+    assert Session.load(out / "audit.jsonl").records[0]["to_zip"] is True
+    assert "Archive: " in (tmp_path / "run.log").read_text(encoding="utf-8")
+
+
+def test_to_zip_with_final_only_keeps_the_final_file_and_downloads(fake_gitlab: FakeGitLab, run_cli,
+                                                                   tmp_path: Path):
+    run_cli(*gl_args(fake_gitlab), "-s", "password", "--extension", "py", "--download-files", "--session", "audit",
+            "--post-process", "dedup,convert", "--final-only", "--to-zip", check=True)
+    members = zip_names(tmp_path / "audit.zip")
+    assert "audit.deduped.converted.json" in members
+    assert "audit.jsonl" not in members and "audit.deduped.jsonl" not in members
+    assert len([m for m in members if m.startswith("password/files/")]) == 2
+    assert not any(m.endswith(".sqlite") or m in ("idx.jsonl",) for m in members)
+
+
+def test_to_zip_from_the_config_file(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
+    cfg = tmp_path / "glh.ini"
+    cfg.write_text("[session]\nsession = audit\n[postprocess]\nto-zip = true\n", encoding="utf-8")
+    run_cli("-c", str(cfg), *gl_args(fake_gitlab), "-s", "password", check=True)
+    assert zip_names(tmp_path / "audit.zip") == ["audit.jsonl"]
+    run_cli("-c", str(cfg), *gl_args(fake_gitlab), "-s", "password", "--session", "again", "--no-to-zip",
+            check=True)
+    assert not (tmp_path / "again.zip").exists()
+
+

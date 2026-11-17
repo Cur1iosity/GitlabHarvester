@@ -295,6 +295,7 @@ class CliArgs:
     output_file: str | None
     post_process: tuple[str, ...]
     final_only: bool
+    to_zip: bool
 
     sqlite_path: str | None
     hash_algo: str
@@ -567,6 +568,15 @@ class CliParser:
             help="With --post-process: keep only the last file and delete the session JSONL and "
                  "intermediate files (saves space; the session can't be resumed afterwards).",
         )
+        parser.add_argument(
+            "--to-zip",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help="After the search (and --post-process), pack the run's results into <session>.zip next to "
+                 "the session, in the same layout: the session, --post-process outputs, the "
+                 "--output-separated term files and the --download-files files of the session's hits. "
+                 "The original files are kept.",
+        )
         parser.add_argument("--input-file", default=None, help="Input file for postprocess modes.")
         parser.add_argument("--output-file", default=None, help="Output file for postprocess modes.")
 
@@ -748,6 +758,7 @@ class CliParser:
             output_file=ns.output_file,
             post_process=tuple(ns.post_process),
             final_only=ns.final_only,
+            to_zip=ns.to_zip,
             sqlite_path=ns.sqlite_path,
             hash_algo=ns.hash_algo,
             normalize_hits=ns.normalize_hits,

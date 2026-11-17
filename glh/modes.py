@@ -209,6 +209,7 @@ def _describe_options(args: CliArgs) -> str:
             "output-separated": args.output_separated or None,
             "post-process": ",".join(args.post_process) or None,
             "final-only": args.final_only if args.post_process else None,
+            "to-zip": args.to_zip or None,
         })
     if args.mode in ("dedup", "convert"):
         opts.update({"input-file": args.input_file, "output-file": args.output_file})
@@ -535,6 +536,7 @@ def _search(args: CliArgs, glh: GitlabHarvester, keywords: list[str]) -> None:
                 download_files=args.download_files,
                 download_max_size=args.download_max_size if args.download_files else None,
                 post_process=list(args.post_process),
+                to_zip=args.to_zip,
                 final_only=args.final_only,
             )
 
@@ -567,12 +569,33 @@ def _search(args: CliArgs, glh: GitlabHarvester, keywords: list[str]) -> None:
             f"Repeat the command with --resume to search them again."
         )
 
-    # Split before post-processing: --final-only there may delete the session.
-    if args.output_separated:
-        _separate_output(all_keywords, layout)
+    # Files with hits for --to-zip: read from the session before --final-only may delete it.
+    downloaded = list(dict.fromkeys(archive.downloaded_files(session_path))) if args.to_zip else []
 
+    # Split before post-processing: --final-only there may delete the session.
+    separated = _separate_output(all_keywords, layout) if args.output_separated else []
+
+    processed: list[Path] = []
     if args.post_process:
-        _post_process(args, session_path, keep_session=bool(incomplete))
+        processed = _post_process(args, session_path, keep_session=bool(incomplete))
+
+    if args.to_zip:
+        _zip_results(layout, [session_path, *processed, *separated, *downloaded])
+
+
+def _zip_results(layout: OutputLayout, paths: list[Path | str]) -> None:
+    """--to-zip: pack this run's results into <dir>/<session>.zip, keeping their layout."""
+    target = archive.archive_path(layout.session_path)
+    terminal_utils.STATUS.write_line(f"Packing the results into {target} ...")
+    started = time.perf_counter()
+    existing = [p for p in paths if Path(p).exists()]  # --final-only removed some on purpose
+    try:
+        result = archive.zip_results(target, layout.root, existing)
+    except OSError as e:
+        raise SystemExit(f"--to-zip failed: {e}. The results are unchanged in {layout.root}.") from None
+    _report(f"Archive: {result.describe()} in {format_duration(time.perf_counter() - started)}")
+    for path in result.missing:
+        JOURNAL.write(f"Archive: missing, not archived: {path}")
 
 
 def _warn_changed_file_filter(glh: GitlabHarvester, session_path: Path, options: ScanOptions) -> None:
@@ -595,22 +618,23 @@ def _warn_changed_file_filter(glh: GitlabHarvester, session_path: Path, options:
         )
 
 
-def _separate_output(terms: list[str], layout: OutputLayout) -> None:
+def _separate_output(terms: list[str], layout: OutputLayout) -> list[Path]:
     """Write each term's hits to <dir>/<term>/<session>.jsonl (--output-separated); needs several terms."""
     if len(terms) < 2:
         _report("--output-separated ignored: it needs several search terms.")
-        return
+        return []
     files = split_session_by_term(layout.session_path, terms, layout)
     if not files:
         _report("Separated output: no hits, no per-term files written.")
-        return
+        return []
     shown = (", ".join(f.relative_to(layout.root).as_posix() for f in files) if len(files) <= 10
              else f"{len(files)} files")
     _report(f"Separated output: {terminal_utils.plural(len(files), 'term file')} "
             f"in {layout.root} ({shown})")
+    return files
 
 
-def _post_process(args: CliArgs, session_path: Path, keep_session: bool = False) -> None:
+def _post_process(args: CliArgs, session_path: Path, keep_session: bool = False) -> list[Path]:
     """Run --post-process steps on a finished session (files are deleted only if all steps succeed)."""
     final_only = args.final_only and not keep_session
     if args.final_only and keep_session:
@@ -630,6 +654,7 @@ def _post_process(args: CliArgs, session_path: Path, keep_session: bool = False)
     if result.removed:
         _report(f"Removed (--final-only): {', '.join(str(p) for p in result.removed)}")
     _report(f"Final result: {result.final}")
+    return [p for p in result.outputs if p not in result.removed]
 
 
 def _require_path(value: str | None, *, name: str) -> Path:
