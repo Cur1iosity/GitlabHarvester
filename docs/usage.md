@@ -986,7 +986,7 @@ projects were cut by API errors; the index is then `"is_completed": false`.
   "created_at": "...", "last_activity_at": "...",
   "project_search_result": [
     {"branch": "main", "branch_search_result": [
-      {"url": "https://gitlab.example.com/acme/api/-/tree/main/config/settings.py#L2",
+      {"url": "https://gitlab.example.com/acme/api/-/blob/main/config/settings.py#L2",
        "data": "DB_HOST = ...\nDB_PASSWORD = ...\n"}]}]}}
 ```
 

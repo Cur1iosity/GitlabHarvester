@@ -542,7 +542,7 @@ class SearchEngine:
                                                     else verdict[x["path"]])]
 
         # Branch names and paths may contain '#', '?', '%', spaces, etc.
-        branch_url: str = f"{project_url}/-/tree/{quote(branch, safe='/')}"
+        branch_url: str = f"{project_url}/-/blob/{quote(branch, safe='/')}"
         if search_results:
             local: dict[str, str] = {}
             if on_files is not None:

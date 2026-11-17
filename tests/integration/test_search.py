@@ -74,7 +74,7 @@ def test_hit_links_resolve_to_file_and_line(fake_gitlab: FakeGitLab, indexed):
 
     for h in session.hits():
         project = scenario.project_by_id(h["project_id"])
-        prefix = f"{fake_gitlab.url}/{project.path_with_namespace}/-/tree/"
+        prefix = f"{fake_gitlab.url}/{project.path_with_namespace}/-/blob/"
         assert h["url"].startswith(prefix)
         parts = urlsplit(h["url"])
         assert parts.fragment.startswith("L") and not parts.query
@@ -92,8 +92,8 @@ def test_special_character_links_are_url_encoded(indexed):
     glh, projects = indexed
     _, _, session = search(glh, projects, ["password"], scan_branches="all")
     urls = {h["url"] for h in session.hits() if h["project_id"] == 103}
-    assert any("/-/tree/fix/%2342-login/docs/setup%20guide.md#L1" in u for u in urls)
-    assert any("/-/tree/%C3%BCn%C3%AFcode-%D0%B2%D0%B5%D1%82%D0%BA%D0%B0/" in u for u in urls)
+    assert any("/-/blob/fix/%2342-login/docs/setup%20guide.md#L1" in u for u in urls)
+    assert any("/-/blob/%C3%BCn%C3%AFcode-%D0%B2%D0%B5%D1%82%D0%BA%D0%B0/" in u for u in urls)
     assert all(u.count("#") == 1 and " " not in u for u in urls)
 
 

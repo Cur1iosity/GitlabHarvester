@@ -51,6 +51,11 @@ All notable changes to GitlabHarvester are documented here. The format follows
   The commits are kept as raw digests in memory: an index of 30,000 projects
   with 3 branches each takes 2.7 MB more (22.7 MB instead of 20.0 MB) and loads
   0.11 s slower; the file is about half as large again.
+- **Hit links point at the file page.** A hit's `url` used `/-/tree/<branch>/<path>#L<line>`,
+  the address of a directory listing, not of the file. It is now `/-/blob/<branch>/<path>#L<line>`, like the links
+  of files found by name (`--filename`/`--extension` without a term) already were.
+  Deduplication compares the matched lines, not the links, so sessions from older
+  versions still deduplicate together with new ones.
 - **Branch listing errors no longer drop projects from the search.** When an API
   error (5xx, a timeout, 429 after its retries) cut a project's branch list
   (`--index-branches all|N`), the cut list was stored as if it were complete. A

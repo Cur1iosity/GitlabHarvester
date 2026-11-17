@@ -30,8 +30,8 @@ HIT_LINE = {
         "last_activity_at": None,
         "project_search_result": [
             {"branch": "main", "branch_search_result": [
-                {"url": "https://gitlab.test/acme/api/-/tree/main/a.py#L1", "data": "password = 1", "file": "x/a.py"},
-                {"url": "https://gitlab.test/acme/api/-/tree/main/b.py#L3", "data": ""},
+                {"url": "https://gitlab.test/acme/api/-/blob/main/a.py#L1", "data": "password = 1", "file": "x/a.py"},
+                {"url": "https://gitlab.test/acme/api/-/blob/main/b.py#L3", "data": ""},
             ]},
             {"branch": "fix/#42", "branch_search_result": [{"url": "u", "data": "d"}]},
         ],

@@ -52,7 +52,7 @@ def test_session_in_the_current_directory():
 
 
 RESULT = ProjectResult(project_id=1, web_url="https://gitlab.test/g/p", created_at=None, last_activity_at=None,
-                       branches=(BranchResult("main", (Hit("https://gitlab.test/g/p/-/tree/main/a.py#L1", "pw"),)),))
+                       branches=(BranchResult("main", (Hit("https://gitlab.test/g/p/-/blob/main/a.py#L1", "pw"),)),))
 
 
 def test_search_output_writes_jsonl_records_and_flushes_checkpoints():
@@ -65,7 +65,7 @@ def test_search_output_writes_jsonl_records_and_flushes_checkpoints():
     assert stream.getvalue().splitlines() == [
         '{"term": "password", "result": {"project_id": 1, "web_url": "https://gitlab.test/g/p", "created_at": null, '
         '"last_activity_at": null, "project_search_result": [{"branch": "main", "branch_search_result": '
-        '[{"url": "https://gitlab.test/g/p/-/tree/main/a.py#L1", "data": "pw"}]}]}}',
+        '[{"url": "https://gitlab.test/g/p/-/blob/main/a.py#L1", "data": "pw"}]}]}}',
         '{"type": "keyword_done", "term": "password", "hit_counter": 1, "timestamp_utc": "2024-06-10T12:00:00+00:00"}',
     ]
 
