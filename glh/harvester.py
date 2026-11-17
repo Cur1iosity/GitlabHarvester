@@ -16,10 +16,14 @@ import gitlab.exceptions
 import requests.exceptions
 from gitlab import Gitlab
 from gitlab.const import SearchScope
+from gitlab.utils import EncodedId
 from gitlab.v4.objects import Project
 from requests import Session
 
+from glh.downloads import FileDownloader
 from glh.exceptions import GitlabHarvesterError
+from glh.filefilter import FileFilter
+from glh.output import SearchOutput
 from glh.planner import (
     ScanOptions,
     ScanPlan,
@@ -116,6 +120,8 @@ class _BranchTask:
     branches: tuple[str, ...]
     branch_no: int
     file_window: TimeWindow | None = None
+    file_filter: FileFilter | None = None
+    downloader: FileDownloader | None = None
 
     @property
     def branch(self) -> str:
@@ -1092,6 +1098,7 @@ class GitlabHarvester:
             options: ScanOptions,
             hit_counter: int = 0,
             session_file: IO | None = None,
+            output: SearchOutput | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         """
         Execute term search across a list of projects.
@@ -1105,13 +1112,19 @@ class GitlabHarvester:
         Args:
             projects: The whole project index.
             keywords: Search terms.
-            options: Scan options (branches, forks, activity filter).
+            options: Scan options (branches, forks, activity, file filters).
             hit_counter: Initial hit counter.
-            session_file: Open session JSONL to stream hits and checkpoints to.
+            session_file: Open session JSONL to stream hits and checkpoints to
+                (shortcut for ``output=SearchOutput(session_file)``).
+            output: Where hits, checkpoints and files go (glh/output.py); its
+                ``downloader`` saves every file with hits (--download-files),
+                and each downloaded hit gets a "file" key with the local path.
 
         Returns:
             ([{"term", "result"}, ...], total hit counter).
         """
+        output = output or SearchOutput(session_file)
+        downloader = output.downloader
         plan = build_scan_plan(projects, options)
         n_terms = len(keywords)
         terms_text = terminal_utils.plural(n_terms, "term")
@@ -1125,14 +1138,19 @@ class GitlabHarvester:
             parallel += f", {agents}"
 
         files = f", files changed {options.file_window.describe()}" if options.file_window else ""
+        if options.file_filter:
+            files += f", files: {options.file_filter.describe()}"
+        if downloader is not None:
+            files += f", {downloader.describe()}"
         terminal_utils.STATUS.write_line(f"Search plan: {terms_text}, {plan.describe()}{files}{parallel}")
 
         with terminal_utils.Progress(
                 "Searching", total=plan.project_count, unit="projects", rounds=n_terms,
         ) as progress:
             res, hit_counter = self._run_search(
-                keywords, plan, hit_counter=hit_counter, session_file=session_file,
+                keywords, plan, hit_counter=hit_counter, output=output,
                 progress=progress, checkpoints=True, file_window=options.file_window or None,
+                file_filter=options.file_filter or None,
             )
             checks = (f", {terminal_utils.plural(len(self._file_change_cache), 'file check')}"
                       if options.file_window else "")
@@ -1156,6 +1174,7 @@ class GitlabHarvester:
             session_file: IO | None = None,
             plan: ScanPlan | None = None,
             progress: terminal_utils.Progress | None = None,
+            output: SearchOutput | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         """
         Search a single term across the planned projects.
@@ -1166,6 +1185,7 @@ class GitlabHarvester:
             options: Scan options.
             hit_counter: Initial hit counter.
             session_file: Open session JSONL to stream hits to (no checkpoint record).
+            output: Instead of ``session_file``: the output sink (glh/output.py).
             plan: Precomputed scan plan (see build_scan_plan()).
             progress: Progress to update; a standalone one is shown if None.
 
@@ -1176,9 +1196,11 @@ class GitlabHarvester:
         own = progress is None
         progress = progress or terminal_utils.Progress(f"Searching '{term}'", total=plan.project_count).start()
         try:
-            res, hit_counter = self._run_search([term], plan, hit_counter=hit_counter, session_file=session_file,
+            res, hit_counter = self._run_search([term], plan, hit_counter=hit_counter,
+                                                output=output or SearchOutput(session_file),
                                                 progress=progress, checkpoints=False,
-                                                file_window=options.file_window or None)
+                                                file_window=options.file_window or None,
+                                                file_filter=options.file_filter or None)
         finally:
             if own:
                 progress.finish()
@@ -1209,13 +1231,23 @@ class GitlabHarvester:
         """_search_branch() body, while the task is registered as running."""
         project_obj: Project = self._gl.projects.get(task.project["id"], lazy=True)
         path_filter = None
-        if task.file_window:
+        if task.file_window or task.file_filter:
             def path_filter(path: str) -> bool:
-                return self._file_changed_in_window(task.project["id"], task.branch, path, task.file_window)
+                # The name check first: it's free, the time check costs a request.
+                if task.file_filter and not task.file_filter.matches(path):
+                    return False
+                return not task.file_window or self._file_changed_in_window(
+                    task.project["id"], task.branch, path, task.file_window)
+        on_files = None
+        if task.downloader is not None:
+            def on_files(paths: list[str]) -> dict[str, str]:
+                return self._download_files(task, name, paths)
+        query = task.file_filter.query(task.term) if task.file_filter else None
         errors: list[BaseException] = []
         try:
             hits, _ = self.scan_branch(project=project_obj, branch=task.branch, term=task.term,
-                                       project_url=project_url, path_filter=path_filter, errors=errors)
+                                       project_url=project_url, path_filter=path_filter, errors=errors,
+                                       query=query, on_files=on_files)
         except (gitlab.exceptions.GitlabError, requests.exceptions.RequestException) as e:
             self.logger.warning("Could not search %s @ %s (%s); skipping it, continuing",
                                 name, task.branch, describe_api_error(e))
@@ -1227,6 +1259,51 @@ class GitlabHarvester:
         if retryable:
             failure = f"{name} @ {task.branch}: {describe_api_error(retryable[0])}"
         return hits, failure
+
+    def _open_raw_file(self, project_id: Any, branch: str, path: str) -> requests.Response:
+        """
+        GET /projects/:id/repository/files/:path/raw?ref=<branch>, streamed.
+
+        Goes through the thread's python-gitlab client (auth, proxy, TLS, rate
+        limits, 429 retries); the caller reads and closes the response.
+        """
+        return self._gl.http_get(
+            f"/projects/{EncodedId(project_id)}/repository/files/{EncodedId(path)}/raw",
+            query_data={"ref": branch}, streamed=True, raw=True,
+        )
+
+    def _download_files(self, task: _BranchTask, name: str, paths: list[str]) -> dict[str, str]:
+        """
+        Download the files with hits of one branch search (--download-files).
+
+        Returns:
+            {repository path: local path} for the saved files. A file that
+            can't be downloaded is logged and skipped: its hits are kept, and
+            it doesn't make the term incomplete (nothing was missed in the search).
+        """
+        downloader = task.downloader
+        assert downloader is not None
+        saved: dict[str, str] = {}
+        for path in paths:
+            self._active.set_step(f"downloading {path.rsplit('/', 1)[-1]}")
+            try:
+                local = downloader.save(
+                    project_id=task.project["id"], project_path=name, branch=task.branch, term=task.term,
+                    path=path, fetch=lambda p=path: self._open_raw_file(task.project["id"], task.branch, p),
+                )
+            except (gitlab.exceptions.GitlabError, requests.exceptions.RequestException, OSError) as e:
+                downloader.failed()
+                self.logger.warning("Could not download %s from %s @ %s (%s); its hits are kept",
+                                    path, name, task.branch, describe_api_error(e))
+                self.logger.debug("Full error downloading %s from %s @ %s: %s", path, name, task.branch, e)
+                continue
+            if local is None:
+                self.logger.info("Not downloaded (larger than --download-max-size): %s from %s @ %s",
+                                 path, name, task.branch)
+                continue
+            saved[path] = str(local)
+        self._active.set_step("")
+        return saved
 
     def _file_changed_in_window(self, project_id: Any, branch: str, path: str, window: TimeWindow) -> bool:
         """
@@ -1269,19 +1346,21 @@ class GitlabHarvester:
             plan: ScanPlan,
             *,
             hit_counter: int,
-            session_file: IO | None,
+            output: SearchOutput,
             progress: terminal_utils.Progress,
             checkpoints: bool,
             file_window: TimeWindow | None = None,
+            file_filter: FileFilter | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         """
         Search ``terms`` over ``plan`` with ``self.workers`` threads.
 
         Work is split into (term, project, branch) tasks taken from one shared
         queue by whichever worker is free, so a few huge repositories don't
-        leave other workers idle. Workers only do HTTP; this (main) thread
-        merges branch results into one record per (term, project), writes the
-        session file and updates progress:
+        leave other workers idle. Workers only do HTTP (search, and the files
+        with hits for ``output.downloader``); this (main) thread merges branch
+        results into one record per (term, project), hands records to
+        ``output`` and updates progress:
 
         - a project record is written when all its branches are done
           (with workers > 1, records appear in completion order);
@@ -1315,7 +1394,7 @@ class GitlabHarvester:
                 failures = term_failures[number]
                 if failures:
                     self.incomplete_terms.append(terms[number])
-                if checkpoints and session_file is not None:
+                if checkpoints:
                     record: dict[str, Any] = {
                         # keyword_done is the --resume checkpoint: only for terms searched completely.
                         "type": "keyword_incomplete" if failures else "keyword_done",
@@ -1326,9 +1405,8 @@ class GitlabHarvester:
                     if failures:
                         record["failed_searches"] = len(failures)
                         record["failures"] = failures[:20]
-                    self._emit_record(session_file, record=record)
-                    # Resume checkpoint: make it durable even if the process is killed.
-                    session_file.flush()
+                    # Resume checkpoint: flushed, durable even if the process is killed.
+                    output.checkpoint(record)
                 failed = (f"; {terminal_utils.plural(len(failures), 'search', 'searches')} FAILED, "
                           f"not marked done" if failures else "")
                 if checkpoints and (n_terms > 1 or failures):
@@ -1350,7 +1428,8 @@ class GitlabHarvester:
                 term_begun.setdefault(term_no, progress.clock())
                 for project_no, (project, branches) in enumerate(plan.targets):
                     for branch_no, branch in enumerate(branches):
-                        yield _BranchTask(term_no, term, project_no, project, branches, branch_no, file_window)
+                        yield _BranchTask(term_no, term, project_no, project, branches, branch_no, file_window,
+                                          file_filter, output.downloader)
 
         def report_slow_tasks() -> None:
             # Main thread only. A search can legitimately run for hours (huge
@@ -1410,8 +1489,7 @@ class GitlabHarvester:
                         "project_search_result": s_res,
                     }
                     results[task.term_no].append((task.project_no, out))
-                    if session_file:
-                        self._emit_record(session_file, record={"term": task.term, "result": out})
+                    output.hit(task.term, out)
 
                 projects_left[task.term_no] -= 1
                 if task.term_no == state["next_term"]:
@@ -1503,6 +1581,8 @@ class GitlabHarvester:
             per_page: int = 100,
             path_filter: Callable[[str], bool] | None = None,
             errors: list[BaseException] | None = None,
+            query: str | None = None,
+            on_files: Callable[[list[str]], dict[str, str]] | None = None,
             **kwargs,
     ) -> tuple[list[dict], int]:
         """
@@ -1520,9 +1600,14 @@ class GitlabHarvester:
             per_page: Number of results per page.
             hit_counter: Global hit counter to be incremented.
             path_filter: Optional predicate on the file path; hits in files for
-                which it returns False are dropped (used by the file time filter).
+                which it returns False are dropped (file name and time filters).
             errors: Optional list that receives the API error that stopped the
                 search early (results of earlier pages are still returned).
+            query: Search string sent to GitLab instead of ``term`` (the term
+                plus --filename/--extension filters); ``term`` is still logged.
+            on_files: Called once with the distinct paths of the kept results
+                (--download-files); returns {path: local file} and every hit
+                of such a path gets a "file" key.
             **kwargs: Additional parameters passed to GitLab search API.
 
         Returns:
@@ -1540,7 +1625,7 @@ class GitlabHarvester:
                     self._active.set_step(f"page {page}")
                 batch = project.search(scope=SearchScope.BLOBS,
                                        ref=branch,
-                                       search=term,
+                                       search=query or term,
                                        page=page,
                                        per_page=per_page,
                                        **kwargs,
@@ -1569,8 +1654,15 @@ class GitlabHarvester:
         # Branch names and paths may contain '#', '?', '%', spaces, etc.
         branch_url: str = f"{project_url}/-/tree/{quote(branch, safe='/')}"
         if search_results:
-            res = [{'url': f'{branch_url}/{quote(x["path"], safe="/")}#L{x["startline"]}', 'data': x.get('data', '')}
-                   for x in search_results]
+            local: dict[str, str] = {}
+            if on_files is not None:
+                local = on_files(list(dict.fromkeys(x["path"] for x in search_results)))
+            res = []
+            for x in search_results:
+                hit = {'url': f'{branch_url}/{quote(x["path"], safe="/")}#L{x["startline"]}', 'data': x.get('data', '')}
+                if x["path"] in local:
+                    hit["file"] = local[x["path"]]
+                res.append(hit)
 
             for x in res:
                 self.logger.info(f"[+] Hitted '{term}': {x['url']}")

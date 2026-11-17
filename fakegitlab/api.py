@@ -4,17 +4,18 @@ GitLab REST API v4 subset served by the Fake GitLab.
 Implemented endpoints (everything else returns GitLab-style 404 and is
 recorded as *unmatched* so tests can detect unexpected client calls):
 
-=====================================================  ============================
-Endpoint                                               Notes
-=====================================================  ============================
-``GET /api/v4/user``                                   current user (auth check)
-``GET /api/v4/version``                                static version payload
-``GET /api/v4/projects``                               offset pagination, order_by/sort
-``GET /api/v4/projects/:id``                           numeric id or URL-encoded path
-``GET /api/v4/projects/:id/repository/branches``       name-sorted, ``search`` filter
-``GET /api/v4/projects/:id/search?scope=blobs``        case-insensitive literal search
-``GET /api/v4/projects/:id/repository/commits``        one synthetic commit per file
-=====================================================  ============================
+=======================================================  ========================================
+Endpoint                                                 Notes
+=======================================================  ========================================
+``GET /api/v4/user``                                     current user (auth check)
+``GET /api/v4/version``                                  static version payload
+``GET /api/v4/projects``                                 offset pagination, order_by/sort
+``GET /api/v4/projects/:id``                             numeric id or URL-encoded path
+``GET /api/v4/projects/:id/repository/branches``         name-sorted, ``search`` filter
+``GET /api/v4/projects/:id/search?scope=blobs``          case-insensitive literal search, filters
+``GET /api/v4/projects/:id/repository/commits``          one synthetic commit per file
+``GET /api/v4/projects/:id/repository/files/:path/raw``  raw file content of a ref
+=======================================================  ========================================
 
 Responses follow the documented GitLab shapes and pagination headers
 (``X-Page``, ``X-Per-Page``, ``X-Total``, ``X-Total-Pages``, ``X-Next-Page``,
@@ -105,6 +106,7 @@ class GitLabApi:
         ("GET", re.compile(r"^/projects/(?P<pid>[^/]+)/repository/branches/?$"), "branches"),
         ("GET", re.compile(r"^/projects/(?P<pid>[^/]+)/search/?$"), "project_search"),
         ("GET", re.compile(r"^/projects/(?P<pid>[^/]+)/repository/commits/?$"), "commits"),
+        ("GET", re.compile(r"^/projects/(?P<pid>[^/]+)/repository/files/(?P<file_path>[^/]+)/raw/?$"), "file_raw"),
     ]
 
     def __init__(self, scenario: Scenario) -> None:
@@ -228,6 +230,30 @@ class GitLabApi:
         files = project.branches.get(ref) if ref else None
         results = self.search_blobs(project, ref, files or {}, search) if files is not None else []
         return self._paginate(request, base_url, results, lambda x: x)
+
+    def _ep_file_raw(self, request: Request, base_url: str, user: User, pid: str, file_path: str) -> Response:
+        """
+        Raw content of one file (``GET /projects/:id/repository/files/:file_path/raw``).
+
+        ``file_path`` is URL-encoded (``/`` as ``%2F``); ``ref`` defaults to the
+        default branch, like in GitLab. Unknown ref -> 404 Commit Not Found,
+        missing file -> 404 File Not Found.
+        """
+        project = self._get_project(pid)
+        ref = request.args.get("ref") or project.default_branch
+        files = project.branches.get(ref) if ref else None
+        if files is None:
+            raise ApiError(404, "404 Commit Not Found")
+        path = unquote(file_path)
+        if path not in files:
+            raise ApiError(404, "404 File Not Found")
+        return Response(
+            files[path].encode("utf-8"),
+            status=200,
+            # GitLab also sends X-Gitlab-* metadata headers; they are left out here because
+            # a header must be latin-1 and refs/paths may be any Unicode. The client reads none.
+            headers={"Content-Type": "text/plain; charset=utf-8"},
+        )
 
     def _ep_commits(self, request: Request, base_url: str, user: User, pid: str) -> Response:
         """
@@ -479,7 +505,15 @@ class GitLabApi:
            not the matching line.
 
         A file matching by path and by content appears in both parts, as in GitLab.
+
+        Filters in the search string (``password filename:*.env``) are parsed
+        like ``Gitlab::Search::Query``, see ``parse_search_query``: the rest is
+        the term, and every result whose path doesn't pass them is dropped. A
+        query of filters only (no term) finds nothing.
         """
+        term, filters = parse_search_query(term)
+        if filters:
+            return [r for r in self.search_blobs(p, ref, files, term) if all(f.matches(r["path"]) for f in filters)]
         if not term:
             return []
         inst = self.scenario.instance
@@ -534,6 +568,63 @@ class GitLabApi:
                     }
                 )
         return results
+
+
+@dataclass(frozen=True, slots=True)
+class SearchFilter:
+    """One ``name:value`` filter of a code search query (``-name:value`` = negated)."""
+
+    name: str
+    value: str
+    negated: bool = False
+
+    @property
+    def regex(self) -> str:
+        # GitLab: Regexp.escape(value).gsub('\*', '.*?')
+        return ".*?".join(re.escape(part) for part in self.value.split("*"))
+
+    def matches(self, path: str) -> bool:
+        if self.name == "filename":
+            hit = re.search(f"{self.regex}$", path, re.IGNORECASE)
+        elif self.name == "extension":
+            hit = re.search(rf"\.{self.regex}$", path, re.IGNORECASE)
+        else:  # path
+            hit = re.search(self.regex, path, re.IGNORECASE)
+        return bool(hit) != self.negated
+
+
+SEARCH_FILTER_NAMES = ("filename", "path", "extension")
+
+
+def parse_search_query(raw: str) -> tuple[str, list[SearchFilter]]:
+    """
+    Split a code search string into the term and its filters, like GitLab's
+    ``Gitlab::Search::Query`` used by basic search (``Gitlab::FileFinder``):
+
+    - known filters: ``filename:``, ``path:``, ``extension:``; a ``-`` prefix
+      negates one; only the first fragment of each filter counts, and one
+      with an empty value is ignored;
+    - ``*`` in a value matches any characters; matching is case-insensitive:
+      ``filename:`` the end of the whole path (so ``filename:config.yml`` also
+      matches ``app/myconfig.yml``), ``path:`` anywhere in it,
+      ``extension:`` ``.<value>`` at its end;
+    - the term is what is left, words joined by single spaces.
+    """
+    words = raw.split()
+    fragments: list[str] = []
+    filters: list[SearchFilter] = []
+    for name in SEARCH_FILTER_NAMES:
+        match = next((w for w in words if re.match(rf"^-?{name}:", w)), None)
+        if match is None:
+            continue
+        value = match.split(":", 1)[1]
+        if not value:
+            continue
+        fragments.append(match)
+        filters.append(SearchFilter(name, value, negated=match.startswith("-")))
+    if not filters:
+        return raw, []
+    return " ".join(w for w in words if w not in fragments), filters
 
 
 def _ts(value: str) -> datetime:

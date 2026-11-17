@@ -100,6 +100,7 @@ Repository layout:
 | Path | Purpose |
 |---|---|
 | `glh/`, `gitlab_harvester.py` | Production code (unchanged structure) |
+| `glh/output.py`, `glh/downloads.py` | Where a search's output goes (session, per-term files, downloaded files), kept apart from the engine in `glh/harvester.py` |
 | `fakegitlab/` | Fake GitLab package (dev-only; not shipped in the wheel) |
 | `fakegitlab/scenarios/` | Built-in datasets: `default`, `empty`, `large`, `flaky` |
 | `tests/unit/` | Pure unit tests; no HTTP |
@@ -122,8 +123,9 @@ asserts this exact list):
 | 1 | `GET /api/v4/user` | `Gitlab.auth()` in `_get_gl_client` (and `_verify_extra_tokens`, once per extra token) | none | `username`, `web_url` (python-gitlab compares `web_url` with the base URL and warns on mismatch) |
 | 2 | `GET /api/v4/projects` | `fetch_projects` | `page`, `per_page`, `order_by=id`, `sort=desc`; `last_activity_after`/`last_activity_before` with `--index-active-*` | `id`, `web_url`, `path_with_namespace`, `default_branch`, `empty_repo`, `forked_from_project.id`, `created_at`, `last_activity_at` |
 | 3 | `GET /api/v4/projects/:id/repository/branches` | `get_branches` (only when index branches mode ≠ `default`) | `page`, `per_page` | `name` |
-| 4 | `GET /api/v4/projects/:id/search` | `scan_branch` | `scope=blobs`, `search`, `ref`, `page`, `per_page=100` | `path`, `startline`, `data` |
+| 4 | `GET /api/v4/projects/:id/search` | `scan_branch` | `scope=blobs`, `search` (the term, plus `filename:<pattern>` / `extension:<ext>` with `--filename` / `--extension`), `ref`, `page`, `per_page=100` | `path`, `startline`, `data` |
 | 5 | `GET /api/v4/projects/:id/repository/commits` | `_file_changed_in_window` (only with `--file-changed-*`) | `ref_name`, `path`, `since`, `until`, `page=1`, `per_page=1` | non-empty list = changed in the window |
+| 6 | `GET /api/v4/projects/:id/repository/files/:file_path/raw` | `_open_raw_file` (only with `--download-files`), streamed | `ref` (the branch); `file_path` URL-encoded (`/` → `%2F`) | the body (streamed, stops past `--download-max-size`), `Content-Length` if sent |
 
 No other requests are made. `projects.get(id, lazy=True)` doesn't hit the API,
 and there are no implicit `/version` or `/projects/:id` calls. The test suite fails
@@ -156,6 +158,18 @@ Headers and behavior that matter:
   windows merge and `startline` is the first line of the chunk (context included),
   not the matching line. Each result has `data`, `startline`, `path`, `filename`,
   `basename`, `ref`, `project_id`. A missing `scope`/`search` returns `400`.
+  Filters inside the search string are parsed like `Gitlab::Search::Query`:
+  `filename:`, `path:`, `extension:` (a `-` prefix negates, only the first fragment
+  of each counts, `*` matches any characters, case-insensitive). `filename:` matches
+  the *end of the whole path* (`filename:config.yml` also matches `app/myconfig.yml`),
+  `extension:` `.<value>` at its end, `path:` anywhere. The rest is the term; a query
+  of filters only finds nothing. The harvester re-checks every result path with its
+  own, stricter rules (`glh/filefilter.py`: `--filename` matches the file name).
+- **Raw files**: `ref` defaults to the default branch; unknown ref →
+  `404 Commit Not Found`, missing file → `404 File Not Found`; the body is the file
+  as `text/plain`. The harvester streams it (`http_get(..., streamed=True,
+  raw=True)`) and closes it early when the size limit is passed. A failed download
+  is a warning and never makes the term incomplete.
 - **python-gitlab error handling** (defaults):
   - `429` is retried up to 10 times, sleeping `Retry-After` seconds (silently:
     the harvester sees it through a `requests` response hook, `_on_response`);
@@ -225,9 +239,12 @@ every (or a future) GitLab version. Use the contract tests
 - No permissions model: every valid token sees every project. `visibility` is informational.
 - Search approximates **basic** search: literal, case-insensitive, per-line, path
   matches first, 2 context lines (`instance.search_context_lines`,
-  `instance.search_path_matches`). Not modeled: the `filename:`, `path:` and
-  `extension:` filters that real basic search accepts inside the term, advanced
-  (Elasticsearch/Zoekt) syntax, binary files, and result limits.
+  `instance.search_path_matches`), with the `filename:`, `path:` and `extension:`
+  filters of basic search. Not modeled: advanced (Elasticsearch/Zoekt) syntax and
+  its filter semantics (advanced search matches `filename:` against the file name),
+  binary files, and result limits.
+- Raw files: no `X-Gitlab-*` metadata headers (a header must be latin-1, refs and
+  paths may be any Unicode), no `lfs` parameter, no `HEAD` requests.
   Sources: `lib/gitlab/file_finder.rb` in GitLab and
   `internal/gitaly/service/repository/search_files.go` in Gitaly.
 - Only offset pagination; keyset pagination (`pagination=keyset`) is not modeled.

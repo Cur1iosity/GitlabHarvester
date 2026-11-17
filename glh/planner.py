@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from glh.filefilter import FileFilter
+
 BranchesMode = str | int  # "default" | "all" | int
 
 
@@ -39,6 +41,9 @@ class ScanOptions:
             only if a commit touched its file in the branch inside the window
             (checked with the commits API, one request per file).
         None disables a bound; bounds are inclusive.
+        filename / extension: Optional file filters (--filename, --extension),
+            see glh/filefilter.py: sent to GitLab inside the search string and
+            re-checked on every result path.
     """
     scan_branches: BranchesMode = "default"  # default|all|N
     forks_mode: str = "include"  # skip|include|branch-diff|all-branches
@@ -47,11 +52,18 @@ class ScanOptions:
     active_before: datetime | None = None
     file_changed_after: datetime | None = None
     file_changed_before: datetime | None = None
+    filename: str | None = None
+    extension: str | None = None
 
     @property
     def file_window(self) -> "TimeWindow":
         """Time window for files with hits."""
         return TimeWindow(self.file_changed_after, self.file_changed_before)
+
+    @property
+    def file_filter(self) -> FileFilter:
+        """File name/extension filter of the search (falsy when unset)."""
+        return FileFilter(self.filename, self.extension)
 
 
 @dataclass(frozen=True, slots=True)

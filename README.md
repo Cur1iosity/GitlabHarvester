@@ -52,8 +52,9 @@ gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -s password
 The first run builds a project index (`<host>_project_index.jsonl`), and later runs reuse it.
 Hits are written to a JSONL session file as they are found.
 
-Lists of terms, all branches and forks, fresh findings only, resuming, parallel requests
-and rate limits, deduplicated reports, config files:
+Lists of terms, specific files only, saving the files with hits, all branches and forks,
+fresh findings only, resuming, parallel requests and rate limits, deduplicated reports,
+config files:
 **[docs/USE_CASES.md](docs/USE_CASES.md)**.
 
 ## Common options
@@ -64,6 +65,8 @@ and rate limits, deduplicated reports, config files:
 | `--forks include\|skip\|branch-diff\|all-branches` | how forks are handled |
 | `--time-after DATE`, `--time-before DATE` | limit the index, its projects and the files with hits to a time window |
 | `--started-from 2024-06-01` | search only indexed projects with activity since the date |
+| `--filename '*.env'`, `--extension py` | search only files with this name (exact, or a mask with `*`) or extension |
+| `--download-files`, `--download-max-size 10M` | save every file with hits to `<term>/files/` for offline analysis |
 | `-t "tok1;tok2"`, `--token-file FILE` | several tokens run in parallel, each with its own workers and rate-limit budget |
 | `-w, --workers N` | parallel API requests per token, for instances without rate limits |
 | `--rpm N`, `--index-rpm N`, `--search-rpm N` | requests per minute per worker: all, non-search, search |

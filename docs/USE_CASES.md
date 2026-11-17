@@ -4,15 +4,17 @@ Typical scenarios and which options fit them. For the full option reference see
 [usage.md](usage.md).
 
 - [1. First runs: terms, sessions, reports](#1-first-runs-terms-sessions-reports)
-- [2. Export the project inventory only](#2-export-the-project-inventory-only)
-- [3. Forks: scan them or not](#3-forks-scan-them-or-not)
-- [4. Only fresh findings: time filters](#4-only-fresh-findings-time-filters)
-- [5. Parallel requests: --workers](#5-parallel-requests---workers)
-- [6. Red team: several tokens against a per-user rate limit](#6-red-team-several-tokens-against-a-per-user-rate-limit)
-- [7. Baseline and re-scans](#7-baseline-and-re-scans)
-- [8. Deduplicated JSON report in one run: --post-process](#8-deduplicated-json-report-in-one-run---post-process)
-- [9. History of runs in a log file](#9-history-of-runs-in-a-log-file)
-- [10. Optional: options from a config file](#10-optional-options-from-a-config-file)
+- [2. Search only in specific files: --filename, --extension](#2-search-only-in-specific-files---filename---extension)
+- [3. Save the files with hits for deeper analysis: --download-files](#3-save-the-files-with-hits-for-deeper-analysis---download-files)
+- [4. Export the project inventory only](#4-export-the-project-inventory-only)
+- [5. Forks: scan them or not](#5-forks-scan-them-or-not)
+- [6. Only fresh findings: time filters](#6-only-fresh-findings-time-filters)
+- [7. Parallel requests: --workers](#7-parallel-requests---workers)
+- [8. Red team: several tokens against a per-user rate limit](#8-red-team-several-tokens-against-a-per-user-rate-limit)
+- [9. Baseline and re-scans](#9-baseline-and-re-scans)
+- [10. Deduplicated JSON report in one run: --post-process](#10-deduplicated-json-report-in-one-run---post-process)
+- [11. History of runs in a log file](#11-history-of-runs-in-a-log-file)
+- [12. Optional: options from a config file](#12-optional-options-from-a-config-file)
 
 All examples pass the options on the command line; that is the main way to run the tool.
 They expect the token in an environment variable: `export GITLAB_TOKEN=...`.
@@ -42,12 +44,87 @@ gitlab-harvester -m convert --input-file clean.jsonl --output-file clean.json
 - The session file (`audit.jsonl`) gets every hit as soon as it is found, plus a
   checkpoint after every finished term: that is what `--resume` continues from.
 - Searching a list of terms? Add `--output-separated` to also get one file per term
-  next to the session (`audit.password.jsonl`, `audit.api_key.jsonl`, …), so each kind
-  of finding can be triaged on its own. See [usage.md](usage.md#one-file-per-term---output-separated).
+  in a directory per term next to the session (`password/audit.jsonl`,
+  `api_key/audit.jsonl`, …), so each kind of finding can be triaged on its own. See [usage.md](usage.md#one-file-per-term---output-separated).
 - dedup and convert can also run right after the search: see
-  [section 8](#8-deduplicated-json-report-in-one-run---post-process).
+  [section 10](#10-deduplicated-json-report-in-one-run---post-process).
 
-## 2. Export the project inventory only
+## 2. Search only in specific files: --filename, --extension
+
+Some secrets live in well-known files: `.env`, `settings.py`, `application.yml`,
+`*.tfvars`, CI files. Narrowing the search to them cuts the noise from docs, tests
+and vendored code, and makes every result page smaller.
+
+```bash
+# "password" only in Python files (the dot is optional: py, .py and *.py are the same)
+gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -s password --extension py
+
+# A list of terms only in .env files of all branches
+gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -f words.txt -b all --filename '*.env'
+
+# An exact file name, with its extension
+gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -s DB_PASSWORD --filename settings.py
+
+# A mask: docker-compose.yml, docker-compose.prod.yml, ...
+gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -s password --filename 'docker-compose*.yml'
+
+# Both: config.yml, config.prod.yml, but not config.json
+gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -s token --filename 'config*' --extension yml
+
+# A file in a given directory (a pattern with / matches the end of the path)
+gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -s secret --filename 'k8s/*.yaml'
+```
+
+- `--filename` takes an exact name (it may include the extension: `settings.py`,
+  `.env`, `Dockerfile`) or a mask where `*` matches any characters (`*.env`,
+  `config*`, `*secret*`). It matches the file name, not a directory, case-insensitively.
+- GitLab does the filtering (the options become `filename:`/`extension:` in the
+  search string), so you get fewer results pages; the harvester re-checks every
+  result, so the session holds only the files you asked for even on an instance
+  that ignores a filter.
+- A filter narrows a search; it can't list files on its own: a term (`-s`/`-f`) is
+  still needed. To find a file by name, use a word you expect inside it.
+- Combine with `--download-files` to keep a copy of each matching file
+  ([section 3](#3-save-the-files-with-hits-for-deeper-analysis---download-files)).
+
+## 3. Save the files with hits for deeper analysis: --download-files
+
+A hit is a snippet with a couple of lines of context. To look at the whole file
+later (run a secret scanner over it, grep for related values, diff branches,
+attach it to a report), let the harvester save every file with hits.
+
+```bash
+# Every file with "password" in it, at most 10 MiB each (the default limit)
+gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -s password --download-files --session audit
+# -> audit.jsonl
+#    password/files/acme_api_main_20261117093000_password_config_settings.py ...
+
+# Config files of all branches for a list of terms, one directory per term,
+# each with the term's hits and its files; skip anything bigger than 2 MiB
+gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -f words.txt -b all \
+  --extension yml --download-files --download-max-size 2M --output-separated
+# -> results/<host>_session_<ts>.jsonl
+#    results/password/<host>_session_<ts>.jsonl
+#    results/password/files/...
+#    results/api_key/...
+
+# Then analyze the copies offline, e.g. with a secret scanner
+trufflehog filesystem results/password/files
+```
+
+- Files go to `<term>/files/` next to the session (`results/<term>/files/` by
+  default), named `<project>_<branch>_<timestamp>_<term>_<path>`, so the name keeps
+  the original file name and extension and says where it came from.
+- Every hit of a downloaded file gets a `"file"` key with the local path, so a report
+  links each finding to its copy.
+- `--download-max-size` (default `10M`, `0` = no limit) skips big files (build
+  artifacts, dumps, binaries) without downloading them.
+- One API request per file (counted by `--index-rpm`); a file found by several terms
+  is downloaded once and copied locally for the other terms. A failed download is a
+  warning: the hits stay in the session, and the term still counts as done.
+- The copies are as sensitive as the repository: keep the results directory private.
+
+## 4. Export the project inventory only
 
 Use `-m dump-index` to get a list of all projects visible to the token without
 searching anything, for example for an asset inventory, to estimate the size of a
@@ -72,7 +149,7 @@ build time, and `is_completed` (false if the listing stopped on an API error).
 The same file serves later searches: pass it with `--index-file` and it is reused
 as is (add `--dump-projects` to rebuild it).
 
-## 3. Forks: scan them or not
+## 5. Forks: scan them or not
 
 GitLab blob search looks at the current files of a branch. A fork is a separate
 repository with its own branches, so a secret can live only there:
@@ -109,7 +186,7 @@ only the fork's default branch. `--fork-diff-bases` (default
 because a fork often changes exactly those. Deduplication afterwards
 (`-m dedup`) removes hits that still repeat across forks and branches.
 
-## 4. Only fresh findings: time filters
+## 6. Only fresh findings: time filters
 
 Use `--started-from DATE` (alias of `--active-after`) when only recent changes matter: a regular re-scan after
 a full baseline, a check after an incident, or a review of what changed during a
@@ -163,7 +240,7 @@ Keep in mind:
   example, creating a branch or tag in the web UI) may not update it. Take the
   date with a margin, e.g. a day before the previous scan.
 
-## 5. Parallel requests: --workers
+## 7. Parallel requests: --workers
 
 `-w/--workers N` sends up to N API requests at a time and speeds up project
 listing, branch listing and search almost N times. It is appropriate when the
@@ -223,7 +300,7 @@ traffic looks in logs, not whose requests they are.
 
 Details: [usage.md](usage.md#request-rate-limits).
 
-## 6. Red team: several tokens against a per-user rate limit
+## 8. Red team: several tokens against a per-user rate limit
 
 On an engagement you often end up with tokens from several accounts — phished,
 pulled from a CI job, found in a dotfile, or simply shared across the team for the
@@ -269,9 +346,9 @@ Operational notes for an engagement:
   their count (`tokens=3 inline`). The session stays safe to hand over as evidence.
 - Each token sees only what its account can see. Overlapping accounts give the same
   findings faster; accounts in different groups also widen coverage. Deduplicate
-  afterwards (`-m dedup`, [section 8](#8-deduplicated-json-report-in-one-run---post-process))
+  afterwards (`-m dedup`, [section 10](#10-deduplicated-json-report-in-one-run---post-process))
   to collapse the repeats.
-- This stacks with the noise controls from [section 5](#5-parallel-requests---workers):
+- This stacks with the noise controls from [section 7](#7-parallel-requests---workers):
   `--jitter`, `--user-agent-file` and the rpm limits apply per client, so each token's
   traffic is paced and disguised on its own. Note that all requests from one token
   still carry that token — rotating User-Agents changes how the traffic *looks*, not
@@ -284,7 +361,7 @@ gitlab-harvester -u https://gitlab.example.com --token-file tokens.txt \
   -f words.txt -b all --rpm 10 --jitter 0.5-3 --user-agent-file agents.txt --session quiet
 ```
 
-## 7. Baseline and re-scans
+## 9. Baseline and re-scans
 
 ```bash
 # 1. Baseline: everything, fresh index with all branches (parallel if the instance allows it)
@@ -301,7 +378,7 @@ gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -f words.txt \
   --index-file gitlab_index.jsonl -b all --forks branch-diff --started-from 2024-06-24 --session week-26 --resume
 ```
 
-## 8. Deduplicated JSON report in one run: --post-process
+## 10. Deduplicated JSON report in one run: --post-process
 
 The same secret usually shows up many times: in every branch, in every fork, for
 several terms. Instead of running `-m dedup` and `-m convert` after the search, ask
@@ -334,7 +411,7 @@ deleted if the search is interrupted or a step fails.
 Only one step is fine too: `--post-process dedup` (JSONL without duplicates) or
 `--post-process convert` (a JSON array of the raw session).
 
-## 9. History of runs in a log file
+## 11. History of runs in a log file
 
 Pass the same `--log-file` to every run. Whatever `--log-level` is, each run appends
 a summary: options, index file and its build time, search plan, projects, hits and
@@ -354,7 +431,7 @@ The run id (`[run 2f3724f3]`) ties together the lines of one run. Use it to comp
 filters (`--forks`, time windows, `--workers`) against duration and number of hits.
 Details: [usage.md](usage.md#run-journal).
 
-## 10. Optional: options from a config file
+## 12. Optional: options from a config file
 
 Any of the options above can also be put into an INI file and passed with
 `-c/--config FILE`. Options given on the command line override the values from the file:
