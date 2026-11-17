@@ -101,6 +101,37 @@ config files:
 See [docs/usage.md](docs/usage.md) for every option, branch and fork strategies, and the output formats,
 and [docs/USE_CASES.md](docs/USE_CASES.md) for typical scenarios.
 
+## Not a secret scanner
+
+GitlabHarvester is **not** an alternative to [TruffleHog](https://github.com/trufflesecurity/trufflehog)
+or [Gitleaks](https://github.com/gitleaks/gitleaks). It doesn't detect secrets by their
+patterns or entropy, and it doesn't verify them. It is a targeted search for words across
+a GitLab instance: you choose what to look for (`password`, an internal host name, a
+project codename), and it finds where that word is, in every project and branch, through
+GitLab's own search API.
+
+That is where it came from: an engagement on a real corporate GitLab of about 30,000
+projects, with no code search across the instance. Cloning everything wasn't an option,
+and the question was "where does this word appear?".
+
+It works well together with secret scanners:
+
+- **Find the files worth scanning.** On a huge instance, narrow the search down to the
+  projects and files of interest first, then point a scanner at those instead of at
+  everything.
+- **Scan what was found.** `--download-files` saves every file with hits to the disk,
+  and a scanner reads them offline:
+
+  ```bash
+  gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -s password --download-files
+  trufflehog filesystem results/password/files --no-verification
+  gitleaks dir results/password/files
+  ```
+
+  Without a term, `--filename '*.env' --download-files` collects every `.env` file of the
+  instance for them. `--no-verification` keeps TruffleHog from sending the secrets it
+  finds to their providers to check them.
+
 ## Development
 
 ```bash
