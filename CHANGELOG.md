@@ -32,6 +32,13 @@ All notable changes to GitlabHarvester are documented here. The format follows
 
 ### Changed
 
+- **Dependencies declared as used.** `urllib3` is imported directly (to silence its
+  warning with `--insecure`), so it is now a declared dependency (`>=1.26`; it already
+  came with `requests`), and `Werkzeug` joins the `test` extra (the Fake GitLab imports
+  it). The build no longer asks for `wheel`: setuptools builds wheels itself.
+- **The README on PyPI.** The use-cases picture and the links to the docs were relative
+  paths, which PyPI can't resolve: the picture showed as its alt text, the links led
+  nowhere. They now point to the repository.
 - **Loading the index is faster:** 0.26 s instead of 0.33 s for 30,000 projects
   (1.4.2: 0.17 s), from a leaner `Project.from_record`. Memory is unchanged.
   An index rebuilt with branch commits (see Fixed) costs a little of it back.

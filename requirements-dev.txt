@@ -4,6 +4,7 @@
 # Update deliberately: pip install -U ... && pytest && edit pins.
 python-gitlab==8.6.0
 requests==2.34.2
+urllib3==2.8.0
 pytest==9.2.0
 pytest-httpserver==1.2.0
 Werkzeug==3.1.9

@@ -33,8 +33,9 @@ docker run --rm --network none -v "$PWD:/src:ro" glh-kali
 |---|---|---|---|
 | `python-gitlab>=8.0.0` | `python3-gitlab` | 8.0.0 | 4.9.0: too old |
 | `requests>=2.32.0` | `python3-requests` | 2.34.2 | 2.32.3 |
+| `urllib3>=1.26` | `python3-urllib3` | 2.8.0 | 2.3.0 |
 | tests: `pytest` | `python3-pytest` | 9.1.1 | 8.3.5 |
-| tests: `pytest-httpserver` (Werkzeug) | `python3-pytest-httpserver`, `python3-werkzeug` | 1.1.3, 3.1.9 | 1.1.3, 3.1.3 |
+| tests: `pytest-httpserver`, `Werkzeug>=3.0` | `python3-pytest-httpserver`, `python3-werkzeug` | 1.1.3, 3.1.9 | 1.1.3, 3.1.3 |
 | tests: `PyYAML` | `python3-yaml` | 6.0.3 | 6.0.2 |
 | tests: `trustme` | `python3-trustme` | 1.3.0 | 1.2.1 |
 | build: `setuptools>=77` | `python3-setuptools` | 84 | 78.1.1 |
@@ -58,9 +59,9 @@ is: its `python3-gitlab` is older than the required 8.0.0.
   ```
 
 - **Build-Depends:** `debhelper-compat (= 13), dh-python, pybuild-plugin-pyproject,
-  python3-all, python3-setuptools, python3-gitlab, python3-requests, python3-pytest,
+  python3-all, python3-setuptools, python3-gitlab, python3-requests, python3-urllib3, python3-pytest,
   python3-pytest-httpserver, python3-werkzeug, python3-yaml, python3-trustme`.
-  **Depends:** `${python3:Depends}, ${misc:Depends}` (`python3-gitlab`, `python3-requests`).
+  **Depends:** `${python3:Depends}, ${misc:Depends}` (`python3-gitlab`, `python3-requests`, `python3-urllib3`).
 - **Tests during the build:** pytest picks up its configuration from `pyproject.toml`.
   Tests use only the loopback interface (a local Fake GitLab, a local HTTPS server with
   a throwaway CA) and fail fast on any other address, so they work without network.

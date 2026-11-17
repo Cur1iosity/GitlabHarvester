@@ -18,7 +18,7 @@ echo "== distribution"
 sed -n 's/^PRETTY_NAME=//p' /etc/os-release
 python3 --version
 dpkg-query -W -f '${Package} ${Version}\n' \
-    python3-gitlab python3-requests python3-pytest python3-pytest-httpserver \
+    python3-gitlab python3-requests python3-urllib3 python3-pytest python3-pytest-httpserver \
     python3-werkzeug python3-yaml python3-trustme python3-setuptools python3-build
 
 echo "== tests (offline, distribution packages only)"
