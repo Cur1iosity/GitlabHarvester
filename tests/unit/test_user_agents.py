@@ -1,12 +1,12 @@
-"""User-Agent of the API requests (glh.user_agents, applied by ratelimit.ThrottledAdapter)."""
+"""User-Agent of the API requests (glh.gitlab.user_agents, applied by throttling.ThrottledAdapter)."""
 
 from __future__ import annotations
 
 import pytest
 from requests import Session
 
-from glh.ratelimit import ThrottledAdapter, limit_session
-from glh.user_agents import UserAgentError, check_user_agent, describe, load_user_agents
+from glh.gitlab.throttling import limit_session, ThrottledAdapter
+from glh.gitlab.user_agents import check_user_agent, describe, load_user_agents, UserAgentError
 
 
 def test_load_skips_blank_lines_and_comments(tmp_path):

@@ -15,7 +15,7 @@ import pytest
 from werkzeug.test import EnvironBuilder
 from werkzeug.wrappers import Request
 
-from fakegitlab import ScenarioError, available_scenarios, load_scenario
+from fakegitlab import available_scenarios, load_scenario, ScenarioError
 from fakegitlab.api import GitLabApi
 from fakegitlab.faults import FaultInjector
 from fakegitlab.scenario import SCENARIO_PATH_ENV

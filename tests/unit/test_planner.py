@@ -1,14 +1,15 @@
-"""Project selection, branch strategies and fork handling (glh.planner)."""
+"""Project selection, branch strategies and fork handling (glh.domain.planning)."""
 
 from __future__ import annotations
 
 import pytest
 
-from glh.planner import (
-    ScanOptions,
+from glh.domain.models import Project
+from glh.domain.planning import (
     branches_to_scan,
     get_upstream_id,
     is_fork_project,
+    ScanOptions,
     select_branches_from_index,
     select_fork_branches_diff,
     should_scan_project,
@@ -16,8 +17,8 @@ from glh.planner import (
 
 
 def proj(pid: int = 1, *, branches=None, default="main", fork_of=None, empty=False, **extra):
-    """Build an index-shaped project entry."""
-    return {
+    """A project of the index, built from an index-shaped record."""
+    return Project.from_record({
         "id": pid,
         "web_url": f"http://gitlab.test/g/p{pid}",
         "path_with_namespace": f"g/p{pid}",
@@ -26,7 +27,7 @@ def proj(pid: int = 1, *, branches=None, default="main", fork_of=None, empty=Fal
         "forked_from_project": {"id": fork_of} if fork_of else False,
         "branches": list(branches) if branches is not None else ([default] if default else []),
         **extra,
-    }
+    })
 
 
 # --------------------------------------------------------------------------- fork detection
@@ -40,7 +41,7 @@ def proj(pid: int = 1, *, branches=None, default="main", fork_of=None, empty=Fal
         (proj(fork_of=7), True, 7),
         (proj(upstream_project_id=9), True, 9),
         (proj(upstream_project_id="11"), True, 11),
-        ({"id": 1}, False, None),
+        (Project(id=1), False, None),
     ],
 )
 def test_fork_detection(entry, is_fork, upstream):
@@ -130,7 +131,7 @@ def test_branch_diff_respects_limits():
 def test_branch_diff_without_upstream_treats_all_branches_as_unique():
     selected = select_fork_branches_diff(FORK, None, "all", ("main",))
     assert selected[0] == "main"
-    assert set(selected) == set(FORK["branches"])
+    assert set(selected) == set(list(FORK.branch_names))
 
 
 def test_branches_to_scan_branch_diff_uses_upstream_from_index():
@@ -147,7 +148,7 @@ def test_branches_to_scan_branch_diff_falls_back_when_upstream_missing():
 
 def test_branches_to_scan_all_branches_mode_ignores_scan_limit_for_forks():
     opts = ScanOptions(scan_branches="default", forks_mode="all-branches")
-    assert branches_to_scan(FORK, opts, {}) == FORK["branches"]
+    assert branches_to_scan(FORK, opts, {}) == list(FORK.branch_names)
     # Non-forks still honor the limit.
     assert branches_to_scan(UPSTREAM, opts, {}) == ["main"]
 
@@ -155,14 +156,15 @@ def test_branches_to_scan_all_branches_mode_ignores_scan_limit_for_forks():
 @pytest.mark.parametrize("mode", ["include", "skip"])
 def test_branches_to_scan_include_treats_forks_as_regular(mode):
     opts = ScanOptions(scan_branches="all", forks_mode=mode)
-    assert branches_to_scan(FORK, opts, {1: UPSTREAM}) == FORK["branches"]
+    assert branches_to_scan(FORK, opts, {1: UPSTREAM}) == list(FORK.branch_names)
 
 
 # --------------------------------------------------------------------------- activity filter (--started-from)
 
 from datetime import datetime, timedelta, timezone  # noqa: E402
 
-from glh.planner import is_active_since, parse_timestamp  # noqa: E402
+from glh.domain.planning import is_active_since
+from glh.domain.timewindow import parse_timestamp
 
 UTC = timezone.utc
 
@@ -198,7 +200,7 @@ def test_is_active_since_boundaries():
 def test_projects_with_unknown_activity_are_kept(value):
     since = datetime(2024, 6, 1, tzinfo=UTC)
     assert is_active_since(proj(last_activity_at=value), since) is True
-    assert is_active_since({"id": 1}, since) is True  # old index without the field
+    assert is_active_since(Project(id=1), since) is True  # old index without the field
 
 
 @pytest.mark.parametrize("mode", ["include", "branch-diff", "all-branches", "skip"])
@@ -210,19 +212,12 @@ def test_should_scan_project_applies_started_from(mode):
     assert should_scan_project(old, opts) is False
     assert should_scan_project(new, opts) is True
     # Combined with other rules: empty repos and skipped forks stay excluded.
-    assert should_scan_project(proj(empty=True, last_activity_at=new["last_activity_at"]), opts) is False
+    assert should_scan_project(proj(empty=True, last_activity_at=new.last_activity_at), opts) is False
 
 
 # --------------------------------------------------------------------------- scan plan (what progress counts)
 
-from glh.planner import (  # noqa: E402
-    SKIP_EMPTY,
-    SKIP_FORK,
-    SKIP_INACTIVE,
-    SKIP_NO_BRANCHES,
-    build_scan_plan,
-    skip_reason,
-)
+from glh.domain.planning import SKIP_EMPTY, SKIP_FORK, SKIP_INACTIVE, SKIP_NO_BRANCHES, build_scan_plan, skip_reason
 
 
 def test_skip_reason_order_and_values():
@@ -247,7 +242,7 @@ def test_scan_plan_counts_only_scanned_projects_and_branches():
     ]
     plan = build_scan_plan(index, ScanOptions(scan_branches="all", forks_mode="skip", started_from=since))
 
-    assert [p["id"] for p, _ in plan.targets] == [1]
+    assert [p.id for p, _ in plan.targets] == [1]
     assert plan.targets[0][1] == ("develop", "main")
     assert (plan.project_count, plan.branch_count, plan.total_projects) == (1, 2, 5)
     assert plan.skipped == {SKIP_EMPTY: 1, SKIP_FORK: 1, SKIP_INACTIVE: 1, SKIP_NO_BRANCHES: 1}
@@ -264,7 +259,7 @@ def test_scan_plan_keeps_filtered_upstream_for_branch_diff():
     fork = proj(2, fork_of=1, branches=["feature", "main", "mine"], last_activity_at="2024-07-01T00:00:00Z")
     plan = build_scan_plan([upstream, fork], ScanOptions(scan_branches="all", forks_mode="branch-diff",
                                                          started_from=since))
-    assert [(p["id"], b) for p, b in plan.targets] == [(2, ("main", "mine"))]
+    assert [(p.id, b) for p, b in plan.targets] == [(2, ("main", "mine"))]
     assert plan.skipped == {SKIP_INACTIVE: 1}
 
 

@@ -17,9 +17,9 @@ from pathlib import Path
 import pytest
 
 from fakegitlab import FakeGitLab
+from glh.output.session_reader import load_done_keywords
 from tests.conftest import cli_env, kill_process_tree
-from glh.session import load_done_keywords
-from tests.helpers import PASSWORD_HITS_DEFAULT_BRANCH, Session, load_index, row
+from tests.helpers import load_index, PASSWORD_HITS_DEFAULT_BRANCH, row, Session
 
 
 def gl_args(fake: FakeGitLab) -> list[str]:

@@ -8,21 +8,11 @@ import threading
 
 import pytest
 
-from glh import limits
-from glh.limits import (
-    INDEX,
-    LONG_WINDOW,
-    SEARCH,
-    LimitProbe,
-    ProbeResponse,
-    ProbeResult,
-    Recommendation,
-    Settings,
-    parse_limit_headers,
-    probe_project_from_index,
-    recommend,
-    strip_limit_options,
-)
+from glh.limits.constants import INDEX, LONG_WINDOW, SEARCH
+from glh.limits.finder import probe_project_from_index
+from glh.limits.headers import parse_limit_headers
+from glh.limits.probe import _MAX_FAILURES, LimitProbe, ProbeResponse, ProbeResult
+from glh.limits.recommend import recommend, Recommendation, Settings, strip_limit_options
 
 
 # --------------------------------------------------------------------------- headers
@@ -177,7 +167,7 @@ def test_failures_end_the_probe_with_an_error():
     server = VirtualServer(status=403)
     result = probe(server)
     assert result.source == "error" and "403" in result.error
-    assert result.sent == limits._MAX_FAILURES
+    assert result.sent == _MAX_FAILURES
     assert "probe failed" in result.describe()
 
 

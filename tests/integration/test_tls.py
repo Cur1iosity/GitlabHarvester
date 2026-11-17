@@ -12,8 +12,8 @@ import pytest
 
 from fakegitlab import FakeGitLab
 from glh import GitlabHarvester
+from glh.domain.planning import ScanOptions
 from glh.exceptions import GitlabHarvesterError
-from glh.planner import ScanOptions
 from tests.conftest import cli_env
 
 trustme = pytest.importorskip("trustme")

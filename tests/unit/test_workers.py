@@ -1,4 +1,4 @@
-"""Thread pool used for parallel API work (glh.workers)."""
+"""Thread pool used for parallel API work (glh.engine.workers)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-from glh.workers import ActiveTasks, imap_ordered, imap_unordered
+from glh.engine.workers import ActiveTasks, imap_ordered, imap_unordered
 
 
 class Gauge:

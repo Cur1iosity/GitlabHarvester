@@ -332,7 +332,7 @@ def test_something(fake_gitlab, make_harvester, run_cli, tmp_path, no_retry_slee
 3. Add WSGI-level tests in `tests/fakeserver/test_fake_api.py` and extend
    `EXPECTED_ENDPOINTS` in `tests/integration/test_client_contract.py`.
 4. Add a contract check in `tests/contract/test_real_gitlab.py`.
-5. Update the tables in [architecture.md §5](architecture.md#5-gitlab-api-contract-used-by-gitlabharvester).
+5. Update the tables in [architecture.md §13](architecture.md#13-gitlab-api-contract-used-by-gitlabharvester).
 
 **New scenario**: drop a YAML file into `fakegitlab/scenarios/` (shared) or
 `.dev/scenarios/` (private). Prefer `extends: default` plus a few projects or

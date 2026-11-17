@@ -16,12 +16,11 @@ from collections import Counter
 
 import pytest
 
-import gitlab.exceptions
 from fakegitlab import FakeGitLab
 from glh import GitlabHarvester
+from glh.domain.planning import ScanOptions
 from glh.exceptions import GitlabHarvesterError
-from glh.planner import ScanOptions
-from tests.helpers import Session, load_index
+from tests.helpers import load_index, Session
 
 TOKENS = ["dev-token", "readonly-token"]
 TERMS = ["password", "token"]
@@ -114,10 +113,10 @@ def test_token_worker_rpm_wiring(fake_gitlab: FakeGitLab, make_harvester, tmp_pa
     # only the pool's worker clients (one per thread) are captured.
     seen: list[tuple[str, int | None, int | None]] = []
     lock = threading.Lock()
-    build_client = glh._setup_client
+    build_client = glh.clients.create
 
-    def spy(gl):
-        gl = build_client(gl)
+    def spy(token):
+        gl = build_client(token)
         adapter = gl.session.get_adapter("https://x")  # the mounted ThrottledAdapter
         search_rpm = getattr(getattr(adapter, "search_limiter", None), "rpm", None)
         index_rpm = getattr(getattr(adapter, "index_limiter", None), "rpm", None)
@@ -125,7 +124,7 @@ def test_token_worker_rpm_wiring(fake_gitlab: FakeGitLab, make_harvester, tmp_pa
             seen.append((gl.private_token, search_rpm, index_rpm))
         return gl
 
-    glh._setup_client = spy
+    glh.clients.create = spy
     run_search(glh, projects)
 
     assert len(seen) == glh.concurrency                       # one client per (token, worker)
@@ -146,7 +145,7 @@ def test_results_match_a_single_token_run(fake_gitlab: FakeGitLab, make_harveste
 
 def test_token_file_runs_like_inline_tokens(fake_gitlab: FakeGitLab, make_harvester, tmp_path):
     # The harvester takes a resolved token list; the CLI resolves -t/--token-file into it.
-    from glh import tokens as token_utils
+    from glh.cli import tokens as token_utils
 
     token_file = tmp_path / "tokens.txt"
     token_file.write_text("# colleagues\ndev-token\nreadonly-token\n", encoding="utf-8")

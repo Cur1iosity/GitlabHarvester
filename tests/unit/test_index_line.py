@@ -1,4 +1,4 @@
-"""The 'Index: ...' line shown before the search plan (glh.modes.describe_index)."""
+"""The 'Index: ...' line shown before the search plan (glh.cli.report)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from glh.modes import describe_index
+from glh.cli.report import describe_index
+from glh.domain.models import IndexMeta
 
 NOW = datetime(2024, 6, 10, 12, 0, tzinfo=timezone.utc)
 
@@ -21,13 +22,13 @@ NOW = datetime(2024, 6, 10, 12, 0, tzinfo=timezone.utc)
 def test_build_time_and_age(age, text):
     built = NOW - age
     meta = {"timestamp_utc": built.isoformat()}
-    line = describe_index("idx.jsonl", meta, 9, now=NOW)
+    line = describe_index("idx.jsonl", IndexMeta.from_record(meta), 9, now=NOW)
     assert line == f"Index: idx.jsonl (built {built:%Y-%m-%d %H:%M:%S} UTC, {text}; 9 projects)"
 
 
 def test_build_time_in_another_offset_is_shown_in_utc():
     meta = {"timestamp_utc": "2024-06-10T15:00:00+03:00"}
-    assert "built 2024-06-10 12:00:00 UTC, just now" in describe_index("i", meta, 1, now=NOW)
+    assert "built 2024-06-10 12:00:00 UTC, just now" in describe_index("i", IndexMeta.from_record(meta), 1, now=NOW)
 
 
 def test_branches_window_and_incomplete_index():
@@ -37,19 +38,18 @@ def test_branches_window_and_incomplete_index():
         "last_activity_after": "2024-06-01T00:00:00Z",
         "is_completed": False,
     }
-    assert describe_index("idx.jsonl", meta, 1, now=NOW) == (
+    assert describe_index("idx.jsonl", IndexMeta.from_record(meta), 1, now=NOW) == (
         "Index: idx.jsonl (built 2024-06-09 12:00:00 UTC, 24 h ago; 1 project, branches: all, "
         "projects active since 2024-06-01, INCOMPLETE (listing failed; rebuild with --dump-projects))"
     )
 
 
 def test_missing_build_time():
-    assert describe_index("old.jsonl", {}, 3, now=NOW) == "Index: old.jsonl (build time unknown; 3 projects)"
-
+    assert describe_index("old.jsonl", IndexMeta(), 3, now=NOW) == "Index: old.jsonl (build time unknown; 3 projects)"
 
 
 def test_index_hint_names_the_file_and_how_to_reuse_it():
-    from glh.modes import index_hint
+    from glh.cli.commands.common import index_hint
 
     assert "--index-file idx.jsonl" in index_hint("idx.jsonl", mode="search", rebuild=False)
     assert "--dump-projects rebuilds idx.jsonl" in index_hint("idx.jsonl", mode="search", rebuild=True)

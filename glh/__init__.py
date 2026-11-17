@@ -1,57 +1,41 @@
 """
-glh — GitLab Harvester package
-==============================
+glh — GitLab Harvester
+======================
 
-High-level toolkit for building a **GitLab Instance Project Index** and performing
-keyword search across repositories and branches using the GitLab API.
+Builds an index of the projects of a GitLab instance and searches their
+repositories and branches for terms through the GitLab API (no cloning).
 
-The package provides:
+The package is layered (see docs/architecture.md):
 
-- Fast collection of minimal project metadata into a JSONL index.
-- Optional enrichment with branch lists.
-- Flexible scanning strategies for branches and forks.
-- Session-based result recording with resume capability.
-- CLI interface for everyday usage.
+``glh.cli``          command line: options, config file, commands, reports
+``glh.limits``       experimental rate-limit detection and runtime advice
+``glh.engine``       the work: GitlabHarvester (facade) and HarvesterFactory, index, search, workers
+``glh.gitlab``       talking to GitLab: client factory, connection, pacing, HTTP 429, errors
+``glh.output``       where results go: session files, downloads, archives
+``glh.postprocess``  dedup and convert of session files
+``glh.domain``       pure rules: scan planning, time windows, filters
+``glh.ui``           console output: status line, progress, blocks, logs
 
-Modules
--------
-
-cli
-    Argument parser and normalization logic for the CLI tool.
-
-harvester
-    Core GitlabHarvester class implementing index building, branch collection,
-    and keyword scanning.
-
-planner
-    Strategy helpers for deciding which projects and branches to scan
-    (fork handling, diff-based branch selection, limits).
-
-session
-    Utilities for session file handling and resume support.
-
-Typical usage
--------------
-
-As a library:
+Library use::
 
     from glh import GitlabHarvester
+    from glh.domain import ScanOptions
 
-    glh = GitlabHarvester(host="gitlab.example.com", token="...")
-    index = glh.build_project_index()
-    results, hits = glh.search_keywords(projects, ["password"])
+    harvester = GitlabHarvester(url="https://gitlab.example.com", token="...")
+    index_file = harvester.build_project_index()
+    index = harvester.load_index(index_file)  # IndexMeta and Project objects (glh.domain.models)
+    results, hits = harvester.search_keywords(index.projects, ["password"], options=ScanOptions())
 
-As a CLI:
+    # or with every setting in one object:
+    from glh.engine.factory import HarvesterSettings
+    harvester = GitlabHarvester.from_settings(HarvesterSettings(url=..., tokens=("...",), workers=4))
 
-    glh-harvest --host gitlab.example.com --token XXX \
-        --search "password" --scan-branches all
-
+Only ``GitlabHarvester``, ``CliParser`` and ``__version__`` are guaranteed
+between releases; the modules below them may move.
 """
 
-from .harvester import GitlabHarvester
-from .cli import CliParser
+from glh.cli.parser import CliParser
+from glh.engine.harvester import GitlabHarvester
+from glh.version import __version__
 
-__all__ = [
-    "GitlabHarvester",
-    "CliParser",
-]
+__all__ = ["GitlabHarvester", "CliParser", "__version__"]

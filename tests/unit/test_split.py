@@ -6,12 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from glh.postprocess.split import (
-    MAX_TERM_LEN,
-    safe_term_filenames,
-    split_session_by_term,
-    term_file_paths,
-)
+from glh.postprocess.split import MAX_TERM_LEN, safe_term_filenames, split_session_by_term, term_file_paths
 from tests.helpers import read_jsonl, write_jsonl
 
 

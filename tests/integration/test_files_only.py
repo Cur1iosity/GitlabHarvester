@@ -7,8 +7,8 @@ import io
 import pytest
 
 from fakegitlab import FakeGitLab
-from glh.filefilter import FileFilter
-from glh.planner import ScanOptions
+from glh.domain.file_filter import FileFilter
+from glh.domain.planning import ScanOptions
 from tests.helpers import load_index
 
 
@@ -99,8 +99,9 @@ def test_search_only_trusts_the_search(fake_gitlab: FakeGitLab, make_harvester, 
 
 
 def test_downloads_in_files_only_mode(fake_gitlab: FakeGitLab, make_harvester, index, tmp_path):
-    from glh.downloads import FileDownloader
-    from glh.output import OutputLayout, SearchOutput
+    from glh.output.downloads import FileDownloader
+    from glh.output.layout import OutputLayout
+    from glh.output.sink import SearchOutput
 
     flt = FileFilter(filename="settings.py")
     term = flt.query("").strip()

@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from glh.cli import CliParser
-from glh.config import ConfigError, load_config
+from glh.cli.config import ConfigError, load_config
+from glh.cli.parser import CliParser
 from tests.conftest import REPO_ROOT
 
 EXAMPLE = REPO_ROOT / "config.example.ini"

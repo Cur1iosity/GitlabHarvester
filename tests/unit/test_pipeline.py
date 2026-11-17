@@ -7,11 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from glh.cli import CliParser
+from glh.cli.parser import CliParser
 from glh.postprocess.convert import convert_jsonl_to_json
 from glh.postprocess.dedup import dedup_session_file
 from glh.postprocess.pipeline import normalize_steps, run_pipeline
-from tests.helpers import Session, read_jsonl, write_jsonl
+from tests.helpers import read_jsonl, Session, write_jsonl
 
 
 def hit(term: str, pid: int, branch: str, datas: list[str]) -> dict:
