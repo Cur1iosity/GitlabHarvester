@@ -38,6 +38,15 @@ All notable changes to GitlabHarvester are documented here. The format follows
 
 ### Fixed
 
+- **Searches without access are reported, not hidden.** A search answered with
+  HTTP 403 (no access) or 404 (not found) was skipped with a warning and its term
+  marked done like a fully searched one, so a session could look complete while
+  parts of the instance were never searched. Retrying won't change such answers,
+  so the term still counts as done (`--resume` doesn't repeat it), but the gap is
+  now counted apart from the failed searches: the term's checkpoint gets
+  `inaccessible`, `not_found` and `unsearched` (which branches, first 20), the
+  `summary` the totals, the term line `N searches NOT POSSIBLE: ...`, and the
+  `Results` block a `NOT SEARCHED` row.
 - **`--resume` keeps the search the same.** Resuming with another `--filename`,
   `--extension` or `--project-filter` only warned, and other changed conditions
   were not noticed at all, so one session could mix the results of two different

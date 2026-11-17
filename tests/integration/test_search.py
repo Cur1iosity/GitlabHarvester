@@ -205,9 +205,16 @@ def test_partial_success_when_one_project_fails(fake_gitlab: FakeGitLab, indexed
     assert any("ops/infra/terraform/modules" in m for m in logs.messages(logging.WARNING))
 
     if response["status"] in (403, 404):
-        # Permanent: no access / gone. Retrying can't help, so the term is done.
-        assert session.of_type("keyword_done")[0]["hit_counter"] == hits
+        # Permanent: no access / gone. Retrying can't help, so the term is done...
+        [done] = session.of_type("keyword_done")
+        assert done["hit_counter"] == hits
         assert session.of_type("keyword_incomplete") == [] and glh.incomplete_terms == []
+        # ...but not covered: the gap is counted and named.
+        kind = "inaccessible" if response["status"] == 403 else "not_found"
+        assert (done["inaccessible"], done["not_found"]) == ((1, 0) if kind == "inaccessible" else (0, 1))
+        assert done["unsearched"] == [f"ops/infra/terraform/modules @ main: HTTP {response['status']} "
+                                      f"{'Forbidden' if kind == 'inaccessible' else 'Not Found'}"]
+        assert glh.unsearched == {kind: 1}
     else:
         # Retryable: hits may be missing, so --resume must search the term again.
         assert session.of_type("keyword_done") == []
@@ -216,6 +223,14 @@ def test_partial_success_when_one_project_fails(fake_gitlab: FakeGitLab, indexed
         assert incomplete[0]["failed_searches"] == 1 and incomplete[0]["hit_counter"] == hits
         assert incomplete[0]["failures"][0].startswith("ops/infra/terraform/modules @ main: ")
         assert glh.incomplete_terms == ["password"]
+        assert "unsearched" not in incomplete[0] and not glh.unsearched
+
+
+def test_a_search_without_gaps_writes_no_coverage_keys(fake_gitlab: FakeGitLab, indexed):
+    glh, projects = indexed
+    _, _, session = search(glh, projects, ["password"], scan_branches="default")
+    [done] = session.of_type("keyword_done")
+    assert set(done) == {"type", "term", "hit_counter", "timestamp_utc"} and not glh.unsearched
 
 
 def test_error_body_is_hidden_by_default_and_shown_at_debug(fake_gitlab: FakeGitLab, indexed, make_harvester):

@@ -14,6 +14,7 @@ progress. A term with failed retryable searches is not marked done.
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Callable, IO, Iterable, Mapping
 from urllib.parse import quote
@@ -30,12 +31,12 @@ from glh.domain.timewindow import TimeWindow
 from glh.engine import workers as pool
 from glh.engine.file_checks import FileChangeChecker, FileFetcher
 from glh.engine.file_listing import FileLister
-from glh.engine.tasks import BranchTask
+from glh.engine.tasks import BranchOutcome, BranchTask
 from glh.gitlab import throttling, user_agents
 from glh.gitlab.connection import GitLabConnection
-from glh.gitlab.errors import describe_api_error, is_permanent_error
+from glh.gitlab.errors import describe_api_error
 from glh.output.downloads import FileDownloader
-from glh.output.records import BranchResult, Checkpoint, Hit, ProjectResult
+from glh.output.records import BranchResult, Checkpoint, Hit, INACCESSIBLE, NOT_FOUND, ProjectResult
 from glh.output.sink import SearchOutput
 from glh.ui import statusline
 from glh.ui.blocks import Row
@@ -44,6 +45,16 @@ from glh.ui.progress import Progress
 
 # datetime.UTC exists only on Python 3.11+, while the package supports 3.10.
 UTC = timezone.utc
+
+
+def describe_unsearched(counts: Counter[str]) -> str:
+    """'; 3 searches NOT POSSIBLE: 2 no access (HTTP 403), 1 not found (HTTP 404)', or '' without any."""
+    total = counts[INACCESSIBLE] + counts[NOT_FOUND]
+    if not total:
+        return ""
+    kinds = [f"{counts[INACCESSIBLE]:,} no access (HTTP 403)" if counts[INACCESSIBLE] else "",
+             f"{counts[NOT_FOUND]:,} not found (HTTP 404)" if counts[NOT_FOUND] else ""]
+    return f"; {plural(total, 'search', 'searches')} NOT POSSIBLE: {', '.join(k for k in kinds if k)}"
 
 
 class SearchEngine:
@@ -60,6 +71,8 @@ class SearchEngine:
         self.logger = logger
         # Terms of the last search that had failed (retryable) searches.
         self.incomplete_terms: list[str] = []
+        # Searches of the last run that could not run at all, per kind (INACCESSIBLE, NOT_FOUND).
+        self.unsearched: Counter[str] = Counter()
         # Report a search task still running after this many seconds (and again
         # every as many seconds); 0 disables. Parallel search only.
         self.slow_task_report: float = 300.0
@@ -146,6 +159,7 @@ class SearchEngine:
             checks = (f", {plural(self.changes.checks, 'file check')}" if options.file_window else "")
             incomplete = (f"; INCOMPLETE: {plural(len(self.incomplete_terms), 'term')} "
                           f"with failed searches, not marked done" if self.incomplete_terms else "")
+            incomplete += describe_unsearched(self.unsearched)
             if options.files_only and self.lister.counts:
                 listed = ", ".join(f"{plural(n, 'branch', 'branches')} by {how}"
                                    for how, n in sorted(self.lister.counts.items()))
@@ -192,14 +206,15 @@ class SearchEngine:
 
     # ------------------------------------------------------------- one task
 
-    def search_branch(self, task: BranchTask) -> tuple[list[Hit], str | None]:
+    def search_branch(self, task: BranchTask) -> BranchOutcome:
         """
         Worker: search one term in one branch of one project (all result pages).
 
         Returns:
-            (hits, failure): failure describes a retryable error (5xx, 429 after
-            retries, 401, timeout, network, invalid response) that may have hidden
-            hits, else None. 403/404 are logged and treated as nothing to find.
+            The hits, and the trouble met (BranchOutcome): a retryable error
+            (5xx, 429 after retries, 401, timeout, network, invalid response)
+            that may have hidden hits keeps the term open; 403/404 (no access,
+            not found) are logged and counted as gaps in the coverage.
         """
         name = task.project_name
         n_branches = len(task.branches)
@@ -215,7 +230,7 @@ class SearchEngine:
                 return self.lister.collect(task)
             return self._search_term(task)
 
-    def _search_term(self, task: BranchTask) -> tuple[list[Hit], str | None]:
+    def _search_term(self, task: BranchTask) -> BranchOutcome:
         """search_branch() for a term, while the task is registered as running."""
         name = task.project_name
         project_obj: GitlabProject = self.connection.require().projects.get(task.project.id, lazy=True)
@@ -233,11 +248,7 @@ class SearchEngine:
             self.logger.debug("Full error searching %s @ %s: %s", name, task.branch, e)
             errors.append(e)
             hits = []
-        retryable = [e for e in errors if not is_permanent_error(e)]
-        failure = None
-        if retryable:
-            failure = f"{name} @ {task.branch}: {describe_api_error(retryable[0])}"
-        return hits, failure
+        return BranchOutcome.of(task, hits, errors)
 
     def _path_filter(self, task: BranchTask) -> Callable[[str], bool]:
         """Keep a result path? The file filters first (free), then --file-changed-* (one request)."""
@@ -297,7 +308,10 @@ class SearchEngine:
         state = {"next_term": 0, "term_started": progress.elapsed}
         # Failed (retryable) searches per term: such a term is not marked done.
         term_failures: list[list[str]] = [[] for _ in terms]
+        # Searches that could not run (403/404) per term: (kind, reason); the term is done, with gaps.
+        term_unsearched: list[list[tuple[str, str]]] = [[] for _ in terms]
         self.incomplete_terms = []
+        self.unsearched = Counter()
         # When the first task of each term was handed out (feeder thread with workers > 1).
         term_begun: dict[int, float] = {}
 
@@ -316,10 +330,11 @@ class SearchEngine:
                     # flushed, durable even if the process is killed.
                     output.checkpoint(Checkpoint.for_term(
                         terms[number], hits_before + sum(term_hits[:number + 1]), datetime.now(UTC).isoformat(),
-                        failures))
+                        failures, term_unsearched[number]))
                 failed = (f"; {plural(len(failures), 'search', 'searches')} FAILED, "
                           f"not marked done" if failures else "")
-                if checkpoints and (n_terms > 1 or failures):
+                failed += describe_unsearched(Counter(kind for kind, _ in term_unsearched[number]))
+                if checkpoints and (n_terms > 1 or failures or term_unsearched[number]):
                     progress.note(
                         f"Term {number + 1}/{n_terms} '{terms[number]}': "
                         f"{plural(plan.project_count, 'project')}, "
@@ -377,9 +392,13 @@ class SearchEngine:
                                              on_idle=report_slow_tasks)
             for done in tasks_iter:
                 task: BranchTask = done.item
-                hits, failure = done.unwrap()
-                if failure:
-                    term_failures[task.term_no].append(failure)
+                outcome: BranchOutcome = done.unwrap()
+                hits = outcome.hits
+                if outcome.failure:
+                    term_failures[task.term_no].append(outcome.failure)
+                if outcome.unsearched:
+                    term_unsearched[task.term_no].append((outcome.unsearched, outcome.reason))
+                    self.unsearched[outcome.unsearched] += 1
                 key = (task.term_no, task.project_no)
                 got = partial.setdefault(key, {})
                 got[task.branch_no] = hits

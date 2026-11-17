@@ -164,6 +164,11 @@ class GitlabHarvester:
         return self.search.incomplete_terms
 
     @property
+    def unsearched(self) -> Counter[str]:
+        """Searches of the last search that could not run (no access, not found), per kind."""
+        return Counter(self.search.unsearched)
+
+    @property
     def file_listing_counts(self) -> Counter[str]:
         """Files-only mode: branches listed per method ('search', 'tree')."""
         return self.search.lister.counts

@@ -682,6 +682,12 @@ gitlab-harvester -u ... -t ... -f words.txt --session audit --resume
   then searches those terms again. 403 and 404 (no access, project or
   branch gone) can't be fixed by retrying: such projects are skipped with a warning and
   don't keep the term open.
+- A done term is not necessarily a covered one. Searches that could not run at all
+  (HTTP 403, HTTP 404) are counted apart from the failed ones: the term's checkpoint
+  gets `"inaccessible"`, `"not_found"` and `"unsearched"` (the first 20, as
+  `group/repo @ branch: HTTP 403 Forbidden`), the `summary` gets the totals, the term
+  line ends with `N searches NOT POSSIBLE: ...`, and the `Results` block has a
+  `NOT SEARCHED` row. A search with full access has none of these.
 - `--final-only` doesn't delete the session JSONL of an incomplete search, so it can
   still be resumed.
 - New records are appended after a `resume` marker. The final `summary` counts
@@ -992,9 +998,10 @@ projects were cut by API errors; the index is then `"is_completed": false`.
 |---|---|
 | `{"type": "meta", ...}` | run parameters: url, index file, branch and fork modes, `started_from`, `filename`, `extension`, `download_files`, number of terms |
 | `{"term": ..., "result": {...}}` | hits of one term in one project (see below) |
-| `{"type": "keyword_done", "term": ..., "hit_counter": N}` | checkpoint after a term; `hit_counter` is cumulative |
+| `{"type": "keyword_done", "term": ..., "hit_counter": N}` | checkpoint after a term; `hit_counter` is cumulative; with searches that could not run, also `inaccessible`, `not_found`, `unsearched` |
+| `{"type": "keyword_incomplete", ..., "failed_searches": N, "failures": [...]}` | a term with failed (retryable) searches: `--resume` searches it again |
 | `{"type": "resume", "done_keywords": N, "remaining_keywords": M}` | start of a resumed run |
-| `{"type": "summary", "hits": N}` | end of a run |
+| `{"type": "summary", "hits": N, "completed": true, ...}` | end of a run; `inaccessible` / `not_found` when searches could not run |
 
 ```json
 {"term": "password", "result": {

@@ -30,7 +30,7 @@ from gitlab.const import SearchScope
 from gitlab.utils import EncodedId
 
 from glh.engine.file_checks import FileChangeChecker, FileFetcher
-from glh.engine.tasks import BranchTask
+from glh.engine.tasks import BranchOutcome, BranchTask
 from glh.engine.workers import ActiveTasks
 from glh.gitlab.connection import GitLabConnection
 from glh.gitlab.errors import describe_api_error, is_permanent_error
@@ -60,9 +60,8 @@ class FileLister:
             self.state = "unknown"
             self.counts = Counter()
 
-    def collect(self, task: BranchTask) -> tuple[list[Hit], str | None]:
-        """One hit per matching file of the task's branch; (hits, retryable failure or None)."""
-        name = task.project_name
+    def collect(self, task: BranchTask) -> BranchOutcome:
+        """One hit per matching file of the task's branch (and the trouble met, see BranchOutcome)."""
         errors: list[BaseException] = []
         mode = task.file_listing or "auto"
         paths: list[str] | None = None
@@ -91,9 +90,7 @@ class FileLister:
             hit = Hit(url=f"{blob_url}/{quote(path, safe='/')}", file=local.get(path))
             hits.append(hit)
             self.logger.info("[+] File '%s': %s", task.term, hit.url)
-        retryable = [e for e in errors if not is_permanent_error(e)]
-        failure = f"{name} @ {task.branch}: {describe_api_error(retryable[0])}" if retryable else None
-        return hits, failure
+        return BranchOutcome.of(task, hits, errors)
 
     def _set_state(self, state: str, message: str) -> None:
         with self._lock:

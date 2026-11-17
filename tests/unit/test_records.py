@@ -120,6 +120,33 @@ def test_session_meta_reads_old_and_new_records():
     assert ResumeRecord.from_record(RESUME).remaining_keywords == 1
 
 
+# --------------------------------------------------------------------------- coverage: 403 / 404
+
+
+def test_a_done_term_counts_what_it_could_not_search():
+    unsearched = [("inaccessible", "g/a @ main: HTTP 403 Forbidden"), ("not_found", "g/b @ dev: HTTP 404 Not Found"),
+                  ("inaccessible", "g/c @ main: HTTP 403 Forbidden")]
+    checkpoint = Checkpoint.for_term("password", 7, "t", [], unsearched)
+    assert checkpoint.done
+    record = checkpoint.to_record()
+    assert record == {"type": "keyword_done", "term": "password", "hit_counter": 7, "timestamp_utc": "t",
+                      "inaccessible": 2, "not_found": 1, "unsearched": [reason for _, reason in unsearched]}
+    assert Checkpoint.from_record(record) == checkpoint
+    # The list is capped like the failures; the counts are not.
+    many = Checkpoint.for_term("t", 0, "t", [], [("not_found", f"g/{i} @ main: 404") for i in range(30)])
+    assert many.not_found == 30 and len(many.unsearched) == 20
+    # An older checkpoint without the keys.
+    assert Checkpoint.from_record({"type": "keyword_done", "term": "x", "hit_counter": 1}).inaccessible == 0
+
+
+def test_the_summary_writes_the_gaps_only_when_there_are_any():
+    plain = SummaryRecord(hits=1, completed=True, elapsed_seconds=1.0, timestamp_utc="t")
+    assert "inaccessible" not in plain.to_record() and "not_found" not in plain.to_record()
+    gaps = SummaryRecord(hits=1, completed=True, elapsed_seconds=1.0, timestamp_utc="t", inaccessible=2, not_found=0)
+    assert list(gaps.to_record())[-2:] == ["inaccessible", "not_found"]
+    assert SummaryRecord.from_record(gaps.to_record()) == gaps
+
+
 # --------------------------------------------------------------------------- --resume: the same search
 
 

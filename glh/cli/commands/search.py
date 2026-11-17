@@ -22,7 +22,7 @@ from glh.engine.harvester import GitlabHarvester
 from glh.limits.constants import KINDS, SEARCH
 from glh.output import archive
 from glh.output.layout import OutputLayout
-from glh.output.records import ResumeRecord, SessionMeta, SummaryRecord
+from glh.output.records import INACCESSIBLE, NOT_FOUND, ResumeRecord, SessionMeta, SummaryRecord
 from glh.output.session_reader import load_done_keywords, load_session_meta
 from glh.postprocess.pipeline import run_pipeline
 from glh.postprocess.split import split_session_by_term
@@ -121,6 +121,7 @@ def _search(args: CliArgs, glh: GitlabHarvester, keywords: list[str], summary: S
         )
         search_elapsed = time.perf_counter() - search_started
         incomplete = list(glh.incomplete_terms)
+        unsearched = glh.unsearched
 
         output.summary(SummaryRecord(
             hits=hits,
@@ -128,6 +129,8 @@ def _search(args: CliArgs, glh: GitlabHarvester, keywords: list[str], summary: S
             incomplete_terms=tuple(incomplete),
             elapsed_seconds=round(search_elapsed, 2),
             timestamp_utc=datetime.now(UTC).isoformat(),
+            inaccessible=unsearched[INACCESSIBLE],
+            not_found=unsearched[NOT_FOUND],
         ))
 
     summary.add("hits", f"{hits:,}")
@@ -141,6 +144,13 @@ def _search(args: CliArgs, glh: GitlabHarvester, keywords: list[str], summary: S
         summary.add("INCOMPLETE", [f"searches failed for {len(incomplete)} of {len(keywords)} terms: "
                                    f"{', '.join(repr(t) for t in incomplete)}", "not marked done"])
         summary.note("Repeat the command with --resume to search the incomplete terms again.")
+    if unsearched_total := unsearched[INACCESSIBLE] + unsearched[NOT_FOUND]:
+        # Done (retrying won't help), but not covered: never let it pass as a complete search.
+        kinds = [f"{unsearched[INACCESSIBLE]:,} no access (HTTP 403)" if unsearched[INACCESSIBLE] else "",
+                 f"{unsearched[NOT_FOUND]:,} not found (HTTP 404)" if unsearched[NOT_FOUND] else ""]
+        summary.add("NOT SEARCHED", [f"{plural(unsearched_total, 'search', 'searches')}: "
+                                     f"{', '.join(k for k in kinds if k)}",
+                                     "the session lists them (\"unsearched\" of each term)"])
 
     # Files with hits for --to-zip: read from the session before --final-only may delete it.
     downloaded = list(dict.fromkeys(archive.downloaded_files(session_path))) if args.to_zip else []
