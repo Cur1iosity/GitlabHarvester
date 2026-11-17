@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import shlex
 import signal
 import sys
 
 from glh.cli import CliParser, get_banner
 from glh.modes import run_mode
+from glh.tokens import mask_argv
+from glh.utils.terminal_utils import COMMAND_STYLE, style
 
 __all__ = ["main"]
 
@@ -45,10 +48,13 @@ def main(argv: list[str] | None = None) -> None:
 
     if not any(a in {"-h", "--help", "-V", "--version"} for a in argv):
         print(get_banner(sys.stderr), file=sys.stderr)
+        # The command as typed (secrets masked), before anything the run prints.
+        command = shlex.join(["gitlab-harvester", *mask_argv(argv)])
+        print(style(f"$ {command}", COMMAND_STYLE, sys.stderr), file=sys.stderr)
 
     try:
         args = CliParser.parse(argv)
-        run_mode(args)
+        run_mode(args, argv=argv)
     except KeyboardInterrupt:
         _handle_exit(signal.SIGINT, None)
 

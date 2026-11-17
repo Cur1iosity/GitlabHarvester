@@ -92,7 +92,10 @@ def test_search_plan_names_the_limits(make_harvester, tmp_path, waits, capsys, m
     err = FakeStream(False)
     monkeypatch.setattr(terminal_utils, "STATUS", terminal_utils.StatusLine(err, ticker=False))
     search(make_harvester(workers=2, index_rpm=300, search_rpm=30), projects, terms=["password"])
-    assert "2 workers, rate limit: search 30/min, other API 300/min per worker\n" in err.getvalue()
+    from tests.helpers import row
+
+    assert row(err.getvalue(), "Search plan", "parallel") == "2 workers"
+    assert row(err.getvalue(), "Search plan", "rate limit") == "search 30/min, other API 300/min per worker"
 
 
 def test_jitter_delays_every_request(fake_gitlab: FakeGitLab, make_harvester, tmp_path, waits):
@@ -120,7 +123,10 @@ def test_search_plan_names_the_jitter(make_harvester, tmp_path, waits, monkeypat
     err = FakeStream(False)
     monkeypatch.setattr(terminal_utils, "STATUS", terminal_utils.StatusLine(err, ticker=False))
     search(make_harvester(search_rpm=30, jitter=(0.0, 0.03)), projects, terms=["password"])
-    assert ", rate limit: search 30/min per worker, jitter 0-0.03s\n" in err.getvalue()
+    from tests.helpers import row
+
+    assert row(err.getvalue(), "Search plan", "rate limit") == "search 30/min per worker"
+    assert row(err.getvalue(), "Search plan", "jitter") == "0-0.03s"
 
 
 # --------------------------------------------------------------------------- User-Agent

@@ -6,6 +6,18 @@ All notable changes to GitlabHarvester are documented here. The format follows
 
 ## [1.4.1] - 2026-11-17
 
+### Changed
+
+- **Easier to read output**: the command as typed is echoed right after the banner
+  (bold blue on a terminal; tokens as `<TOKEN>`, a proxy password as `***`), before any
+  warning. The index, the search plan and the results of a run are blocks with one
+  aligned `label  value` row per fact (skip reasons, download details and per-term
+  files one per line) instead of comma-packed sentences; `-m find-limits`,
+  `-m dump-index`, `-m dedup` and `-m convert` report the same way. The run journal
+  gets each block as one greppable line (`Search plan: terms 2; projects 5 of 9; …`)
+  and a new `Command:` line. `dedup`/`convert` no longer print from the library
+  (`dedup_session_file` also returns `seen_db`).
+
 ### Fixed
 
 - A wrong token or an unreachable URL ends the run with one clear line instead of a

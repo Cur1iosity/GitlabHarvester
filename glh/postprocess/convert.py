@@ -67,8 +67,5 @@ def convert_jsonl_to_json(
             sort_keys=sort_keys,
         )
 
-    print(f"[convert] input : {input_path}")
-    print(f"[convert] output: {output_path}")
-    print(f"[convert] objects: {len(objects)}")
     return len(objects)
 

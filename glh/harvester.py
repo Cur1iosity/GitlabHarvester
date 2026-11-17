@@ -524,6 +524,32 @@ class GitlabHarvester:
                  f"{' (all workers)' if self.concurrency > 1 else ''}" if waited else ", retried")
         return f"Rate limit: {terminal_utils.plural(count, 'HTTP 429 response')}{waits}"
 
+    def _plan_rows(self, keywords: list[str], plan: ScanPlan, options: ScanOptions,
+                   downloader: FileDownloader | None) -> list[terminal_utils.Row]:
+        """The rows of the 'Search plan' block."""
+        if options.files_only:
+            first: list[terminal_utils.Row] = [
+                ("files", f"every file matching {options.file_filter.describe()} (no term)"),
+                ("listing", options.file_listing),
+            ]
+        else:
+            first = [("terms", f"{len(keywords):,}")]
+            if options.file_filter:
+                first.append(("files", options.file_filter.describe()))
+        rows: list[terminal_utils.Row] = [
+            *first,
+            ("projects", f"{plan.project_count:,} of {plan.total_projects:,}"),
+            ("skipped", plan.skipped_reasons()),
+            ("branches", f"{plan.branch_count:,}"),
+            ("files changed", options.file_window.describe() if options.file_window else ""),
+            ("downloads", downloader.target() if downloader is not None else ""),
+            ("parallel", self._concurrency_text()),
+            ("rate limit", ratelimit.describe(self.index_rpm, self.search_rpm)),
+            ("jitter", ratelimit.format_jitter(self.jitter)),
+            ("user agent", user_agents.describe(self.user_agents)),
+        ]
+        return rows
+
     def _concurrency_text(self) -> str:
         """
         How the run is parallelized, for the search plan line and journal.
@@ -1324,25 +1350,11 @@ class GitlabHarvester:
         n_terms = len(keywords)
         terms_text = terminal_utils.plural(n_terms, "term")
         hits_before = hit_counter
-        parallel = f", {concurrency}" if (concurrency := self._concurrency_text()) else ""
-        if limits := ratelimit.describe(self.index_rpm, self.search_rpm):
-            parallel += f", rate limit: {limits}"
-        if jitter := ratelimit.format_jitter(self.jitter):
-            parallel += f", jitter {jitter}"
-        if agents := user_agents.describe(self.user_agents):
-            parallel += f", {agents}"
-
-        files = f", files changed {options.file_window.describe()}" if options.file_window else ""
-        if options.file_filter:
-            files += f", files: {options.file_filter.describe()}"
         if options.files_only:
-            files += f", no term: every matching file (listing: {options.file_listing})"
             with self._file_listing_lock:
                 self._file_listing_state = "unknown"
                 self.file_listing_counts = Counter()
-        if downloader is not None:
-            files += f", {downloader.describe()}"
-        terminal_utils.STATUS.write_line(f"Search plan: {terms_text}, {plan.describe()}{files}{parallel}")
+        terminal_utils.STATUS.write_block("Search plan", self._plan_rows(keywords, plan, options, downloader))
 
         with terminal_utils.Progress(
                 "Searching", total=plan.project_count, unit="projects", rounds=n_terms,

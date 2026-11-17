@@ -375,8 +375,9 @@ the extension; existing files are never overwritten.
 - A failed download is a warning (`Could not download <path> from <project> @
   <branch> (HTTP 500 ...)`): the hits stay in the session without a `"file"` key, and
   the term still counts as done (the search itself missed nothing).
-- The run ends with a summary line: `Downloaded files: 12 files (340 KiB) downloaded
-  to results/<term>/files, 1 skipped: larger than 10 MiB`.
+- The `Results` block at the end has a `downloaded` row: `12 files (340 KiB) in
+  results/<term>/files`, then copies, files skipped by size and failed downloads,
+  one per line.
 - The copies are as sensitive as the repositories they come from.
 
 ## Parallel requests
@@ -396,8 +397,8 @@ visible without flooding the log:
 - after that the 429s are only counted: the status line ends with `HTTP 429 x190`
   (off a terminal, in the heartbeat line every minute), and the waiting task shows
   `rate limited (HTTP 429), retry in …`;
-- the run ends with `Rate limit: 190 HTTP 429 responses, retried after 12:30 of waits
-  in total (all workers)` (in the run journal too);
+- the `Results` block at the end has a `rate limit` row: `190 HTTP 429 responses,
+  retried after 12:30 of waits in total (all workers)` (in the run journal too);
 - with `--debug` the warning repeats at most once a minute with the count so far.
 
 How the work is split:
@@ -439,8 +440,8 @@ gitlab-harvester -u ... -t "$T1;$T2;$T3" -f words.txt -b all --workers 2 --searc
   independent budget. Three tokens at `--search-rpm 20 --workers 2` send up to
   `3 × 2 × 20 = 120` search requests a minute, 40 per account — useful against an
   instance that limits each user separately.
-- The search plan line names it: `Search plan: ..., 3 tokens x 2 workers = 6 clients,
-  rate limit: search 20/min per worker`; the run journal records the token count
+- The search plan names it: `parallel  3 tokens x 2 workers = 6 clients` and
+  `rate limit  search 20/min per worker`; the run journal records the token count
   (`tokens=3 inline` / `tokens=file t.txt`) and the session `meta` stores it (`"tokens"`).
 
 ## Request rate limits
@@ -473,8 +474,8 @@ in the config file > `rpm` in the config file.
 - Requests are spaced evenly (one every 60/N seconds, counted from the start of the
   previous one), so there are no bursts at the start of a minute.
 - Retries after HTTP 429 go through the same limit.
-- The search plan line names the limits: `Search plan: ..., 4 workers, rate limit:
-  search 20/min, other API 300/min per worker`; the run journal records them too.
+- The search plan names the limits (`rate limit  search 20/min, other API 300/min per
+  worker`); the run journal records them too.
 
 ### Random delay: --jitter
 
@@ -548,15 +549,23 @@ Then it suggests settings:
   when they exceed a found limit.
 
 ```text
-Rate limits found at https://gitlab.example.com (token #1):
-  other API: ~2,000 requests per minute per user (GitLab headers, throttle_authenticated_api); ...
-  search API: ~30 requests per minute per user (HTTP 429, full window counted); 61 requests, ..., latency 0.42s
-Suggested settings: --workers 1 --index-rpm 1700 --search-rpm 25
-Command: gitlab-harvester -u https://gitlab.example.com -t '<TOKEN>' -f words.txt --auto-limits --workers 1 --index-rpm 1700 --search-rpm 25
-Config file:
-  workers = 1
-  index-rpm = 1700
-  search-rpm = 25
+Rate limits at https://gitlab.example.com (token #1)
+  other API   ~2,000 requests per minute per user (GitLab headers, throttle_authenticated_api)
+              1 request, latency 0.08s
+  search API  ~30 requests per minute per user (HTTP 429, full window counted)
+              61 requests, up to 2 parallel, peak ~410 req/min, latency 0.42s, budget back in 0:58
+
+Suggested settings
+  workers     1
+  index-rpm   1700 per worker
+  search-rpm  25 per worker
+
+Next run
+  command      gitlab-harvester -u https://gitlab.example.com -t '<TOKEN>' --auto-limits --workers 1 --index-rpm 1700 --search-rpm 25
+  config file  workers = 1
+               index-rpm = 1700
+               search-rpm = 25
+  budget back  in about 58.0s (the probe used it up)
 ```
 
 The printed command never shows the token (`<TOKEN>`); neither does the run journal.
@@ -624,8 +633,9 @@ gitlab-harvester -u ... -t ... -f words.txt --session audit --resume
   an error that may hide hits (HTTP 5xx, 429 after the retries, 401, a timeout, a
   connection error, an invalid response), the run continues, but the term gets a
   `keyword_incomplete` record (with the failed searches) instead of `keyword_done`,
-  the `summary` says `"completed": false`, and the run ends with an `INCOMPLETE: ...`
-  line. `--resume` then searches those terms again. 403 and 404 (no access, project or
+  the `summary` says `"completed": false`, and the `Results` block has an `INCOMPLETE`
+  row (the terms) followed by a line to repeat the command with `--resume`, which
+  then searches those terms again. 403 and 404 (no access, project or
   branch gone) can't be fixed by retrying: such projects are skipped with a warning and
   don't keep the term open.
 - `--final-only` doesn't delete the session JSONL of an incomplete search, so it can
@@ -753,8 +763,9 @@ audit.zip
   4 GiB) into `<session>.zip.part`, renamed when complete: an interrupted run leaves
   no half-written archive. If the archive can't be written (e.g. the disk is full),
   the run ends with an error and the results are unchanged.
-- The run ends with `Archive: results/....zip (14 files, 16.7 KiB -> 7.2 KiB)`; the
-  run journal records it, and the session `meta` has `"to_zip": true`.
+- The `Results` block has an `archive` row: `results/....zip (14 files, 16.7 KiB ->
+  7.2 KiB), packed in 0.4s`; the run journal records it, and the session `meta` has
+  `"to_zip": true`.
 
 ## Progress output
 
@@ -794,25 +805,61 @@ page; rate limits add waits). With `--workers`, a search still running after
 Still searching 'password' in acme/monorepo @ main (page 37): running for 10:00
 ```
 
-When a phase ends, the status line is replaced by a permanent summary:
+A run starts with the banner and the command as you typed it (bold blue on a
+terminal; tokens shown as `<TOKEN>`, a proxy password as `***`), so warnings and
+everything else come after it. When a phase ends, the status line is replaced by a
+permanent line; facts that belong together are shown as a block, one fact per row:
 
 ```text
+$ gitlab-harvester -u https://gitlab.example.com -t '<TOKEN>' -f words.txt -b all --started-from 2024-06-02 --download-files --to-zip
 Indexed 9 projects from gitlab.example.com in 0.4s
 Listed 19 branches of 8 projects in 1.2s
-Index: gitlab_example_com_project_index.jsonl (built 2024-06-30 09:12:44 UTC, 3 h ago; 9 projects, branches: all)
-Search plan: 2 terms, 5 of 9 projects, 13 branches (skipped: 1 empty, 3 inactive since 2024-06-02)
-Term 1/2 'password': 20 hits in 0.2s
-Term 2/2 'api_key': 5 hits in 0.1s
+
+Index
+  file      gitlab_example_com_project_index.jsonl
+  built     2024-06-30 09:12:44 UTC (3 h ago)
+  projects  9
+  branches  all
+
+Search plan
+  terms      2
+  projects   5 of 9
+  skipped    1 empty
+             3 inactive since 2024-06-02
+  branches   13
+  downloads  results/<term>/files (max 10 MiB each)
+
+Term 1/2 'password': 5 projects, 20 hits in 0.2s
+Term 2/2 'api_key': 5 projects, 5 hits in 0.1s
 Search finished: 2 terms x 5 projects, 25 hits in 0.3s
+Packing the results into results/gitlab_example_com_session_20240630091300.zip ...
+
+Results
+  hits         25
+  terms        2
+  search time  0.3s
+  session      results/gitlab_example_com_session_20240630091300.jsonl
+  downloaded   21 files (64 KiB) in results/<term>/files
+               4 copied locally (same file, another term)
+  archive      results/gitlab_example_com_session_20240630091300.zip (24 files, 70 KiB -> 22 KiB), packed in 0.1s
 ```
 
-- The `Index` line names the index file and when it was built (`timestamp_utc` of its
-  `meta` record, updated by branch listing), so a reused, possibly outdated index is
-  easy to spot; it also flags an incomplete index or an index limited to a time window.
-  Rebuild it with `--dump-projects`.
+- The `Index` block names the index file and when it was built (`timestamp_utc` of
+  its `meta` record, updated by branch listing), so a reused, possibly outdated index
+  is easy to spot; it also flags an incomplete index (`status`) or an index limited
+  to a time window (`active`). Rebuild it with `--dump-projects`.
+- The `Search plan` block lists only what applies: file filters, `files changed`,
+  `downloads`, `parallel`, `rate limit`, `jitter`, `user agent` rows appear with
+  their options.
 - The search counts only projects that are actually scanned. Projects excluded by
-  `--started-from`, `--forks skip`, empty repositories, and projects without a branch
-  to scan are reported once in the `Search plan` line and never inflate the totals.
+  `--project-filter`, `--started-from`, `--forks skip`, empty repositories, and
+  projects without a branch to scan are listed once under `skipped` (one reason per
+  line) and never inflate the totals.
+- The `Results` block (stdout) collects what the run produced: hits, terms, time,
+  the session, then — with their options — `term files`, `downloaded`,
+  `post-process`, `removed`, `final result`, `archive`, `rate limit`, `limiter` and
+  `INCOMPLETE`. `-m dump-index` ends with a `Results` block too (`index`), `-m dedup`
+  and `-m convert` with `Dedup` / `Convert` blocks.
 - The ETA covers all terms. Branch listing (`--index-branches all|N`) counts only
   non-empty repositories, since empty ones need no API call.
 - When stderr is not a terminal (pipe, file, CI), only the permanent lines are
@@ -839,33 +886,36 @@ the log file, **whatever `--log-level` is**, so a history of runs builds up:
 
 ```text
 [10-11-2026 16:39:57][SUMMARY][run 2f3724f3] Run started: gitlab-harvester 0.3.6, mode=search, url=https://gitlab.example.com, cwd=/audits
+[10-11-2026 16:39:57][SUMMARY][run 2f3724f3] Command: gitlab-harvester -u https://gitlab.example.com -t <TOKEN> -f words.txt -b all --forks branch-diff --started-from 2024-06-02 --file-changed-after 2024-03-01 -w 2 --session audit --post-process dedup,convert --log-file audits.log
 [10-11-2026 16:39:57][SUMMARY][run 2f3724f3] Options: index-file=idx.jsonl, index-branches=all, batch-size=100, workers=2, dump-projects=False, scan-branches=all, forks=branch-diff, fork-diff-bases=main,master,develop,dev, terms=terms-file words.txt, active=since 2024-06-02, file-changed=since 2024-03-01, session=audit, resume=False, post-process=dedup,convert, final-only=False
 [10-11-2026 16:39:57][SUMMARY][run 2f3724f3] Indexed 9 projects from gitlab.example.com in 0.4s
 [10-11-2026 16:39:57][SUMMARY][run 2f3724f3] Listed 19 branches of 8 projects in 1.2s
-[10-11-2026 16:39:57][SUMMARY][run 2f3724f3] Index: idx.jsonl (built 2026-11-10 13:39:57 UTC, just now; 9 projects, branches: all)
-[10-11-2026 16:39:57][SUMMARY][run 2f3724f3] Search plan: 2 terms, 5 of 9 projects, 12 branches (skipped: 1 empty, 3 inactive since 2024-06-02), files changed since 2024-03-01, 2 workers
+[10-11-2026 16:39:57][SUMMARY][run 2f3724f3] Index: file idx.jsonl; built 2026-11-10 13:39:57 UTC (just now); projects 9; branches all
+[10-11-2026 16:39:57][SUMMARY][run 2f3724f3] Search plan: terms 2; projects 5 of 9; skipped 1 empty, 3 inactive since 2024-06-02; branches 12; files changed since 2024-03-01; parallel 2 workers
 [10-11-2026 16:39:58][SUMMARY][run 2f3724f3] Term 1/2 'password': 5 projects, 14 hits in 0.2s
 [10-11-2026 16:39:58][SUMMARY][run 2f3724f3] Term 2/2 'api_key': 5 projects, 4 hits in 0.1s
 [10-11-2026 16:39:58][SUMMARY][run 2f3724f3] Search finished: 2 terms x 5 projects, 18 hits, 17 file checks in 0.2s
-[10-11-2026 16:39:58][SUMMARY][run 2f3724f3] Session saved to: audit.jsonl
-[10-11-2026 16:39:58][SUMMARY][run 2f3724f3] Done. Keywords: 2 | Hits: 18 | Search time: 0.2s
 [10-11-2026 16:39:58][SUMMARY][run 2f3724f3] Post-processing dedup: audit.jsonl -> audit.deduped.jsonl (kept 9 records, dropped 1 duplicate-only hit records)
 [10-11-2026 16:39:58][SUMMARY][run 2f3724f3] Post-processing convert: audit.deduped.jsonl -> audit.deduped.converted.json (9 objects)
-[10-11-2026 16:39:58][SUMMARY][run 2f3724f3] Final result: audit.deduped.converted.json
+[10-11-2026 16:39:58][SUMMARY][run 2f3724f3] Results: hits 18; terms 2; search time 0.2s; session audit.jsonl; post-process dedup: kept 9 records, dropped 1 duplicate-only hit records, convert: 9 objects; final result audit.deduped.converted.json
 [10-11-2026 16:39:58][SUMMARY][run 2f3724f3] Run finished in 0.4s
 ```
 
 - `[run …]` is a random id per run: it groups the lines of one run even if two runs
   write to the same file at the same time.
 - `Run started` names the version, mode, URL, config file and working directory
-  (relative paths below are relative to it). `Options` lists the settings that shape
+  (relative paths below are relative to it). `Command` is the command line as typed
+  (tokens as `<TOKEN>`). `Options` lists the settings that shape
   the run: index and branch modes, forks, time windows, workers, the term source,
   the session and post-processing. The token is never written.
-- The index line, the search plan, one line per term (projects, hits, time; with
-  several terms), the search summary and every written file follow.
+- The index, the search plan, one line per term (projects, hits, time; with
+  several terms), the search summary and the results follow. A block of the console
+  output is one line here (`Search plan: terms 2; projects 5 of 9; ...`), so it stays
+  easy to grep.
 - The last line is `Run finished in …` or `Run failed after …: <reason>` (an error,
   an invalid token, Ctrl+C).
-- `-m dedup` and `-m convert` add `Dedup: …` and `Convert: …` lines with their counters.
+- `-m dedup` and `-m convert` add `Dedup: …` and `Convert: …` lines with their counters
+  (`Dedup: input s.jsonl; output d.jsonl; kept 8 records; ...`).
 - Regular log records (warnings, errors, `--log-level INFO` hit lines) go to the same
   file as before, with their level instead of `SUMMARY`.
 

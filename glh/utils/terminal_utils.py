@@ -30,6 +30,20 @@ and log records are written above it, and removing it erases it from the screen,
 so it never stays in the scrollback. It needs a terminal that understands ANSI
 escape sequences (on Windows the console's VT mode is switched on); elsewhere it
 is not shown at all. ``NO_COLOR`` keeps it uncoloured.
+
+Summaries with several facts (the index, the search plan, the results of a
+run) are *blocks* (:func:`format_block`): a title, then one aligned
+``label  value`` row per fact, so nothing has to be read out of a sentence::
+
+    Search plan
+      terms     2
+      projects  5 of 9
+      skipped   1 empty
+                3 inactive since 2024-06-02
+      branches  13
+
+The run journal gets a block as one line (:func:`compact_block`), so it stays
+easy to grep: ``Search plan: terms 2; projects 5 of 9; skipped 1 empty, ...``.
 """
 
 from __future__ import annotations
@@ -166,6 +180,52 @@ def _single_line(text: str) -> str:
     return "".join(" " if unicodedata.category(ch) == "Cc" else ch for ch in text)
 
 
+COMMAND_STYLE = "1;94"  # bold bright blue
+
+
+def style(text: str, codes: str, stream: TextIO) -> str:
+    """``text`` in the ANSI style ``codes`` (e.g. '1;94') on an ANSI terminal without NO_COLOR, else as is."""
+    if os.environ.get("NO_COLOR") or not supports_ansi(stream):
+        return text
+    return f"\x1b[{codes}m{text}{RESET}"
+
+
+# --------------------------------------------------------------------------- blocks
+
+# A block row: a label and its value; a list value continues on the next lines.
+Row = tuple[str, "str | int | list[str]"]
+
+
+def _values(value: "str | int | list[str]") -> list[str]:
+    if isinstance(value, (list, tuple)):
+        return [str(v) for v in value]
+    return [str(value)]
+
+
+def format_block(title: str, rows: "list[Row]") -> list[str]:
+    """
+    A title and aligned ``label  value`` rows; rows with an empty value are left out.
+
+    A list value puts its first item next to the label and the others on
+    their own lines, aligned under it.
+    """
+    rows = [(label, value) for label, value in rows if _values(value) and any(_values(value))]
+    width = max((len(label) for label, _ in rows), default=0)
+    lines = [title]
+    for label, value in rows:
+        values = [v for v in _values(value) if v]
+        lines.append(f"  {label.ljust(width)}  {values[0]}")
+        lines += [f"  {' ' * width}  {v}" for v in values[1:]]
+    return lines
+
+
+def compact_block(title: str, rows: "list[Row]") -> str:
+    """The block as one line, for the run journal: 'Title: label value; label value, value'."""
+    parts = [f"{label} {', '.join(v for v in _values(value) if v)}" for label, value in rows
+             if any(_values(value))]
+    return f"{title}: {'; '.join(parts)}"
+
+
 # --------------------------------------------------------------------------- status line
 
 
@@ -212,6 +272,8 @@ class StatusLine:
         self._hint: str | None = None
         self._hint_shown = False
         self._listeners: list[Callable[[str], None]] = []
+        # The last permanent output ended with an empty line (blocks don't add another one).
+        self._after_blank = True
         self._shown_width = 0
         self._last_refresh = 0.0
         self._last_heartbeat = 0.0
@@ -404,6 +466,7 @@ class StatusLine:
                 self._erase()
                 self._hide_hint()  # the permanent line goes above the hint
             self._write(stream if stream is not None else self.stream, text + "\n")
+            self._after_blank = text == ""
             if interactive:
                 self._show_hint()
                 self._draw()
@@ -415,6 +478,29 @@ class StatusLine:
                     listener(text)
                 except Exception:  # noqa: BLE001 - a broken listener must not break output
                     pass
+
+    def write_block(self, title: str, rows: "list[Row]") -> None:
+        """
+        A block (:func:`format_block`) of permanent lines after an empty line;
+        listeners (the run journal) get it as one line (:func:`compact_block`).
+        """
+        with self._lock:
+            lines = ([] if self._after_blank else [""]) + [*format_block(title, rows), ""]
+            self._after_blank = True
+            interactive = self.interactive
+            if interactive:
+                self._erase()
+                self._hide_hint()
+            self._write(self.stream, "\n".join(lines) + "\n")
+            if interactive:
+                self._show_hint()
+                self._draw()
+        compact = compact_block(title, rows)
+        for listener in list(self._listeners):
+            try:
+                listener(compact)
+            except Exception:  # noqa: BLE001 - a broken listener must not break output
+                pass
 
     def add_listener(self, listener: Callable[[str], None]) -> None:
         """Also pass every permanent status line (not log records) to ``listener``."""

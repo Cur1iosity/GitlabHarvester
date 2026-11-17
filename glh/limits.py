@@ -206,8 +206,12 @@ class ProbeResult:
 
     def describe(self) -> str:
         """One line: what was found and how."""
+        return f"{self.api}: " + "; ".join(self.lines())
+
+    def lines(self) -> list[str]:
+        """What was found, then how it was measured."""
         if self.source == "error":
-            return f"{self.api}: probe failed: {self.error}"
+            return [f"probe failed: {self.error}"]
         details = [plural(self.sent, "request")]
         if self.peak_rpm:
             details.append(f"up to {self.peak_concurrency} parallel, peak ~{self.peak_rpm:,.0f} req/min")
@@ -231,7 +235,7 @@ class ProbeResult:
         else:
             reach = "server throughput limit" if self.saturated else "not reached"
             head = f"no rate limit found up to ~{self.peak_rpm:,.0f} req/min ({reach})"
-        return f"{self.api}: {head}; {', '.join(details)}"
+        return [head, ", ".join(details)]
 
 
 class LimitProbe:

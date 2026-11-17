@@ -150,7 +150,9 @@ def test_parallel_progress_counts_planned_projects(fake_gitlab: FakeGitLab, make
                forks_mode="skip")
 
     out = tty.getvalue()
-    assert "Search plan: 2 terms, 5 of 9 projects" in out and ", 4 workers" in out
+    from tests.helpers import row
+
+    assert row(out, "Search plan", "projects") == "5 of 9" and row(out, "Search plan", "parallel") == "4 workers"
     counts = {m.group(2) for m in re.finditer(r"(\d+)/(\d+) projects", out)}
     assert counts == {"5"}
     assert "Search finished: 2 terms x 5 projects" in out

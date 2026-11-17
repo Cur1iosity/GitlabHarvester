@@ -9,7 +9,7 @@ import re
 from pathlib import Path
 
 from fakegitlab import FakeGitLab
-from tests.helpers import Session
+from tests.helpers import Session, row
 
 
 def gl_args(fake: FakeGitLab) -> list[str]:
@@ -28,9 +28,10 @@ def test_extension_filter_and_downloads(fake_gitlab: FakeGitLab, run_cli, tmp_pa
     proc = run_cli(*gl_args(fake_gitlab), "-s", "password", "--extension", ".py", "--download-files",
                    "--session", "audit", check=True)
 
-    assert "Done. Keywords: 1 | Hits: 2" in proc.stdout
-    assert re.search(r"Downloaded files: 2 files \(\d+ B\) downloaded to .*<term>.files", proc.stdout)
-    assert "files: extension py" in proc.stderr and "download files to" in proc.stderr
+    assert (row(proc.stdout, "Results", "terms"), row(proc.stdout, "Results", "hits")) == ("1", "2")
+    assert re.fullmatch(r"2 files \(\d+ B\) in .*<term>.files", row(proc.stdout, "Results", "downloaded"))
+    assert row(proc.stderr, "Search plan", "files") == "extension py"
+    assert row(proc.stderr, "Search plan", "downloads").endswith("files (max 10 MiB each)")
 
     s = Session.load(tmp_path / "audit.jsonl")
     meta = s.records[0]
@@ -73,7 +74,8 @@ def test_output_separated_and_downloads_share_the_term_directories(fake_gitlab: 
     assert any(t.startswith("password/files/") for t in tree)
     assert any(t.startswith("api_key/files/") for t in tree)
     assert not (out / "nothing-matches").exists()
-    assert "Separated output: 2 term files" in proc.stdout and "password/audit.jsonl" in proc.stdout
+    assert row(proc.stdout, "Results", "term files").startswith("2 files in ")
+    assert "password/audit.jsonl" in row(proc.stdout, "Results", "term files")
 
     session = Session.load(out / "audit.jsonl")
     per = Session.load(out / "password" / "audit.jsonl")
@@ -85,7 +87,8 @@ def test_output_separated_and_downloads_share_the_term_directories(fake_gitlab: 
 def test_size_limit_skips_big_files(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
     proc = run_cli(*gl_args(fake_gitlab), "-s", "password", "--extension", "py", "--download-files",
                    "--download-max-size", "10", "--session", "audit", check=True)
-    assert "0 files (0 B) downloaded" in proc.stdout and "2 skipped: larger than 10 B" in proc.stdout
+    downloaded = row(proc.stdout, "Results", "downloaded")
+    assert downloaded.startswith("0 files (0 B) in ") and downloaded.endswith(" | 2 skipped: larger than 10 B")
     assert not (tmp_path / "password").exists() or files_under(tmp_path / "password") == []
     assert all("file" not in h for h in Session.load(tmp_path / "audit.jsonl").hits())
 
@@ -129,8 +132,8 @@ def test_run_journal_records_filters_and_downloads(fake_gitlab: FakeGitLab, run_
             "--session", "audit", "--log-file", "run.log", check=True)
     journal = (tmp_path / "run.log").read_text(encoding="utf-8")
     assert "filename=*.py" in journal and "download-files=True" in journal and "download-max-size=10 MiB" in journal
-    assert "Search plan:" in journal and "files: filename *.py" in journal
-    assert "Downloaded files: 2 files" in journal
+    assert "Search plan: terms 1; files filename *.py; " in journal
+    assert "; downloaded 2 files (" in journal
     assert fake_gitlab.token not in journal
 
 
@@ -153,14 +156,14 @@ def test_to_zip_packs_session_term_files_and_downloads(fake_gitlab: FakeGitLab, 
     proc = run_cli(*gl_args(fake_gitlab), "-f", "terms.txt", "--session-file", "out/audit.jsonl",
                    "--output-separated", "--download-files", "--post-process", "dedup", "--to-zip",
                    "--log-file", "run.log", check=True)
-    assert re.search(r"Archive: out[\\/]audit\.zip \(\d+ files, .* -> .*\)", proc.stdout)
+    assert re.match(r"out[\\/]audit\.zip \(\d+ files, .* -> .*\), packed in ", row(proc.stdout, "Results", "archive"))
     members = zip_names(out / "audit.zip")
     on_disk = [t for t in files_under(out) if t not in ("audit.zip", "older_session.jsonl")]
     assert members == on_disk  # everything this run wrote, in the same layout
     assert {"audit.jsonl", "audit.deduped.jsonl", "password/audit.jsonl", "api_key/audit.jsonl"} <= set(members)
     assert any(m.startswith("password/files/") for m in members)
     assert Session.load(out / "audit.jsonl").records[0]["to_zip"] is True
-    assert "Archive: " in (tmp_path / "run.log").read_text(encoding="utf-8")
+    assert "; archive out" in (tmp_path / "run.log").read_text(encoding="utf-8")
 
 
 def test_to_zip_with_final_only_keeps_the_final_file_and_downloads(fake_gitlab: FakeGitLab, run_cli,
@@ -208,7 +211,8 @@ def test_project_filter_searches_only_matching_projects_of_the_index(fake_gitlab
 def test_files_by_name_without_a_term(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
     proc = run_cli(*gl_args(fake_gitlab), "--filename", "settings.py", "--download-files", "--session", "s",
                    "--to-zip", check=True)
-    assert "no term: every matching file (listing: auto)" in proc.stderr
+    assert row(proc.stderr, "Search plan", "files") == "every file matching filename settings.py (no term)"
+    assert row(proc.stderr, "Search plan", "listing") == "auto"
     assert "files listed:" in proc.stderr
     s = Session.load(tmp_path / "s.jsonl")
     meta = s.records[0]

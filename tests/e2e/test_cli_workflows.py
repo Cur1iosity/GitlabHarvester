@@ -20,7 +20,9 @@ from tests.helpers import (
     PASSWORD_HITS_PER_BRANCH,
     Session,
     load_index,
+    parse_blocks,
     read_jsonl,
+    row,
 )
 
 
@@ -39,7 +41,7 @@ def test_dump_index_with_default_filename(fake_gitlab: FakeGitLab, run_cli, tmp_
     proc = run_cli(*gl_args(fake_gitlab), "-m", "dump-index", "-bs", "4", check=True)
 
     expected = tmp_path / f"{instance_id(fake_gitlab)}_project_index.jsonl"
-    assert f"Project index saved to: {expected.name}" in proc.stdout
+    assert row(proc.stdout, "Results", "index") == expected.name
     assert expected.is_file()
     assert [p.name for p in tmp_path.iterdir()] == [expected.name]  # no tmp leftovers
 
@@ -72,8 +74,8 @@ def test_search_single_keyword(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path)
     proc = run_cli(*gl_args(fake_gitlab), "-s", "password", "--index-file", "idx.jsonl", "--session", "audit",
                    check=True)
 
-    assert "Session saved to: audit.jsonl" in proc.stdout
-    assert "Done. Keywords: 1 | Hits: 9" in proc.stdout
+    assert row(proc.stdout, "Results", "session") == "audit.jsonl"
+    assert (row(proc.stdout, "Results", "hits"), row(proc.stdout, "Results", "terms")) == ("9", "1")
     s = Session.load(tmp_path / "audit.jsonl")
 
     types = [r.get("type", "hit") for r in s.records]
@@ -119,7 +121,7 @@ def test_search_multiple_keywords_from_file(fake_gitlab: FakeGitLab, run_cli, tm
     # "p@ss w0rd!" lives in web-app master and every branch inheriting it (incl. fork 202).
     assert set(s.project_ids("p@ss w0rd!")) == {103, 202}
     total = len(s.hits())
-    assert f"Done. Keywords: 6 | Hits: {total}" in proc.stdout
+    assert (row(proc.stdout, "Results", "hits"), row(proc.stdout, "Results", "terms")) == (f"{total:,}", "6")
     assert s.of_type("summary")[0]["hits"] == total
 
 
@@ -145,7 +147,7 @@ def test_fork_modes(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path, args, expe
     proc = run_cli(*gl_args(fake_gitlab), "-s", "password", "--session-file", "s.jsonl", *args, check=True)
     s = Session.load(tmp_path / "s.jsonl")
     assert len(s.hits()) == expected_hits
-    assert f"Hits: {expected_hits}" in proc.stdout
+    assert row(proc.stdout, "Results", "hits") == str(expected_hits)
     assert set(s.project_ids()) == expected_projects
     assert s.records[0]["forks"] == args[1]
 
@@ -167,7 +169,8 @@ def test_dedup_and_convert_pipeline(fake_gitlab: FakeGitLab, run_cli, tmp_path: 
     assert len(raw.hits()) == 29
 
     proc = run_cli("-m", "dedup", "--input-file", "s.jsonl", "--output-file", "clean.jsonl", check=True)
-    assert "[dedup] kept records:" in proc.stdout
+    assert row(proc.stdout, "Dedup", "kept") == "8 records" or row(proc.stdout, "Dedup", "kept").endswith(" records")
+    assert row(proc.stdout, "Dedup", "output") == "clean.jsonl"
     clean = Session.load(tmp_path / "clean.jsonl")
     # Same snippet in many branches/forks collapses to one: 8 distinct snippets.
     assert len(clean.hits()) == 8
@@ -179,7 +182,7 @@ def test_dedup_and_convert_pipeline(fake_gitlab: FakeGitLab, run_cli, tmp_path: 
                    check=True)
     data = json.loads((tmp_path / "clean.json").read_text(encoding="utf-8"))
     assert data == read_jsonl(tmp_path / "clean.jsonl")
-    assert f"[convert] objects: {len(data)}" in proc.stdout
+    assert row(proc.stdout, "Convert", "objects") == str(len(data))
 
 
 def test_dedup_with_hash_algo_and_without_normalization(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
@@ -211,10 +214,11 @@ def test_search_started_from(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path, s
                    "--started-from", since, check=True)
 
     # Progress output (stderr) counts only the projects that are really scanned.
-    assert f"Search plan: 1 term, {planned} of 9 projects, {planned} branch" in proc.stderr
-    assert f"(skipped: {skipped})" in proc.stderr
+    plan = parse_blocks(proc.stderr)["Search plan"]
+    assert (plan["terms"], plan["projects"], plan["branches"]) == (["1"], [f"{planned} of 9"], [str(planned)])
+    assert plan["skipped"] == skipped.split(", ")
     assert f"Search finished: 1 term x {planned} project" in proc.stderr
-    assert f"Hits: {expected_hits}" in proc.stdout
+    assert row(proc.stdout, "Results", "hits") == str(expected_hits)
     s = Session.load(tmp_path / "s.jsonl")
     assert set(s.project_ids()) == expected_projects
     assert s.records[0]["started_from"].startswith(since[:10])
@@ -282,8 +286,8 @@ def test_search_from_config_file_only(fake_gitlab: FakeGitLab, run_cli, tmp_path
     assert [r["term"] for r in session.of_type("keyword_done")] == ["password", "api_key"]
     assert not {201, 202, 203} & set(session.project_ids())  # forks = skip
     assert session.records[0]["config"] == str(cfg)
-    assert "Search plan: 2 terms, 5 of 9 projects" in proc.stderr
-    assert "Done. Keywords: 2" in proc.stdout
+    assert (row(proc.stderr, "Search plan", "terms"), row(proc.stderr, "Search plan", "projects")) == ("2", "5 of 9")
+    assert row(proc.stdout, "Results", "terms") == "2"
 
 
 def test_cli_arguments_override_config_file(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path, monkeypatch):
@@ -294,7 +298,7 @@ def test_cli_arguments_override_config_file(fake_gitlab: FakeGitLab, run_cli, tm
 
     session = Session.load(tmp_path / "cli.jsonl")  # CLI path: relative to the working directory
     assert [r["term"] for r in session.of_type("keyword_done")] == ["token"]  # -s replaces config terms
-    assert "Search plan: 1 term, 8 of 9 projects" in proc.stderr  # forks included again
+    assert row(proc.stderr, "Search plan", "projects") == "8 of 9"  # forks included again
     searched = {int(r.path.split("/")[4]) for r in fake_gitlab.api_requests("project_search")}
     assert {201, 202, 203} <= searched
     assert not (tmp_path / "conf" / "s.jsonl").exists()
@@ -328,7 +332,7 @@ def test_parallel_cli_run_matches_sequential_run(fake_gitlab: FakeGitLab, run_cl
     par = Session.load(tmp_path / "par.jsonl")
     assert [r["term"] for r in par.of_type("keyword_done")] == ["password", "api_key", "token"]
     assert par.records[0]["workers"] == 4
-    assert ", 4 workers" in proc.stderr
+    assert row(proc.stderr, "Search plan", "parallel") == "4 workers"
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "65", "many"])
@@ -414,7 +418,7 @@ def test_group_time_options_filter_index_projects_and_files(fake_gitlab: FakeGit
     urls = [h["url"] for h in Session.load(tmp_path / "s.jsonl").hits()]
     assert not any("env.example" in u for u in urls)
     assert any(u.endswith("config/settings.py#L1") for u in urls)
-    assert "files changed 2024-03-01..2024-06-04" in proc.stderr
+    assert row(proc.stderr, "Search plan", "files changed") == "2024-03-01..2024-06-04"
     meta_rec = Session.load(tmp_path / "s.jsonl").records[0]
     assert meta_rec["file_changed_after"].startswith("2024-03-01") and meta_rec["active_before"].startswith("2024-06-04")
 
@@ -423,7 +427,7 @@ def test_done_line_reports_search_time(fake_gitlab: FakeGitLab, run_cli, tmp_pat
     proc = run_cli(*gl_args(fake_gitlab), "-s", "token", "--index-file", "idx.jsonl", "--session-file", "s.jsonl",
                    check=True)
     import re
-    assert re.search(r"Done\. Keywords: 1 \| Hits: \d+ \| Search time: \d+\.\ds", proc.stdout), proc.stdout
+    assert re.fullmatch(r"\d+\.\ds", row(proc.stdout, "Results", "search time")), proc.stdout
     summary = Session.load(tmp_path / "s.jsonl").of_type("summary")[0]
     assert summary["elapsed_seconds"] >= 0
 
@@ -450,7 +454,8 @@ def test_post_process_keeps_original_and_intermediate_files(fake_gitlab: FakeGit
 
     # Dedup really removed the hits repeated across branches and forks.
     assert len(Session.load(out / "audit.deduped.jsonl").hits()) < len(Session.load(out / "audit.jsonl").hits())
-    assert "Post-processing: " in proc.stdout and "Final result: " in proc.stdout
+    assert row(proc.stdout, "Results", "post-process").startswith("dedup: kept ")
+    assert row(proc.stdout, "Results", "final result").endswith("audit.deduped.converted.json")
     meta = Session.load(out / "audit.jsonl").records[0]
     assert (meta["post_process"], meta["final_only"]) == (["dedup", "convert"], False)
 
@@ -462,7 +467,7 @@ def test_post_process_final_only_leaves_just_the_result(fake_gitlab: FakeGitLab,
     records = json.loads((out / "audit.deduped.converted.json").read_text(encoding="utf-8"))
     assert records[0]["type"] == "meta" and records[-1]["type"] == "summary"
     assert any("term" in r and "result" in r for r in records)
-    assert "Removed (--final-only):" in proc.stdout
+    assert "audit.jsonl" in row(proc.stdout, "Results", "removed")
 
 
 def test_post_process_from_config_file(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
@@ -495,14 +500,14 @@ def test_output_separated_writes_one_file_per_term(fake_gitlab: FakeGitLab, run_
     split_total = sum(len(Session.load(out / t / "audit.jsonl").hits()) for t in ("password", "api_key", "token"))
     assert split_total == len(session.hits())
 
-    assert "Separated output:" in proc.stdout
+    assert row(proc.stdout, "Results", "term files").startswith("3 files in ")
     assert session.records[0]["output_separated"] is True
 
 
 def test_output_separated_ignored_for_a_single_term(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
     proc = _search_with(fake_gitlab, run_cli, "--output-separated")
     assert [p.name for p in (tmp_path / "out").iterdir()] == ["audit.jsonl"]  # no per-term file
-    assert "output-separated ignored" in proc.stdout
+    assert row(proc.stdout, "Results", "term files") == "none: --output-separated needs several terms"
 
 
 def test_output_separated_files_survive_final_only(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
@@ -535,11 +540,11 @@ def test_index_file_and_build_time_are_shown_before_the_plan(fake_gitlab: FakeGi
     built = load_index(tmp_path / "idx.jsonl")[0]["timestamp_utc"][:19].replace("T", " ")
     proc = run_cli(*gl_args(fake_gitlab), "-s", "token", "--index-file", "idx.jsonl", "--session-file", "s.jsonl",
                    check=True)
-    lines = proc.stderr.splitlines()
-    index_at = next(i for i, line in enumerate(lines) if line.startswith("Index: "))
-    assert lines[index_at + 1].startswith("Search plan: ")
-    assert re.fullmatch(rf"Index: idx\.jsonl \(built {built} UTC, just now; 9 projects, branches: default\)",
-                        lines[index_at])
+    blocks = parse_blocks(proc.stderr)
+    assert list(blocks)[:2] == ["Index", "Search plan"]
+    assert blocks["Index"] == {"file": ["idx.jsonl"], "built": [f"{built} UTC (just now)"], "projects": ["9"],
+                               "branches": ["default"]}
+    assert re.search(r"\nIndex\n(  .*\n)+\nSearch plan\n", proc.stderr)
 
 
 # --------------------------------------------------------------------------- run journal in the log file
@@ -580,18 +585,19 @@ def test_log_file_collects_a_summary_of_every_run(fake_gitlab: FakeGitLab, run_c
                  "active=since 2024-06-02", "post-process=dedup,convert", "session=audit"):
         assert part in options, part
     assert has(first, "Indexed 9 projects")
-    assert has(first, "Index: idx.jsonl (built ")
-    assert has(first, "Search plan: 2 terms, 5 of 9 projects")
+    assert has(first, "Command: gitlab-harvester ")
+    assert has(first, "Index: file idx.jsonl; built ")
+    assert has(first, "Search plan: terms 2; projects 5 of 9")
     assert has(first, "Term 1/2 'password': 5 projects, ") and has(first, "Term 2/2 'api_key': 5 projects, ")
     assert has(first, "Search finished: 2 terms x 5 projects")
-    assert has(first, "Session saved to: audit.jsonl")
-    assert has(first, "Done. Keywords: 2 | Hits: ") and "Search time: " in has(first, "Done. ")
+    results = has(first, "Results: hits ")
+    assert "; terms 2; search time " in results and "; session audit.jsonl" in results
     assert has(first, "Post-processing dedup: audit.jsonl -> audit.deduped.jsonl (kept ")
-    assert has(first, "Final result: audit.deduped.converted.json")
+    assert "; final result audit.deduped.converted.json" in results
     assert first[-1].startswith("Run finished in ")
 
-    assert has(second, "Index: idx.jsonl (built ")  # reused index: build time still visible
-    assert has(second, "Session saved to: second.jsonl") and second[-1].startswith("Run finished in ")
+    assert has(second, "Index: file idx.jsonl; built ")  # reused index: build time still visible
+    assert "; session second.jsonl" in has(second, "Results: ") and second[-1].startswith("Run finished in ")
     assert fake_gitlab.token not in (tmp_path / "logs" / "runs.log").read_text(encoding="utf-8")
 
 
@@ -603,8 +609,8 @@ def test_log_file_records_failed_runs_and_postprocess_modes(fake_gitlab: FakeGit
 
     messages = [msg for _, msg in _journal(tmp_path / "runs.log")]
     assert any(m.startswith("Run failed after ") and "The token failed to authenticate" in m for m in messages)
-    assert any(m.startswith("Dedup: s.jsonl -> d.jsonl (kept ") for m in messages)
-    assert any(m.startswith("Convert: d.jsonl -> d.json (") for m in messages)
+    assert any(m.startswith("Dedup: input s.jsonl; output d.jsonl; kept ") for m in messages)
+    assert any(m.startswith("Convert: input d.jsonl; output d.json; objects ") for m in messages)
     assert sum(m.startswith("Run started: ") for m in messages) == 4
 
 
@@ -619,6 +625,18 @@ def test_log_file_from_config_is_relative_to_the_config(fake_gitlab: FakeGitLab,
 def test_no_log_file_means_no_journal(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
     run_cli(*gl_args(fake_gitlab), "-s", "token", "--session-file", "s.jsonl", check=True)
     assert not list(tmp_path.glob("*.log"))
+
+
+def test_the_command_is_echoed_after_the_banner_with_the_token_masked(fake_gitlab: FakeGitLab, run_cli,
+                                                                      tmp_path: Path):
+    proc = run_cli(*gl_args(fake_gitlab), "-s", "token", "--session-file", "s.jsonl", "--log-file", "run.log",
+                   check=True)
+    lines = proc.stderr.splitlines()
+    echo = next(i for i, line in enumerate(lines) if line.startswith("$ gitlab-harvester "))
+    assert echo <= 4  # right after the banner, before anything the run prints
+    assert "-t '<TOKEN>'" in lines[echo] or "-t <TOKEN>" in lines[echo]
+    assert fake_gitlab.token not in proc.stderr + proc.stdout
+    assert "Command: gitlab-harvester -u " in (tmp_path / "run.log").read_text(encoding="utf-8")
 
 
 def test_a_wrong_token_or_url_is_one_clear_line_not_a_traceback(fake_gitlab: FakeGitLab, run_cli):

@@ -347,7 +347,7 @@ The price grows in the same proportion:
 
 Start with a small number (4) and increase gradually. Watch for 5xx warnings and
 for rate limiting: the first HTTP 429 of a run is one warning, then the status line
-counts them (`| HTTP 429 x190`) and the run ends with `Rate limit: 190 HTTP 429
+counts them (`| HTTP 429 x190`) and the `Results` block ends with `rate limit  190 HTTP 429
 responses, retried after 12:30 of waits in total` (`--debug` repeats the warning
 instead). The results are the same as with one worker; only the order of
 hit records in the session file differs. Details: [usage.md](usage.md#parallel-requests).

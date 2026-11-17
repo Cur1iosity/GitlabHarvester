@@ -164,6 +164,24 @@ class FileDownloader:
         self._taken: set[str] = set()
         self._saved: dict[tuple[Any, str, str], Path] = {}  # (project id, branch, path) -> first download
 
+    def target(self) -> str:
+        """'results/<term>/files (max 10 MiB each)' for the search plan."""
+        limit = f"max {format_size(self.max_size)} each" if self.max_size else "no size limit"
+        return f"{self.layout.describe_files()} ({limit})"
+
+    def summary_lines(self) -> list[str]:
+        """The summary() as separate facts: the files, then copies, skipped and failed ones."""
+        s = self.stats
+        lines = [f"{s.files} file{'s' if s.files != 1 else ''} ({format_size(s.bytes)}) in "
+                 f"{self.layout.describe_files()}"]
+        if s.copied:
+            lines.append(f"{s.copied} copied locally (same file, another term)")
+        if s.too_large:
+            lines.append(f"{s.too_large} skipped: larger than {format_size(self.max_size)}")
+        if s.failed:
+            lines.append(f"{s.failed} FAILED (see the warnings)")
+        return lines
+
     def describe(self) -> str:
         """'download files to results/<term>/files (max 10 MiB each)' for the search plan."""
         limit = f"max {format_size(self.max_size)} each" if self.max_size else "no size limit"

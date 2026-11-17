@@ -54,7 +54,7 @@ def test_normalization_and_hashing():
 
 def test_dedup_removes_cross_branch_and_cross_project_duplicates(session_file: Path, tmp_path: Path, capsys):
     out = tmp_path / "clean.jsonl"
-    dedup_session_file(input_path=session_file, output_path=out)
+    stats = dedup_session_file(input_path=session_file, output_path=out)
 
     records = read_jsonl(out)
     s = Session(records)
@@ -62,7 +62,8 @@ def test_dedup_removes_cross_branch_and_cross_project_duplicates(session_file: P
     assert [h["data"] for h in s.hits()] == ["DB_PASSWORD = x", "unique-1", "token = t"]
     assert s.project_ids() == [1, 3]  # project 2 had only duplicates
     assert s.branches_by_project()[1] == ["main"]  # develop branch collapsed into main's hit
-    assert "dropped empty hit-records: 1" in capsys.readouterr().out
+    assert (stats["dropped"], stats["seen_db"]) == (1, str(tmp_path / "clean.jsonl.seen.sqlite"))
+    assert capsys.readouterr().out == ""  # the library prints nothing; the CLI shows the stats
     # Default sqlite cache next to the output.
     assert (tmp_path / "clean.jsonl.seen.sqlite").exists()
 

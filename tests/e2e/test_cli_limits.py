@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from fakegitlab import FakeGitLab
-from tests.helpers import read_jsonl
+from tests.helpers import parse_blocks, read_jsonl, row
 
 SHORT_LIMITS = {
     "api": {"limit": 400, "period": 60, "on_success": True},  # announced: no load needed
@@ -18,13 +18,15 @@ def test_find_limits_prints_settings_command_and_config(fake_gitlab: FakeGitLab,
     proc = run_cli("-m", "find-limits", "-u", fake_gitlab.url, "-t", fake_gitlab.token, "--log-file", "run.log",
                    check=True)
     out = proc.stdout
-    assert "other API: ~400 requests per minute per user (GitLab headers" in out
-    assert "search API: ~4 requests per" in out and "full window counted" in out
-    assert "Suggested settings: --workers" in out
-    command = next(line for line in out.splitlines() if line.startswith("Command: "))
+    blocks = parse_blocks(out)
+    assert blocks["Rate limits"]["other API"][0].startswith("~400 requests per minute per user (GitLab headers")
+    assert blocks["Rate limits"]["search API"][0].startswith("~4 requests per")
+    assert "full window counted" in blocks["Rate limits"]["search API"][0]
+    assert set(blocks["Suggested settings"]) >= {"workers", "index-rpm", "search-rpm"}
+    command = row(out, "Next run", "command")
     assert "-t '<TOKEN>'" in command or "-t <TOKEN>" in command
     assert "--auto-limits --workers" in command and "find-limits" not in command
-    assert "workers = " in out and "search-rpm = " in out
+    assert blocks["Next run"]["config file"][0].startswith("workers = ")
     assert fake_gitlab.token not in out + proc.stderr
     assert "Rate-limit detection is EXPERIMENTAL" in proc.stderr
     journal = (tmp_path / "run.log").read_text(encoding="utf-8")
@@ -40,7 +42,7 @@ def test_auto_limits_without_a_terminal_prints_the_command_and_stops(fake_gitlab
                    "--probe-apis", "search")
     assert proc.returncode != 0
     assert "no terminal to confirm" in proc.stderr
-    assert "Command: " in proc.stdout and "-s password" in proc.stdout
+    assert "-s password" in row(proc.stdout, "Next run", "command")
     assert not (tmp_path / "results").exists()  # nothing was searched
 
 
@@ -59,5 +61,5 @@ def test_dump_index_with_auto_limits_measures_the_index_api_only(fake_gitlab: Fa
     fake_gitlab.set_rate_limits(SHORT_LIMITS)
     proc = run_cli("-m", "dump-index", "-u", fake_gitlab.url, "-t", fake_gitlab.token, "--auto-limits",
                    "--workers", "1")
-    assert "other API: ~400 requests per minute" in proc.stdout
+    assert row(proc.stdout, "Rate limits", "other API").startswith("~400 requests per minute")
     assert "search API" not in proc.stdout

@@ -477,6 +477,12 @@ class ScanPlan:
         noun = "project" if self.total_projects == 1 else "projects"
         text = f"{self.project_count:,} of {self.total_projects:,} {noun}, {self.branch_count:,} "
         text += "branch" if self.branch_count == 1 else "branches"
+        if reasons := self.skipped_reasons():
+            text += f" (skipped: {', '.join(reasons)})"
+        return text
+
+    def skipped_reasons(self) -> list[str]:
+        """Why projects are left out, one entry per reason: ['1 empty', '3 inactive since 2024-06-02']."""
         reasons: list[str] = []
         if n := self.skipped.get(SKIP_FILTERED, 0):
             reasons.append(f"{n:,} not matching --project-filter {', '.join(self.project_filter)}")
@@ -490,9 +496,7 @@ class ScanPlan:
             reasons.append(f"{n:,} active after {format_bound(self.active_before)}")
         if n := self.skipped.get(SKIP_NO_BRANCHES, 0):
             reasons.append(f"{n:,} without branches to scan")
-        if reasons:
-            text += f" (skipped: {', '.join(reasons)})"
-        return text
+        return reasons
 
 
 def build_scan_plan(projects: list[dict[str, Any]], options: ScanOptions) -> ScanPlan:
