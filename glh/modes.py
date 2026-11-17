@@ -14,12 +14,13 @@ The dispatcher is intentionally thin; core logic lives in GitlabHarvester and po
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from urllib.parse import urlparse
 
 from glh import GitlabHarvester, archive, limits, ratelimit, tokens, user_agents
@@ -311,20 +312,48 @@ def _mk_harvester(args: CliArgs) -> GitlabHarvester:
         raise SystemExit(str(e)) from None
 
 
+def index_hint(index_file: str, *, mode: str, rebuild: bool) -> str:
+    """The tip shown while the project index is built (see _building_index)."""
+    if mode == "dump-index":
+        return (f"Tip: searches reuse this index: run them from this directory, or pass "
+                f"--index-file {index_file} (no --dump-projects).")
+    if rebuild:
+        return (f"Tip: --dump-projects rebuilds {index_file}; without it, the next searches reuse "
+                f"the index (--index-file FILE picks another one).")
+    return (f"Tip: next time this index is reused: --index-file {index_file} (found automatically "
+            f"from this directory; --dump-projects rebuilds it).")
+
+
+@contextlib.contextmanager
+def _building_index(args: CliArgs, glh: GitlabHarvester, *, mode: str) -> Iterator[None]:
+    """While the index is built (not when an existing one is reused): the reuse tip above the status line."""
+    index_file = _index_path(args, glh)
+    rebuild = mode == "dump-index" or args.dump_projects
+    if not (rebuild or not os.path.exists(index_file)):
+        yield
+        return
+    terminal_utils.STATUS.set_hint(index_hint(index_file, mode=mode, rebuild=rebuild and mode != "dump-index"))
+    try:
+        yield
+    finally:
+        terminal_utils.STATUS.set_hint(None)
+
+
 def _run_dump_index(args: CliArgs) -> None:
     """Rebuild the Instance Project Index and write to disk."""
     glh = _mk_harvester(args)
     console = _start_auto_limits(args, glh, (limits.INDEX,)) if args.auto_limits else None
     try:
-        index_file = glh.build_project_index(
-            per_page=args.batch_size,
-            filename=args.index_file,
-            enforce_dump=True,
-            branches=args.index_branches,
-            branches_per_page=args.branches_per_page,
-            last_activity_after=args.index_active_after,
-            last_activity_before=args.index_active_before,
-        )
+        with _building_index(args, glh, mode="dump-index"):
+            index_file = glh.build_project_index(
+                per_page=args.batch_size,
+                filename=args.index_file,
+                enforce_dump=True,
+                branches=args.index_branches,
+                branches_per_page=args.branches_per_page,
+                last_activity_after=args.index_active_after,
+                last_activity_before=args.index_active_before,
+            )
     finally:
         _stop_auto_limits(console)
     _report(f"Project index saved to: {index_file}")
@@ -466,15 +495,16 @@ def _search(args: CliArgs, glh: GitlabHarvester, keywords: list[str]) -> None:
     # --output-separated split names and covers files for every term.
     all_keywords = list(keywords)
 
-    index_file = glh.build_project_index(
-        per_page=args.batch_size,
-        filename=args.index_file,
-        enforce_dump=args.dump_projects,
-        branches=args.index_branches,
-        branches_per_page=args.branches_per_page,
-        last_activity_after=args.index_active_after,
-        last_activity_before=args.index_active_before,
-    )
+    with _building_index(args, glh, mode="search"):
+        index_file = glh.build_project_index(
+            per_page=args.batch_size,
+            filename=args.index_file,
+            enforce_dump=args.dump_projects,
+            branches=args.index_branches,
+            branches_per_page=args.branches_per_page,
+            last_activity_after=args.index_active_after,
+            last_activity_before=args.index_active_before,
+        )
 
     data = glh.load_projects_from_file(index_file)
     projects = data.get("projects", [])

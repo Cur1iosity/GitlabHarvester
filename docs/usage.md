@@ -136,6 +136,13 @@ gitlab-harvester -u ... -t ... -s password --index-file acme.jsonl    # custom l
 - If listing fails midway, the index is saved with `"is_completed": false`, and
   later runs warn about it. Rebuild with `--dump-projects`.
 - `-bs/--batch-size` (default 100, GitLab's maximum) is the page size for project listing.
+- While an index is being built, a tip in turquoise above the status line says how
+  to reuse it (`--index-file <file>`, found automatically from the same directory;
+  `--dump-projects` rebuilds). It disappears when the index is done, so it never
+  stays in the scrollback. It needs a terminal with ANSI colors (on Windows the
+  console's VT mode is switched on); elsewhere it isn't shown. `NO_COLOR` turns the
+  color off.
+
 
 ## Branches
 

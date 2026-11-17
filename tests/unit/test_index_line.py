@@ -45,3 +45,12 @@ def test_branches_window_and_incomplete_index():
 
 def test_missing_build_time():
     assert describe_index("old.jsonl", {}, 3, now=NOW) == "Index: old.jsonl (build time unknown; 3 projects)"
+
+
+
+def test_index_hint_names_the_file_and_how_to_reuse_it():
+    from glh.modes import index_hint
+
+    assert "--index-file idx.jsonl" in index_hint("idx.jsonl", mode="search", rebuild=False)
+    assert "--dump-projects rebuilds idx.jsonl" in index_hint("idx.jsonl", mode="search", rebuild=True)
+    assert "searches reuse this index" in index_hint("idx.jsonl", mode="dump-index", rebuild=True)

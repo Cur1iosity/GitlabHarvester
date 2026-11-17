@@ -23,10 +23,18 @@ stop the run (``--auto-limits``, see ``glh.autolimit``), and a *badge*
 (:meth:`StatusLine.set_badge`) is put in front of it, e.g. ``[Limiter]``. A
 *tail* (:meth:`StatusLine.set_tail`) is appended to it on every redraw and to the
 heartbeat lines off a terminal, e.g. a live ``HTTP 429 x12`` counter.
+
+A *hint* (:meth:`StatusLine.set_hint`) is an extra line in turquoise right above
+the status line, e.g. a tip while the project index is built. Permanent lines
+and log records are written above it, and removing it erases it from the screen,
+so it never stays in the scrollback. It needs a terminal that understands ANSI
+escape sequences (on Windows the console's VT mode is switched on); elsewhere it
+is not shown at all. ``NO_COLOR`` keeps it uncoloured.
 """
 
 from __future__ import annotations
 
+import os
 import shutil
 import sys
 import threading
@@ -35,6 +43,38 @@ import unicodedata
 from typing import Callable, TextIO
 
 ELLIPSIS = "…"
+HINT_COLOR = "\x1b[38;5;80m"  # turquoise (xterm-256 #5fd7d7)
+RESET = "\x1b[0m"
+_CURSOR_UP_CLEAR = "\x1b[1A\r\x1b[2K"
+
+
+def _enable_windows_vt(stream: TextIO) -> bool:
+    """Switch the Windows console of ``stream`` to VT mode (ANSI escapes); False if impossible."""
+    try:
+        import ctypes
+        import msvcrt
+
+        handle = msvcrt.get_osfhandle(stream.fileno())
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        mode = ctypes.c_uint32()
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return False
+        vt = 0x0004  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        return bool(mode.value & vt) or bool(kernel32.SetConsoleMode(handle, mode.value | vt))
+    except Exception:  # noqa: BLE001 - no console, no ctypes: just no ANSI
+        return False
+
+
+def supports_ansi(stream: TextIO) -> bool:
+    """True if ``stream`` is a terminal that understands ANSI escape sequences."""
+    try:
+        if not stream.isatty():
+            return False
+    except (AttributeError, ValueError, OSError):
+        return False
+    if os.environ.get("TERM") == "dumb":
+        return False
+    return _enable_windows_vt(stream) if os.name == "nt" else True
 
 
 # --------------------------------------------------------------------------- formatting
@@ -148,9 +188,11 @@ class StatusLine:
             heartbeat_interval: float = 60.0,
             ticker: bool = True,
             clock: Callable[[], float] = time.monotonic,
+            ansi: bool | None = None,
     ) -> None:
         self._stream = stream
         self._interactive = interactive
+        self._ansi = ansi
         self._columns = columns
         self._refresh_interval = refresh_interval
         self._tick_interval = tick_interval
@@ -166,6 +208,9 @@ class StatusLine:
         self._badge = ""
         # Appended to the provider's text (also in heartbeats), e.g. "HTTP 429 x12"; '' = nothing.
         self._tail: Callable[[], str] | None = None
+        # Turquoise line above the status line (ANSI terminals only).
+        self._hint: str | None = None
+        self._hint_shown = False
         self._listeners: list[Callable[[str], None]] = []
         self._shown_width = 0
         self._last_refresh = 0.0
@@ -189,6 +234,13 @@ class StatusLine:
         except (AttributeError, ValueError, OSError):
             return False
 
+    @property
+    def ansi(self) -> bool:
+        """True when ANSI escapes can be used (hint line): an ANSI terminal."""
+        if self._ansi is None:
+            self._ansi = self.interactive and supports_ansi(self.stream)
+        return bool(self._ansi) and self.interactive
+
     def _width(self) -> int:
         cols = self._columns() if self._columns else shutil.get_terminal_size(fallback=(80, 24)).columns
         # Writing into the last column makes some terminals wrap; stay one cell short.
@@ -207,6 +259,21 @@ class StatusLine:
         if self._shown_width:
             self._write(self.stream, "\r" + " " * self._shown_width + "\r")
             self._shown_width = 0
+
+    def _show_hint(self) -> None:
+        """Lock held, status line erased: write the hint line; the status line goes below it."""
+        if self._hint is None or self._hint_shown or not self.ansi:
+            return
+        text = fit_width(_single_line(self._hint), self._width())
+        colored = text if os.environ.get("NO_COLOR") else f"{HINT_COLOR}{text}{RESET}"
+        self._write(self.stream, colored + "\n")
+        self._hint_shown = True
+
+    def _hide_hint(self) -> None:
+        """Lock held, status line erased: clear the hint line and move back onto it."""
+        if self._hint_shown:
+            self._write(self.stream, _CURSOR_UP_CLEAR)
+            self._hint_shown = False
 
     def _text(self) -> str | None:
         """What the line shows now: the overlay, else the badge and the provider's text."""
@@ -289,6 +356,26 @@ class StatusLine:
     def badge(self) -> str:
         return self._badge
 
+    def set_hint(self, text: str | None) -> None:
+        """
+        Show ``text`` in turquoise on its own line above the status line until
+        called with None, which erases it. Shown only on ANSI terminals.
+        """
+        with self._lock:
+            if text == self._hint:
+                return
+            if self.interactive:
+                self._erase()
+                self._hide_hint()
+            self._hint = text
+            if self.interactive:
+                self._show_hint()
+                self._draw()
+
+    @property
+    def hint(self) -> str | None:
+        return self._hint
+
     def set_tail(self, provider: Callable[[], str] | None) -> None:
         """Append ``provider()`` (when not empty) to the status line; None removes it."""
         with self._lock:
@@ -315,8 +402,10 @@ class StatusLine:
             interactive = self.interactive
             if interactive:
                 self._erase()
+                self._hide_hint()  # the permanent line goes above the hint
             self._write(stream if stream is not None else self.stream, text + "\n")
             if interactive:
+                self._show_hint()
                 self._draw()
         if stream is None:
             # Permanent progress lines (plan, phase summaries) also go to listeners,

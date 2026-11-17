@@ -35,6 +35,10 @@ minor release. Runs that use it say so.
   and `L` shows the proposal again. Without a terminal proposals are logged. The run
   ends with the limits to start the next run with.
 - `-m dump-index --auto-limits` measures the other API only.
+- **Index reuse tip**: while the project index is built, a turquoise line above the
+  status line says how to reuse it next time (`--index-file …`; `--dump-projects`
+  rebuilds) and disappears when the index is done. Shown on ANSI terminals only
+  (VT mode is switched on in the Windows console); `NO_COLOR` keeps it plain.
 - **All results in one archive**: `--to-zip` packs the results of a search run into
   `<session>.zip` next to the session, with the same layout inside — the session,
   the `--post-process` outputs, the `--output-separated` term files and the
