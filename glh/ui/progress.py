@@ -21,12 +21,16 @@ class Progress:
 
     One round (or no rounds)::
 
-        label | 3/8 projects (37%) | info | 0:05 | ETA 0:09 | detail
+        label | 3/8 projects (37%) | info | 0:05 | ETA 0:09 | tail | detail
 
     ``rounds`` repeats the same total several times (one round per search
     term). Then the current round and all rounds get their own counters::
 
-        label | term 3/5 projects (60%) 0:02 ETA 0:01 | total 8/15 (53%) 0:07 ETA 0:06 | info | detail
+        label | term 3/5 projects (60%) 0:02 ETA 0:01 | total 8/15 (53%) 0:07 ETA 0:06 | info | tail | detail
+
+    The counters come first and the detail (the repository being searched)
+    last, so the numbers keep their place while the name changes length; the
+    status line's tail (``HTTP 429 xN``) goes before the detail too.
     """
 
     def __init__(
@@ -73,7 +77,7 @@ class Progress:
         """Start the clock and show the status line."""
         self._started = self._clock()
         self._round_started = self._started
-        self._status.attach(self.render)
+        self._status.attach(self.render, places_tail=True)
         return self
 
     def finish(self, summary: str | None = None) -> float:
@@ -197,6 +201,8 @@ class Progress:
             parts += [format_clock(self.elapsed)]
             if (eta := self.eta()) is not None:
                 parts += [f"ETA {format_clock(eta)}"]
+        if tail := self._status.tail_text():
+            parts.append(tail)
         detail = self.detail
         if self.detail_provider is not None:
             try:

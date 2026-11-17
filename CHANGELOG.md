@@ -40,6 +40,22 @@ unchanged. The index and session files are byte-identical to the ones 1.4.2 writ
 - `GitlabHarvester.load_index()`: the index file as `IndexMeta` and `Project`
   objects.
 
+### Fixed
+
+- **Files by name without a term, `--file-listing auto`.** Once the search API had
+  proven to take filter-only queries, a failed search of one branch (a timeout or
+  a 5xx, typically on a very large repository) silently fell back to listing that
+  repository's whole tree. On a monorepo that took hours, while the output still
+  said the search was used. Now such a branch counts as a failed search: it is
+  warned about, the run is not marked done, and `--resume` searches it again. The
+  tree is only used while the search hasn't proven itself. A long-running task now
+  says what it does: `Still listing the files (filename:*env) of group/repo @ main
+  (45,000 tree entries)`, not `Still searching`.
+- **The status line keeps its numbers in place.** The `HTTP 429 xN` counter was
+  appended after the repository being searched, so it jumped left and right with
+  the length of each name, and a narrow terminal cut it off. All the counters
+  (hits, HTTP 429) now come before the repository name.
+
 ## [1.4.2] - 2026-11-17
 
 A technical release: the command line, the config file and every file format

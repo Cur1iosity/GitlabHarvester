@@ -394,6 +394,22 @@ def test_overlay_is_never_drawn_off_a_terminal():
     assert stream.getvalue() == ""
 
 
+def test_progress_puts_the_counters_and_the_tail_before_the_repository():
+    # The repository name changes length all the time: the numbers must not move with it.
+    stream = FakeStream(tty=True)
+    status = StatusLine(stream, interactive=True, ticker=False, columns=lambda: 200)
+    status.set_tail(lambda: "HTTP 429 x5")
+    progress = Progress("Searching", total=4, unit="projects", status=status).start()
+    progress.set_info("12 hits")
+    progress.advance(detail="group/a-very-long-repository-name @ main")
+    status.refresh(force=True)
+    line = progress.render()
+    assert line.index("12 hits") < line.index("HTTP 429 x5") < line.index("group/a-very-long")
+    assert line.count("HTTP 429") == 1 and stream.getvalue().rstrip().endswith("@ main")
+    progress.finish()
+    status.set_tail(None)
+
+
 def test_tail_is_appended_to_the_status_line_and_heartbeats():
     from tests.helpers import FakeStream
 

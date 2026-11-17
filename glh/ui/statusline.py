@@ -22,7 +22,10 @@ the place of the status line, e.g. a question with a countdown that must not
 stop the run (``--auto-limits``, see ``glh.limits.console``), and a *badge*
 (:meth:`StatusLine.set_badge`) is put in front of it, e.g. ``[Limiter]``. A
 *tail* (:meth:`StatusLine.set_tail`) is appended to it on every redraw and to the
-heartbeat lines off a terminal, e.g. a live ``HTTP 429 x12`` counter.
+heartbeat lines off a terminal, e.g. a live ``HTTP 429 x12`` counter. A provider
+attached with ``places_tail`` puts the tail itself (a :class:`~glh.ui.progress.Progress`
+puts it before the repository it is working on, so the counter doesn't move with
+the length of the name).
 
 A *hint* (:meth:`StatusLine.set_hint`) is an extra line in turquoise right above
 the status line, e.g. a tip while the project index is built. Permanent lines
@@ -87,6 +90,7 @@ class StatusLine:
         self._badge = ""
         # Appended to the provider's text (also in heartbeats), e.g. "HTTP 429 x12"; '' = nothing.
         self._tail: Callable[[], str] | None = None
+        self._provider_places_tail = False
         # Turquoise line above the status line (ANSI terminals only).
         self._hint: str | None = None
         self._hint_shown = False
@@ -166,14 +170,19 @@ class StatusLine:
         return f"{self._badge} {text}" if self._badge else text
 
     def _with_tail(self, text: str) -> str:
-        if self._tail is not None:
-            try:
-                tail = self._tail()
-            except Exception:  # noqa: BLE001 - the status line must never break the run
-                tail = ""
-            if tail:
-                return f"{text} | {tail}"
-        return text
+        if self._provider_places_tail:
+            return text
+        tail = self.tail_text()
+        return f"{text} | {tail}" if tail else text
+
+    def tail_text(self) -> str:
+        """The current tail ('' without one); never raises."""
+        if self._tail is None:
+            return ""
+        try:
+            return self._tail() or ""
+        except Exception:  # noqa: BLE001 - the status line must never break the run
+            return ""
 
     def _draw(self) -> None:
         raw = self._text()
@@ -188,10 +197,14 @@ class StatusLine:
 
     # ------------------------------------------------------------------ public API
 
-    def attach(self, provider: Callable[[], str]) -> None:
-        """Show ``provider()`` as the status line until :meth:`detach`."""
+    def attach(self, provider: Callable[[], str], *, places_tail: bool = False) -> None:
+        """
+        Show ``provider()`` as the status line until :meth:`detach`; with
+        ``places_tail`` the provider includes :meth:`tail_text` itself.
+        """
         with self._lock:
             self._provider = provider
+            self._provider_places_tail = places_tail
             self._last_heartbeat = self._clock()
             if self.interactive:
                 self._draw()
@@ -201,6 +214,7 @@ class StatusLine:
         """Remove the status line (an overlay stays)."""
         with self._lock:
             self._provider = None
+            self._provider_places_tail = False
             if self.interactive:
                 if self._overlay is not None:
                     self._draw()
