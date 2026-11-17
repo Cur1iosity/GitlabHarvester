@@ -60,7 +60,7 @@ config files:
 <p align="center">
   <a href="docs/USE_CASES.md">
     <img src="docs/assets/use-cases.svg"
-         alt="Use cases at a glance: gitlab-harvester branches into scenarios from docs/USE_CASES.md (search terms, only some files, keep the files, project inventory, branches and forks, fresh findings, speed and rate limits, several tokens, reports, config file), each with its main flags; shortcuts such as -b, --time-after and --rpm show what they expand to"
+         alt="Use cases at a glance: gitlab-harvester branches into scenarios from docs/USE_CASES.md (search terms, only some files, keep the files in one ZIP, every file by name without a term, only some projects, project inventory, branches and forks, fresh findings, speed and rate limits, several tokens, reports, config file), each with its main flags; shortcuts such as -b, --time-after and --rpm show what they expand to"
          width="900">
   </a>
 </p>

@@ -4,7 +4,7 @@ Generate docs/assets/use-cases.svg, the README's "use cases at a glance" picture
 A tree: the gitlab-harvester command branches into the scenarios of
 docs/USE_CASES.md (the number on a branch is the section number there), each
 with its main flags as chips; shortcut flags (-b, --time-after, --rpm) show
-what they expand to, and features new in a release get a NEW badge.
+what they expand to, and features new in a release (NEW_IN) get a NEW badge.
 
 When flags or use-case sections change, edit ROWS (and COMMAND) below and run,
 from any directory (standard library only):
@@ -40,36 +40,43 @@ C = {
     "line": "#3d444d", "prompt": "#3fb950",
 }
 # One accent per branch.
-ACCENTS = ["#58a6ff", "#3fb950", "#3fb950", "#a371f7", "#f778ba", "#d29922",
+ACCENTS = ["#58a6ff", "#3fb950", "#3fb950", "#39c5cf", "#e3b341", "#a371f7", "#f778ba", "#d29922",
            "#39c5cf", "#ff7b72", "#58a6ff", "#8b949e"]
 
-# (section in USE_CASES.md, title, subtitle, new in 1.3, items)
+# The release whose features get the NEW badge.
+NEW_IN = "1.4"
+
+# (section in USE_CASES.md, title, subtitle, new in NEW_IN, items)
 # item: ("flag", text) | ("short", text, expands-to) | ("note", text)
 ROWS = [
     (1, "Search terms", "one term or a list, resumable", False,
      [("flag", "-s password"), ("flag", "-f words.txt"), ("flag", "--session audit"), ("flag", "--resume")]),
-    (2, "Only some files", "exact name, * mask or extension", True,
+    (2, "Only some files", "exact name, * mask or extension", False,
      [("flag", "--filename settings.py"), ("flag", "--filename '*.env'"), ("flag", "--extension py")]),
-    (3, "Keep the files", "copies for offline analysis", True,
-     [("flag", "--download-files"), ("flag", "--download-max-size 10M"), ("flag", "--output-separated")]),
-    (4, "Project inventory", "index only, no search", False,
+    (3, "Keep the files", "copies, all results in one ZIP", True,
+     [("flag", "--download-files"), ("flag", "--output-separated"), ("flag", "--to-zip")]),
+    (4, "Every file by name", "no term: collect, grep offline", True,
+     [("flag", "--filename '*.env'"), ("flag", "--file-listing auto"), ("note", "no -s / -f needed")]),
+    (5, "Only some projects", "picked from the existing index", True,
+     [("flag", "--project-filter k8s"), ("flag", "--project-filter 'infra/*'")]),
+    (6, "Project inventory", "index only, no search", False,
      [("flag", "-m dump-index"), ("flag", "--index-branches all"), ("flag", "--dump-projects")]),
-    (5, "Branches & forks", "which branches, what about forks", False,
+    (7, "Branches & forks", "which branches, what about forks", False,
      [("short", "-b all", "--index-branches + --scan-branches"), ("flag", "--forks branch-diff")]),
-    (6, "Fresh findings only", "time windows on three levels", False,
+    (8, "Fresh findings only", "time windows on three levels", False,
      [("short", "--time-after DATE", "index + projects + files"), ("flag", "--file-changed-after DATE")]),
-    (7, "Speed & rate limits", "parallel, paced, no fixed rhythm", False,
-     [("flag", "-w 8"), ("short", "--rpm 30", "--index-rpm + --search-rpm"), ("flag", "--jitter 0.5-3")]),
-    (8, "Several tokens", "red team: beat per-user limits", False,
+    (9, "Speed & rate limits", "parallel, paced, measured (exp.)", True,
+     [("flag", "-w 8"), ("short", "--rpm 30", "--index-rpm + --search-rpm"), ("flag", "--auto-limits")]),
+    (10, "Several tokens", "red team: beat per-user limits", False,
      [("flag", "-t \"tok1;tok2\""), ("flag", "--token-file tokens.txt"), ("flag", "--user-agent-file ua.txt")]),
-    (10, "Reports & history", "dedup, JSON, a log of every run", False,
+    (12, "Reports & history", "dedup, JSON, a log of every run", False,
      [("flag", "--post-process dedup,convert"), ("flag", "--final-only"), ("flag", "--log-file run.log")]),
-    (12, "Config file", "the same options in an INI file", False,
+    (14, "Config file", "the same options in an INI file", False,
      [("flag", "-c config.ini"), ("note", "command-line flags override the file")]),
 ]
 
 COMMAND = ['$ ', 'gitlab-harvester ', '-u ', 'https://gitlab.example.com ', '-t ', '"$GITLAB_TOKEN" ',
-           '-f ', 'words.txt ', '-b ', 'all ', '--extension ', 'yml ', '--download-files']
+           '-f ', 'words.txt ', '-b ', 'all ', '--project-filter ', 'k8s ', '--download-files ', '--to-zip']
 
 
 def mono_w(text: str) -> float:
@@ -100,9 +107,9 @@ add(f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="
     f'role="img" aria-labelledby="t d">')
 add('<title id="t">GitlabHarvester use cases and their flags</title>')
 add('<desc id="d">A tree: the gitlab-harvester command branches into use cases (search terms, only some files, '
-    'keep the files, project inventory, branches and forks, fresh findings, speed and rate limits, several tokens, '
-    'reports and history, config file), each with its main command-line flags. Shortcut flags show what they '
-    'expand to.</desc>')
+    'keep the files, every file by name, only some projects, project inventory, branches and forks, fresh '
+    'findings, speed and rate limits, several tokens, reports and history, config file), each with its main '
+    'command-line flags. Shortcut flags show what they expand to.</desc>')
 add('<style>'
     '.sans{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}'
     '.mono{font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace}'
@@ -217,7 +224,7 @@ lx += 420
 add(f'<rect x="{lx}" y="{ly - 12}" width="34" height="17" rx="8.5" fill="{C["new_bg"]}" stroke="{C["new"]}"/>')
 add(f'<text x="{lx + 17}" y="{ly}" text-anchor="middle" class="sans" font-size="10.5" font-weight="700" '
     f'fill="{C["new"]}">NEW</text>')
-add(f'<text x="{lx + 44}" y="{ly + 1}" class="sans" font-size="12" fill="{C["muted"]}">in 1.3</text>')
+add(f'<text x="{lx + 44}" y="{ly + 1}" class="sans" font-size="12" fill="{C["muted"]}">in {NEW_IN}</text>')
 add(f'<text x="{W - PAD}" y="{ly + 1}" text-anchor="end" class="sans" font-size="12" fill="{C["faint"]}">'
     f'all options: docs/usage.md</text>')
 

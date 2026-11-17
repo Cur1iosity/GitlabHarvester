@@ -6,15 +6,22 @@ Complete reference for the CLI. For a short introduction see the [README](../REA
 - [Connection](#connection)
 - [Configuration file](#configuration-file)
 - [Project index](#project-index)
+  - [Only some projects: --project-filter](#only-some-projects---project-filter)
 - [Branches](#branches)
 - [Forks](#forks)
 - [Time filters](#time-filters)
 - [Search terms](#search-terms)
+  - [Only some files: --filename, --extension](#only-some-files---filename---extension)
+  - [Without a term: every file by name](#without-a-term-every-file-by-name)
 - [Downloading the files with hits](#downloading-the-files-with-hits---download-files)
 - [Parallel requests](#parallel-requests)
+- [Request rate limits](#request-rate-limits)
+- [Finding the rate limits (experimental)](#finding-the-rate-limits--m-find-limits---auto-limits-experimental)
 - [Sessions and resume](#sessions-and-resume)
 - [Post-processing](#post-processing)
+  - [Everything in one archive: --to-zip](#everything-in-one-archive---to-zip)
 - [Progress output](#progress-output)
+- [Run journal](#run-journal)
 - [Output formats](#output-formats)
 - [Option reference](#option-reference)
 
@@ -812,6 +819,18 @@ Search finished: 2 terms x 5 projects, 25 hits in 0.3s
   written, plus a heartbeat line with the current status once a minute during long phases.
 - After Ctrl+C or a fatal error, the last status stays on screen to show how far the
   phase got (`| stopped`, or `(interrupted)` in the indexing summary).
+
+Extras on the status line, only while they matter:
+
+| Shown | When | Meaning |
+|---|---|---|
+| a turquoise `Tip: …` line above it | while the project index is built | how to reuse the index next time (`--index-file`); gone when the index is done |
+| `\| HTTP 429 x190` at the end | after the first HTTP 429 | rate-limited responses so far (also in the heartbeat lines off a terminal); the run ends with a `Rate limit:` summary |
+| `[Limiter: L]` in front | `--auto-limits` (experimental) has a proposal you haven't answered | press `L` to see it again |
+| `[Limiter] … Apply? [Y]es / [N]o / ignore: 17s` instead of it | `--auto-limits` proposes new limits after HTTP 429 | answer without stopping the scan; no answer keeps the limits |
+
+The tip needs a terminal with ANSI colors (on Windows the console's VT mode is
+switched on); `NO_COLOR` turns the color off.
 
 ## Run journal
 
