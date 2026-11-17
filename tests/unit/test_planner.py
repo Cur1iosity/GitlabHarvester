@@ -7,6 +7,8 @@ import pytest
 from glh.domain.models import Project
 from glh.domain.planning import (
     branches_to_scan,
+    build_scan_plan,
+    fork_compared_by_name,
     get_upstream_id,
     is_fork_project,
     ScanOptions,
@@ -138,6 +140,45 @@ def test_branches_to_scan_branch_diff_uses_upstream_from_index():
     by_id = {1: UPSTREAM, 2: FORK}
     opts = ScanOptions(scan_branches="all", forks_mode="branch-diff", fork_diff_bases=("main", "develop"))
     assert branches_to_scan(FORK, opts, by_id) == ["main", "develop", "fork/only", "zz-unique"]
+
+
+def heads(**commits):
+    """branch_heads of an index record: a SHA-1 per branch (feature__auth = feature/auth), from a commit label."""
+    import hashlib
+    return {"branch_heads": {name.replace("__", "/"): hashlib.sha1(label.encode()).hexdigest()
+                             for name, label in commits.items()}}
+
+
+def test_branch_diff_compares_the_commits_of_branches_with_the_same_name():
+    # The review case: feature/auth exists on both sides, but the fork added a commit to it.
+    upstream = proj(1, branches=["feature/auth", "feature/shared", "main"],
+                    **heads(feature__auth="a1", feature__shared="s1", main="m1"))
+    fork = proj(2, branches=["feature/auth", "feature/shared", "main"], fork_of=1,
+                **heads(feature__auth="a2", feature__shared="s1", main="m1"))
+    assert select_fork_branches_diff(fork, upstream, "all", ("main",)) == ["main", "feature/auth"]
+    opts = ScanOptions(scan_branches="all", forks_mode="branch-diff", fork_diff_bases=("main",))
+    assert not fork_compared_by_name(fork, opts, {1: upstream, 2: fork})
+
+
+def test_branch_diff_scans_a_branch_whose_commit_is_unknown():
+    upstream = proj(1, branches=["feature/shared", "main"], **heads(feature__shared="s1", main="m1"))
+    fork = proj(2, branches=["feature/shared", "main"], fork_of=1, **heads(main="m1"))  # no head for it
+    assert select_fork_branches_diff(fork, upstream, "all", ("main",)) == ["main", "feature/shared"]
+
+
+def test_branch_diff_on_an_index_without_commits_compares_names_and_says_so():
+    # FORK and UPSTREAM have no branch_heads (an index built before 1.4.4).
+    opts = ScanOptions(scan_branches="all", forks_mode="branch-diff", fork_diff_bases=("main",))
+    assert "feature/shared" not in select_fork_branches_diff(FORK, UPSTREAM, "all", ("main",))
+    assert fork_compared_by_name(FORK, opts, {1: UPSTREAM, 2: FORK})
+    assert not fork_compared_by_name(UPSTREAM, opts, {1: UPSTREAM, 2: FORK})  # not a fork
+    assert not fork_compared_by_name(FORK, opts, {2: FORK})  # upstream not in the index: regular selection
+    assert not fork_compared_by_name(FORK, ScanOptions(scan_branches="all", forks_mode="include"),
+                                     {1: UPSTREAM, 2: FORK})
+    assert build_scan_plan([UPSTREAM, FORK], opts).forks_by_name == 1
+    with_heads = [proj(1, branches=["main"], **heads(main="m1")), proj(2, branches=["main"], fork_of=1,
+                                                                      **heads(main="m1"))]
+    assert build_scan_plan(with_heads, opts).forks_by_name == 0
 
 
 def test_branches_to_scan_branch_diff_falls_back_when_upstream_missing():

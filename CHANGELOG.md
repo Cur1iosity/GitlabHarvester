@@ -34,9 +34,23 @@ All notable changes to GitlabHarvester are documented here. The format follows
 
 - **Loading the index is faster:** 0.26 s instead of 0.33 s for 30,000 projects
   (1.4.2: 0.17 s), from a leaner `Project.from_record`. Memory is unchanged.
+  An index rebuilt with branch commits (see Fixed) costs a little of it back.
 
 ### Fixed
 
+- **`--forks branch-diff` compares commits, not just branch names.** A fork's
+  branch was skipped whenever the upstream had a branch of the same name, so
+  commits the fork added to it (a token pushed to its copy of `feature/auth`)
+  were never searched. The index now stores the commit each branch points at
+  (`branch_heads`, from the same branch listing responses: no extra requests), and
+  a fork's branch is skipped only when the upstream's branch of the same name
+  points at the same commit. An index built before 1.4.4 has no commits: it is
+  compared by names as before, and the `Search plan` block says so
+  (`forks  N compared by branch name only`); `--dump-projects` rebuilds it.
+  `GitlabHarvester.list_branch_heads()` lists branches with their commits.
+  The commits are kept as raw digests in memory: an index of 30,000 projects
+  with 3 branches each takes 2.7 MB more (22.7 MB instead of 20.0 MB) and loads
+  0.11 s slower; the file is about half as large again.
 - **Branch listing errors no longer drop projects from the search.** When an API
   error (5xx, a timeout, 429 after its retries) cut a project's branch list
   (`--index-branches all|N`), the cut list was stored as if it were complete. A

@@ -222,8 +222,17 @@ class ProjectIndexer:
         list: ``complete`` is False. A permanent one (403/404: no access to the
         repository) leaves nothing to retry, so the list counts as complete.
         """
+        heads, complete = self.list_branch_heads(project_id, per_page, limit=limit)
+        return [name for name, _ in heads], complete
+
+    def list_branch_heads(self, project_id: int, per_page: int = 100, *,
+                          limit: int | None = None) -> tuple[list[tuple[str, str | None]], bool]:
+        """
+        ([(branch name, head commit SHA)], complete): list_branches() with the commit
+        each branch points at (the same responses: no extra request).
+        """
         gl = self.connection.require()
-        branches: list[str] = []
+        branches: list[tuple[str, str | None]] = []
         page = 1
         try:
             while True:
@@ -232,7 +241,9 @@ class ProjectIndexer:
                     break
 
                 for b in batch:
-                    branches.append(b.name)
+                    commit = getattr(b, "commit", None)
+                    sha = commit.get("id") if isinstance(commit, dict) else None
+                    branches.append((b.name, sha if isinstance(sha, str) else None))
                     if limit is not None and len(branches) >= limit:
                         return branches, True
 
@@ -249,17 +260,21 @@ class ProjectIndexer:
         self.logger.debug("Loaded %s branches for project with ID: %s.", len(branches), project_id)
         return branches, True
 
-    def _listed_branches(self, project: Project, per_page: int, limit: int | None) -> tuple[list[str], bool]:
+    def _listed_branches(self, project: Project, per_page: int,
+                         limit: int | None) -> tuple[list[str], dict[str, str], bool]:
         """
-        The branches of a non-empty project for the index, and whether the list is complete.
+        The branches of a non-empty project for the index, their head commits, and
+        whether the list is complete.
 
         A cut list keeps its default branch: without it a failure on the first page
         would leave the project with no branches, and the search would skip it.
         """
-        branches, complete = self.list_branches(project.id, per_page, limit=limit)
+        listed, complete = self.list_branch_heads(project.id, per_page, limit=limit)
+        branches = [name for name, _ in listed]
+        heads = {name: sha for name, sha in listed if sha}
         if not complete and project.default_branch and project.default_branch not in branches:
             branches.append(project.default_branch)
-        return branches, complete
+        return branches, heads, complete
 
     def _warn_incomplete_branches(self, incomplete: list[str]) -> None:
         """One warning for every project whose branch list an API error cut."""
@@ -401,12 +416,12 @@ class ProjectIndexer:
 
             limit = None if branches in ("default", "all") else int(branches)
 
-            def branches_of(record: dict[str, Any]) -> tuple[list[str], bool]:
+            def branches_of(record: dict[str, Any]) -> tuple[list[str], dict[str, str] | None, bool]:
                 project = Project.from_record(record)
                 if project.empty_repo:
-                    return [], True
+                    return [], ({} if uses_api else None), True
                 if not uses_api:
-                    return ([project.default_branch] if project.default_branch else []), True
+                    return ([project.default_branch] if project.default_branch else []), None, True
                 if self.connection.concurrency <= 1:
                     progress.set_detail(project.path_with_namespace or str(project.id))
                 return self._listed_branches(project, branches_per_page, limit)
@@ -417,7 +432,12 @@ class ProjectIndexer:
                 # Branch lists are fetched in parallel; the index keeps its order.
                 for done in self._imap_ordered(branches_of, index_records(), parallel=uses_api):
                     project = done.item
-                    project["branches"], complete = done.unwrap()
+                    project["branches"], heads, complete = done.unwrap()
+                    # The head commit of every listed branch (--forks branch-diff compares them);
+                    # without branch listing there are none, and a stale set must not stay.
+                    project.pop("branch_heads", None)
+                    if heads is not None:
+                        project["branch_heads"] = heads
                     if not complete:
                         incomplete.append(str(project.get("path_with_namespace") or project["id"]))
                     if uses_api and not project.get("empty_repo", False):
@@ -516,15 +536,15 @@ class ProjectIndexer:
         to_list = sum(1 for p in projects if not p.get("empty_repo", False))
         incomplete: list[str] = []
 
-        def branches_of(project: dict[str, Any]) -> tuple[list[str], bool]:
+        def branches_of(project: dict[str, Any]) -> tuple[list[str], dict[str, str], bool]:
             if project.get("empty_repo", False):
-                return [], True
+                return [], {}, True
             return self._listed_branches(Project.from_record(project), per_page, None)
 
         with Progress("Listing branches", total=to_list, unit="projects") as progress:
             for done in self._imap_ordered(branches_of, projects):
                 project = done.item
-                project["branches"], complete = done.unwrap()
+                project["branches"], project["branch_heads"], complete = done.unwrap()
                 if not complete:
                     incomplete.append(str(project.get("path_with_namespace") or project["id"]))
                 if not project.get("empty_repo", False):

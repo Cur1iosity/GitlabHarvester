@@ -99,6 +99,24 @@ def test_index_with_all_branches(fake_gitlab: FakeGitLab, make_harvester, tmp_pa
     assert [r.arg("page") for r in fake_gitlab.api_requests("branches", path=r"/projects/101/")] == ["1", "2", "3"]
 
 
+def test_listed_branches_keep_their_head_commits(fake_gitlab: FakeGitLab, make_harvester, tmp_path: Path):
+    out = tmp_path / "idx.jsonl"
+    glh = make_harvester()
+    glh.build_project_index(filename=str(out), branches="all", branches_per_page=2)
+    by_id = {p["id"]: p for p in load_index(out)[1]}
+    assert list(by_id[101]["branch_heads"]) == DEFAULT_BRANCHES[101]
+    assert all(len(sha) == 40 for sha in by_id[101]["branch_heads"].values())
+    assert by_id[104]["branch_heads"] == {}  # empty repository: no branches, no commits
+    # A fork's branch without commits of its own points at the upstream's commit.
+    assert by_id[201]["branch_heads"]["feature/login-v2"] == by_id[101]["branch_heads"]["feature/login-v2"]
+    assert by_id[201]["branch_heads"]["main"] == by_id[101]["branch_heads"]["main"]
+    assert glh.list_branch_heads(101, per_page=2, limit=1) == ([("develop", by_id[101]["branch_heads"]["develop"])],
+                                                                True)
+    # Back to "default": no listing, so no commits (a stale set doesn't stay).
+    glh.enrich_project_index_with_branches(filename=str(out), branches="default")
+    assert not any("branch_heads" in p for p in load_index(out)[1])
+
+
 def test_index_with_branch_limit(fake_gitlab: FakeGitLab, make_harvester, tmp_path: Path):
     out = tmp_path / "idx.jsonl"
     make_harvester().build_project_index(filename=str(out), branches=2)

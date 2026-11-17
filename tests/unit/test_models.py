@@ -98,6 +98,23 @@ def test_with_branches_and_as_project():
     assert as_project(RECORD) == project
 
 
+def test_branch_heads_round_trip_and_tolerate_broken_values():
+    record = {**RECORD, "branches": ["develop", "main", "wip"],
+              "branch_heads": {"develop": "d" * 40, "main": "0123456789abcdef" * 2 + "01234567"}}
+    project = Project.from_record(record)
+    assert project.heads() == record["branch_heads"]  # wip: no commit known
+    assert len(project.branch_heads) == 3 * 20  # raw SHA-1 digests, not hex strings
+    assert project.to_record() == record and list(project.to_record())[-2:] == ["branches", "branch_heads"]
+    assert Project.from_record(RECORD).heads() is None and "branch_heads" not in Project.from_record(RECORD).to_record()
+    sha256 = {**record, "branch_heads": {"main": "e" * 64}}
+    assert Project.from_record(sha256).heads() == {"main": "e" * 64}
+    for broken in (["not", "a", "map"], None):
+        assert Project.from_record({**record, "branch_heads": broken}).heads() is None
+    assert Project.from_record({**record, "branch_heads": {"main": 1, "develop": "zz" * 20}}).heads() == {}
+    assert Project.from_record({**record, "branch_heads": {}}).heads() == {}
+    assert Project.from_record({"id": 1, "branch_heads": {"main": "d" * 40}}).heads() is None  # no branches
+
+
 def test_index_meta_of_anything():
     assert IndexMeta.from_record(None) == IndexMeta()
     assert IndexMeta.from_record(["not", "a", "record"]) == IndexMeta()

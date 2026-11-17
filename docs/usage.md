@@ -215,12 +215,19 @@ gitlab-harvester -u ... -t ... -s password -b all --forks branch-diff
 |---|---|
 | `include` (default) | forks are scanned like regular projects |
 | `skip` | forks are not scanned |
-| `branch-diff` | forks: default branch, base branches, and branches missing in the upstream |
+| `branch-diff` | forks: default branch, base branches, and branches that differ from the upstream |
 | `all-branches` | forks: every indexed branch, regardless of `--scan-branches` |
 
 - `branch-diff` avoids re-scanning branches a fork inherited from its upstream.
-  Base branches are always scanned and can be changed with
+  A fork's branch is skipped only when the upstream has a branch of the same name
+  at the same commit; a branch the fork added commits to is scanned, even if the
+  upstream has one of the same name. The index stores every branch's head commit
+  (`branch_heads`) when it lists branches, from the same API responses: no extra
+  requests. Base branches are always scanned and can be changed with
   `--fork-diff-bases main,master,develop,dev`.
+- An index built before 1.4.4 has no branch commits: `branch-diff` then compares
+  branch names only, and the `Search plan` block says so (`forks  N compared by
+  branch name only`). Rebuild the index with `--dump-projects` to compare commits.
 - If the upstream isn't in the index (for example, it isn't visible to the
   token), the fork is scanned with the regular `--scan-branches` rules.
 
@@ -951,8 +958,13 @@ All files are UTF-8 JSONL: one JSON object per line.
  "elapsed_seconds": 12.3, "order_by": "id", "sort": "desc", "per_page": 100, "is_completed": true, "branches": "all"}
 {"id": 101, "web_url": "https://gitlab.example.com/acme/api", "path_with_namespace": "acme/api",
  "default_branch": "main", "empty_repo": false, "forked_from_project": false,
- "created_at": "...", "last_activity_at": "...", "branches": ["develop", "main"]}
+ "created_at": "...", "last_activity_at": "...", "branches": ["develop", "main"],
+ "branch_heads": {"develop": "4f1c...", "main": "9a2e..."}}
 ```
+
+`branch_heads` (the commit SHA each branch points at) is written when branches are
+listed through the API (`--index-branches all|N`); `--forks branch-diff` compares
+forks with their upstream by it.
 
 `forked_from_project` is `{"id": <upstream id>}` for forks and `false` otherwise.
 `branches_incomplete` (in the meta) appears only when branch lists of that many

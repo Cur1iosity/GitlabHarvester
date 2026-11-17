@@ -39,6 +39,33 @@ def _str(value: Any) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _pack_heads(branches: tuple[str, ...], heads: Mapping[str, Any]) -> bytes:
+    """
+    The head commit of every branch as raw digests, in the order of ``branches``
+    (SHA-1 or SHA-256, the size of the first valid one); zeros for an unknown one.
+    Raw bytes take a fraction of the memory of hex strings on a large index.
+    """
+    size = 0
+    for sha in heads.values():
+        if sha.__class__ is str and len(sha) in (40, 64):
+            size = len(sha) // 2
+            break
+    if not size:
+        return b""
+    unknown = bytes(size)
+    packed = bytearray()
+    for branch in branches:
+        sha = heads.get(branch)
+        digest = unknown
+        if sha.__class__ is str and len(sha) == 2 * size:
+            try:
+                digest = bytes.fromhex(sha)
+            except ValueError:
+                pass
+        packed += digest
+    return bytes(packed)
+
+
 @dataclass(frozen=True, slots=True)
 class Project:
     """
@@ -55,6 +82,11 @@ class Project:
         created_at / last_activity_at: ISO 8601 timestamps from GitLab.
         branches: Branch names stored in the index; None when the record has
             no ``branches`` key (an index built without branch listing).
+        branch_heads: The commit each branch points at, from the branch
+            listing, packed as raw digests in the order of ``branches`` (zeros:
+            unknown); :meth:`heads` gives them as hex. None in an index without
+            them (``-b default``, before 1.4.4). --forks branch-diff compares a
+            fork with its upstream by them.
     """
 
     id: int
@@ -67,6 +99,7 @@ class Project:
     created_at: str | None = None
     last_activity_at: str | None = None
     branches: tuple[str, ...] | None = None
+    branch_heads: bytes | None = None
 
     @classmethod
     def from_record(cls, record: Mapping[str, Any]) -> "Project":
@@ -99,6 +132,9 @@ class Project:
                 branches = tuple(b for b in branches if isinstance(b, str))
         else:
             branches = None
+        heads = get("branch_heads")
+        if heads is not None:
+            heads = _pack_heads(branches, heads) if branches is not None and isinstance(heads, Mapping) else None
         web_url, path, default = get("web_url"), get("path_with_namespace"), get("default_branch")
         created, active = get("created_at"), get("last_activity_at")
         return cls(
@@ -112,10 +148,11 @@ class Project:
             created_at=created if created.__class__ is str else None,
             last_activity_at=active if active.__class__ is str else None,
             branches=branches,
+            branch_heads=heads,
         )
 
     def to_record(self) -> dict[str, Any]:
-        """The index record of this version (``branches`` only when known)."""
+        """The index record of this version (``branches``, ``branch_heads`` only when known)."""
         record: dict[str, Any] = {
             "id": self.id,
             "web_url": self.web_url,
@@ -129,6 +166,8 @@ class Project:
         }
         if self.branches is not None:
             record["branches"] = list(self.branches)
+        if self.branch_heads is not None:
+            record["branch_heads"] = self.heads()
         return record
 
     @property
@@ -147,6 +186,18 @@ class Project:
     def branch_names(self) -> tuple[str, ...]:
         """The indexed branches (empty when unknown)."""
         return self.branches or ()
+
+    def heads(self) -> dict[str, str] | None:
+        """Commit SHA (hex) per branch, in branch order; None when the index has none for this project."""
+        packed, branches = self.branch_heads, self.branch_names
+        if packed is None:
+            return None
+        if not packed or not branches:
+            return {}
+        size = len(packed) // len(branches)
+        unknown = bytes(size)
+        digests = (packed[i * size:(i + 1) * size] for i in range(len(branches)))
+        return {branch: digest.hex() for branch, digest in zip(branches, digests) if digest != unknown}
 
     @property
     def last_activity(self) -> datetime | None:

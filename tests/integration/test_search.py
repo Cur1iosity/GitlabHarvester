@@ -121,6 +121,33 @@ def test_branch_diff_skips_branches_identical_to_upstream(fake_gitlab: FakeGitLa
     assert refs(101) == sorted(["develop", "feature/login-v2", "main", "release/1.0+hotfix"])
 
 
+def test_branch_diff_searches_a_branch_the_fork_changed(fake_gitlab: FakeGitLab, make_harvester, tmp_path: Path):
+    # The same branch name on both sides is not enough: the fork's feature/auth has a commit of its own.
+    fake_gitlab.reset(scenario={
+        "users": [{"id": 1, "username": "bot", "tokens": ["dev-token"]}],
+        "projects": [
+            {"id": 1, "path_with_namespace": "acme/app", "default_branch": "main", "branches": {
+                "main": {"files": {"README.md": "app\n"}},
+                "feature/auth": {"inherit": "main", "files": {"auth.py": "def login(): ...\n"}},
+                "feature/ui": {"inherit": "main", "files": {"ui.py": "pass\n"}},
+            }},
+            {"id": 2, "path_with_namespace": "eve/app", "default_branch": "main", "forked_from": 1, "branches": {
+                "main": {"inherit": "1:main"},
+                "feature/auth": {"inherit": "1:feature/auth", "files": {"debug.env": "token=FAKE-leak-0001\n"}},
+                "feature/ui": {"inherit": "1:feature/ui"},
+            }},
+        ],
+    })
+    glh = make_harvester()
+    index = glh.build_project_index(filename=str(tmp_path / "idx.jsonl"), branches="all")
+    projects = glh.load_projects_from_file(index)["projects"]
+    _, hits, session = search(glh, projects, ["token"], scan_branches="all", forks_mode="branch-diff",
+                              fork_diff_bases=("main",))
+    refs = sorted(r.arg("ref") for r in fake_gitlab.api_requests("project_search", path="/projects/2/"))
+    assert refs == ["feature/auth", "main"]  # feature/ui is the upstream's commit: skipped
+    assert hits == 1 and session.project_ids() == [2]
+
+
 def test_search_pagination_over_100_results(fake_gitlab: FakeGitLab, make_harvester):
     lines = "\n".join(f"secret {i}" if i % 2 == 0 else "filler" for i in range(500)) + "\n"
     fake_gitlab.reset({

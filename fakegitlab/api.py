@@ -537,7 +537,9 @@ class GitLabApi:
 
     def serialize_branch(self, p: Project, name: str, base_url: str) -> dict[str, Any]:
         """Serialize a branch as returned by GET /projects/:id/repository/branches."""
-        sha = hashlib.sha1(f"{p.id}:{name}:{sorted(p.branches[name].items())}".encode()).hexdigest()
+        # From the files only, like a commit: a fork's branch without changes of its
+        # own points at the upstream's commit (what --forks branch-diff compares).
+        sha = hashlib.sha1(repr(sorted(p.branches[name].items())).encode()).hexdigest()
         web_url = f"{base_url.rstrip('/')}/{p.path_with_namespace}"
         is_default = name == p.default_branch
         return {

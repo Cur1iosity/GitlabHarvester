@@ -255,16 +255,20 @@ report longer without new information.
 
 ```bash
 # Recommended: all branches of originals; for forks the default branch, the
-# base branches and only the branches that the upstream doesn't have.
+# base branches and only the branches that differ from the upstream.
 gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -f words.txt -b all --forks branch-diff --dump-projects
 
 # Originals only
 gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -f words.txt --forks skip
 ```
 
-`branch-diff` compares branch *names* with the upstream, so it needs an index
-with branches (`--index-branches all` or `N`); with the default index it scans
-only the fork's default branch. `--fork-diff-bases` (default
+`branch-diff` compares every fork branch with the upstream branch of the same
+name by the commit it points at: a branch is skipped only when both point at the
+same commit, so a leak committed to a fork's copy of `feature/auth` is still found.
+It needs an index with branches (`--index-branches all` or `N`); with the default
+index it scans only the fork's default branch. An index built before 1.4.4 has no
+commits and is compared by branch names (the `Search plan` says so); rebuild it
+with `--dump-projects`. `--fork-diff-bases` (default
 `main,master,develop,dev`) lists branches that are always scanned in forks,
 because a fork often changes exactly those. Deduplication afterwards
 (`-m dedup`) removes hits that still repeat across forks and branches.

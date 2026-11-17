@@ -84,6 +84,8 @@ class SearchEngine:
             ("projects", f"{plan.project_count:,} of {plan.total_projects:,}"),
             ("skipped", plan.skipped_reasons()),
             ("branches", f"{plan.branch_count:,}"),
+            ("forks", f"{plan.forks_by_name:,} compared by branch name only: the index has no branch commits "
+                      "(rebuild it with --dump-projects)" if plan.forks_by_name else ""),
             ("files changed", options.file_window.describe() if options.file_window else ""),
             ("downloads", downloader.target() if downloader is not None else ""),
             ("parallel", self.connection.concurrency_text()),
