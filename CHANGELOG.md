@@ -51,6 +51,15 @@ minor release. Runs that use it say so.
   `FakeGitLab.set_rate_limits`, `/__admin/rate-limits`) with GitLab's 429 headers,
   and a `ratelimited` scenario.
 
+### Changed
+
+- HTTP 429 no longer floods the log: the first one of a run is a warning, the
+  others are counted — `HTTP 429 xN` at the end of the status line (and the
+  heartbeat lines off a terminal) and `Rate limit: N HTTP 429 responses, retried after
+  … of waits in total` at the end of the run and in the run journal. With `--debug`
+  the warning still repeats at most once a minute with the count so far. It points to
+  `-m find-limits` (or says that `--auto-limits` will propose limits).
+
 ## [1.3.0] - 2026-11-17
 
 ### Added

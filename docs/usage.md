@@ -318,9 +318,15 @@ when the instance has no API rate limits: N workers send about N times more requ
 per second, which also means N times more load and noise in the GitLab logs.
 HTTP 429 responses are still retried according to `Retry-After`, but under a rate
 limit more workers mostly produce more 429s, not more speed. These waits are
-visible: a warning (at most once a minute) names the endpoint, the wait and the
-count so far, and the status line shows `rate limited (HTTP 429), retry in …` for
-the waiting task.
+visible without flooding the log:
+
+- the first 429 of a run is one warning (endpoint, wait, what to do about it);
+- after that the 429s are only counted: the status line ends with `HTTP 429 x190`
+  (off a terminal, in the heartbeat line every minute), and the waiting task shows
+  `rate limited (HTTP 429), retry in …`;
+- the run ends with `Rate limit: 190 HTTP 429 responses, retried after 12:30 of waits
+  in total (all workers)` (in the run journal too);
+- with `--debug` the warning repeats at most once a minute with the count so far.
 
 How the work is split:
 

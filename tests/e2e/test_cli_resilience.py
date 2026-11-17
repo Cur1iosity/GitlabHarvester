@@ -326,3 +326,13 @@ def test_final_only_keeps_an_incomplete_session(fake_gitlab: FakeGitLab, run_cli
                    "--session-file", "s.jsonl", "--post-process", "dedup,convert", "--final-only", check=True)
     assert "--final-only ignored: the search is incomplete" in proc.stdout
     assert (tmp_path / "s.jsonl").exists() and (tmp_path / "s.deduped.converted.json").exists()
+
+
+def test_rate_limit_is_warned_once_and_counted(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
+    fake_gitlab.add_fault({"match": {"path": "/search$"}, "times": 4,
+                           "response": {"status": 429, "headers": {"Retry-After": "0"}}})
+    proc = run_cli("-u", fake_gitlab.url, "-t", fake_gitlab.token, "-s", "password", "--session", "s",
+                   "--workers", "2", "--log-file", "run.log", check=True)
+    assert (proc.stdout + proc.stderr).count("GitLab rate limit (HTTP 429)") == 1
+    assert "Rate limit: 4 HTTP 429 responses" in proc.stdout
+    assert "Rate limit: 4 HTTP 429 responses" in (tmp_path / "run.log").read_text(encoding="utf-8")

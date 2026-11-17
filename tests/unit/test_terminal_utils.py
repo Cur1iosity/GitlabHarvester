@@ -399,3 +399,28 @@ def test_overlay_is_never_drawn_off_a_terminal():
     assert stream.getvalue() == ""
 
 
+def test_tail_is_appended_to_the_status_line_and_heartbeats():
+    from tests.helpers import FakeStream
+
+    stream = FakeStream(tty=True)
+    status = StatusLine(stream, interactive=True, ticker=False, columns=lambda: 200)
+    status.attach(lambda: "Searching")
+    count = {"n": 0}
+    status.set_tail(lambda: f"HTTP 429 x{count['n']}" if count["n"] else "")
+    assert stream.getvalue().endswith("Searching")  # empty tail: nothing added
+    count["n"] = 12
+    status.refresh(force=True)
+    assert stream.getvalue().endswith("Searching | HTTP 429 x12")
+    status.set_tail(None)
+    assert stream.getvalue().rstrip().endswith("Searching")
+
+    clock = FakeClock()
+    plain = FakeStream(tty=False)
+    status = StatusLine(plain, interactive=False, ticker=False, heartbeat_interval=60, clock=clock)
+    status.attach(lambda: "Searching")
+    status.set_tail(lambda: "HTTP 429 x3")
+    clock.now += 61
+    status.tick()
+    assert plain.getvalue() == "Searching | HTTP 429 x3\n"
+
+

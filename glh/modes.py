@@ -144,6 +144,13 @@ def _report(message: str) -> None:
     JOURNAL.write(message)
 
 
+def _report_rate_limit(glh: GitlabHarvester) -> None:
+    """The HTTP 429 count of the run (counted, not logged one by one), if any; clears the status counter."""
+    terminal_utils.STATUS.set_tail(None)
+    if (summary := glh.rate_limit_summary()) is not None:
+        _report(summary)
+
+
 def _when(after: datetime | None, before: datetime | None) -> str | None:
     window = TimeWindow(after, before)
     return window.describe() if window else None
@@ -321,6 +328,9 @@ def _run_dump_index(args: CliArgs) -> None:
     finally:
         _stop_auto_limits(console)
     _report(f"Project index saved to: {index_file}")
+    _report_rate_limit(glh)
+
+
 # --------------------------------------------------------------------------- rate limits
 
 
@@ -560,6 +570,7 @@ def _search(args: CliArgs, glh: GitlabHarvester, keywords: list[str]) -> None:
 
     _report(f"Session saved to: {session_path}")
     _report(f"Done. Keywords: {len(keywords)} | Hits: {hits} | Search time: {format_duration(search_elapsed)}")
+    _report_rate_limit(glh)
     if downloader is not None:
         _report(f"Downloaded files: {downloader.summary()}")
     if incomplete:

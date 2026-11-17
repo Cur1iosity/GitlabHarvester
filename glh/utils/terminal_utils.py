@@ -20,7 +20,9 @@ Console log records go through :meth:`StatusLine.write_line` (see
 On a terminal, an *overlay* (:meth:`StatusLine.set_overlay`) temporarily takes
 the place of the status line, e.g. a question with a countdown that must not
 stop the run (``--auto-limits``, see ``glh.autolimit``), and a *badge*
-(:meth:`StatusLine.set_badge`) is put in front of it, e.g. ``[Limiter]``.
+(:meth:`StatusLine.set_badge`) is put in front of it, e.g. ``[Limiter]``. A
+*tail* (:meth:`StatusLine.set_tail`) is appended to it on every redraw and to the
+heartbeat lines off a terminal, e.g. a live ``HTTP 429 x12`` counter.
 """
 
 from __future__ import annotations
@@ -162,6 +164,8 @@ class StatusLine:
         self._overlay: Callable[[], str] | None = None
         # Put in front of the provider's text, e.g. "[Limiter]".
         self._badge = ""
+        # Appended to the provider's text (also in heartbeats), e.g. "HTTP 429 x12"; '' = nothing.
+        self._tail: Callable[[], str] | None = None
         self._listeners: list[Callable[[str], None]] = []
         self._shown_width = 0
         self._last_refresh = 0.0
@@ -210,8 +214,18 @@ class StatusLine:
             return self._overlay()
         if self._provider is None:
             return None
-        text = self._provider()
+        text = self._with_tail(self._provider())
         return f"{self._badge} {text}" if self._badge else text
+
+    def _with_tail(self, text: str) -> str:
+        if self._tail is not None:
+            try:
+                tail = self._tail()
+            except Exception:  # noqa: BLE001 - the status line must never break the run
+                tail = ""
+            if tail:
+                return f"{text} | {tail}"
+        return text
 
     def _draw(self) -> None:
         raw = self._text()
@@ -274,6 +288,13 @@ class StatusLine:
     @property
     def badge(self) -> str:
         return self._badge
+
+    def set_tail(self, provider: Callable[[], str] | None) -> None:
+        """Append ``provider()`` (when not empty) to the status line; None removes it."""
+        with self._lock:
+            self._tail = provider
+            if self.interactive and (self._provider is not None or self._overlay is not None):
+                self._draw()
 
     def refresh(self, *, force: bool = False) -> None:
         """Redraw the status line (throttled unless ``force``)."""
@@ -344,7 +365,7 @@ class StatusLine:
                 return
             if self._clock() - self._last_heartbeat >= self._heartbeat_interval:
                 self._last_heartbeat = self._clock()
-                self._write(self.stream, _single_line(self._provider()) + "\n")
+                self._write(self.stream, _single_line(self._with_tail(self._provider())) + "\n")
 
 
 STATUS = StatusLine()

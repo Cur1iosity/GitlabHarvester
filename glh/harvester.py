@@ -204,10 +204,13 @@ class GitlabHarvester:
         # Report a search task still running after this many seconds (and again
         # every as many seconds); 0 disables. Parallel search only.
         self.slow_task_report: float = 300.0
-        # HTTP 429: python-gitlab waits and retries silently, so we warn (throttled).
+        # HTTP 429: python-gitlab waits and retries silently. By default the first
+        # one is a warning and the rest only count (status line, final summary);
+        # with --debug a warning repeats at most every rate_limit_warn_interval s.
         self.rate_limit_warn_interval: float = 60.0
         self._rate_limit_lock = threading.Lock()
         self._rate_limited = 0
+        self._rate_limit_waited = 0.0  # Retry-After seconds, summed over all threads
         self._rate_limit_warned_at: float | None = None
 
         self.log_level: int = logging_utils.coerce_log_level(log_level)
@@ -428,7 +431,9 @@ class GitlabHarvester:
 
         On HTTP 429 python-gitlab waits (Retry-After) and retries up to 10
         times without any output, which looks like a hung scan. Mark the
-        running task as waiting and log a throttled warning instead.
+        running task as waiting, count the response (``HTTP 429 xN`` at the
+        end of the status line, :meth:`rate_limit_summary` at the end) and
+        warn once; with --debug the warning repeats, throttled.
         """
         observer = self.limit_observer
         if observer is not None:
@@ -442,25 +447,60 @@ class GitlabHarvester:
         wait = self._retry_after(getattr(response, "headers", None) or {})
         wait_text = terminal_utils.format_duration(wait) if wait is not None else "a moment"
         self._active.set_waiting(f"rate limited (HTTP 429), retry in {wait_text}")
+        debug = self.log_level <= logging.DEBUG
         with self._rate_limit_lock:
             self._rate_limited += 1
+            self._rate_limit_waited += wait or 0.0
             count = self._rate_limited
             now = time.monotonic()
-            warn = (self._rate_limit_warned_at is None
-                    or now - self._rate_limit_warned_at >= self.rate_limit_warn_interval)
+            first = self._rate_limit_warned_at is None
+            warn = first or (debug and now - self._rate_limit_warned_at >= self.rate_limit_warn_interval)
             if warn:
                 self._rate_limit_warned_at = now
+        if first:
+            terminal_utils.STATUS.set_tail(self._rate_limit_tail)
         if warn:
             path = urlparse(getattr(response, "url", "") or "").path
             advice = ("--auto-limits will suggest new limits." if self.limit_observer is not None
                       else "Fewer --workers or lower --search-rpm/--index-rpm reduce the request rate "
                            "(-m find-limits measures the limits).")
-            self.logger.warning(
-                "GitLab rate limit (HTTP 429) on %s: waiting %s before a retry "
-                "(%s so far; python-gitlab retries up to 10 times). %s",
-                path or "a request", wait_text, terminal_utils.plural(count, "rate-limited response"), advice,
-            )
+            if debug:
+                self.logger.warning(
+                    "GitLab rate limit (HTTP 429) on %s: waiting %s before a retry "
+                    "(%s so far; python-gitlab retries up to 10 times). %s",
+                    path or "a request", wait_text, terminal_utils.plural(count, "rate-limited response"), advice,
+                )
+            else:
+                self.logger.warning(
+                    "GitLab rate limit (HTTP 429) on %s: waiting %s before a retry (python-gitlab retries "
+                    "up to 10 times). Further 429s are only counted: HTTP 429 xN in the status line and a "
+                    "summary at the end (--debug repeats this warning). %s",
+                    path or "a request", wait_text, advice,
+                )
         return None
+
+    def _rate_limit_tail(self) -> str:
+        """'HTTP 429 x12' for the end of the status line ('' before the first one)."""
+        count = self._rate_limited
+        return f"HTTP 429 x{count:,}" if count else ""
+
+    @property
+    def rate_limited(self) -> int:
+        """HTTP 429 responses so far (all threads)."""
+        return self._rate_limited
+
+    def rate_limit_summary(self) -> str | None:
+        """
+        'Rate limit: 190 HTTP 429 responses, retried after 12:30 of waits in total (all workers)';
+        None without any 429.
+        """
+        with self._rate_limit_lock:
+            count, waited = self._rate_limited, self._rate_limit_waited
+        if not count:
+            return None
+        waits = (f", retried after {terminal_utils.format_duration(waited)} of waits in total"
+                 f"{' (all workers)' if self.concurrency > 1 else ''}" if waited else ", retried")
+        return f"Rate limit: {terminal_utils.plural(count, 'HTTP 429 response')}{waits}"
 
     def _concurrency_text(self) -> str:
         """

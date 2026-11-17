@@ -194,6 +194,29 @@ def test_rate_limit_waits_are_reported(fake_gitlab: FakeGitLab, make_harvester, 
 
     assert hits > 0 and no_retry_sleep == [7.0, 7.0, 7.0]
     warnings = [m for m in logs.messages(logging.WARNING) if "rate limit" in m]
-    assert len(warnings) == 1  # throttled
+    assert len(warnings) == 1  # the first 429 only; the others are counted
     assert "HTTP 429" in warnings[0] and "/search" in warnings[0] and "7.0s" in warnings[0]
-    assert glh._rate_limited == 3
+    assert "only counted" in warnings[0]
+    assert glh.rate_limited == 3
+    assert glh._rate_limit_tail() == "HTTP 429 x3"
+    assert glh.rate_limit_summary() == ("Rate limit: 3 HTTP 429 responses, retried after 21.0s "
+                                        "of waits in total (all workers)")
+
+
+def test_debug_repeats_the_rate_limit_warning(fake_gitlab: FakeGitLab, make_harvester, index, no_retry_sleep):
+    from tests.helpers import capture_logs
+
+    fake_gitlab.add_fault({"match": {"path": "/search$"}, "times": 3,
+                           "response": {"status": 429, "headers": {"Retry-After": "7"}}})
+    glh = make_harvester(workers=1, log_level="DEBUG")
+    glh.rate_limit_warn_interval = 0.0
+    logs = capture_logs(glh)
+    run_search(glh, index, terms=["password"], scan_branches="default")
+    warnings = [m for m in logs.messages(logging.WARNING) if "rate limit" in m]
+    assert len(warnings) == 3
+    assert "3 rate-limited responses so far" in warnings[-1]
+
+
+def test_no_rate_limit_no_summary(make_harvester):
+    glh = make_harvester()
+    assert glh.rate_limited == 0 and glh.rate_limit_summary() is None and glh._rate_limit_tail() == ""
