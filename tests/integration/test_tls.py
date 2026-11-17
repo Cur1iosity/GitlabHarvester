@@ -104,7 +104,7 @@ def test_cli_ca_bundle_and_insecure(fake: FakeGitLab, ca_file: Path, tmp_path: P
     ok = run_cli("-u", fake.url, "-t", fake.token, "-s", "password", "--ca-bundle", str(ca_file),
                  "--session-file", "a.jsonl", cwd=tmp_path)
     assert ok.returncode == 0, ok.stderr
-    assert "Done. Keywords: 1" in ok.stdout
+    assert "Results\n" in ok.stdout and "  terms " in ok.stdout
 
     insecure = run_cli("-u", fake.url, "-t", fake.token, "-s", "password", "--insecure",
                        "--session-file", "b.jsonl", "--index-file", "idx2.jsonl", cwd=tmp_path)

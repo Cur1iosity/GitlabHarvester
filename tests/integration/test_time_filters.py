@@ -86,15 +86,20 @@ def test_active_window_on_an_existing_index(fake_gitlab: FakeGitLab, make_harves
     assert searched == {101, 102}  # activity 06-01T12:00 and 05-20: inside the window
     assert set(session.project_ids()) == {101}  # 102 has no "password"
     err = capsys.readouterr().err
-    assert "2 of 9 projects" in err
-    assert "(skipped: 1 empty, 1 inactive since 2024-05-01, 5 active after 2024-06-02)" in err
+    from tests.helpers import parse_blocks
+
+    plan = parse_blocks(err)["Search plan"]
+    assert plan["projects"] == ["2 of 9"]
+    assert plan["skipped"] == ["1 empty", "1 inactive since 2024-05-01", "5 active after 2024-06-02"]
 
 
 def test_active_before_alone(make_harvester, index, capsys):
     run_search(make_harvester(), index, ["token"], active_before=utc(2024, 6, 2))
     err = capsys.readouterr().err
     # 101 (06-01), 102 (05-20), 105 (02-03) remain; 104 is empty.
-    assert "Search plan: 1 term, 3 of 9 projects" in err
+    from tests.helpers import row
+
+    assert row(err, "Search plan", "projects") == "3 of 9"
     assert "5 active after 2024-06-02" in err
 
 
@@ -129,7 +134,9 @@ def test_file_checks_are_cached_across_terms(fake_gitlab: FakeGitLab, make_harve
     assert len(keys) == len(set(keys))
     assert ("/api/v4/projects/101/repository/commits", "main", "config/settings.py") in keys
     err = capsys.readouterr().err
-    assert "files changed since 2024-03-01" in err and f"{len(keys)} file checks" in err
+    from tests.helpers import row
+
+    assert row(err, "Search plan", "files changed") == "since 2024-03-01" and f"{len(keys)} file checks" in err
 
 
 def test_failed_file_check_keeps_the_hits(fake_gitlab: FakeGitLab, make_harvester, index):

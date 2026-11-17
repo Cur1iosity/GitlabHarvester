@@ -153,8 +153,11 @@ def make_harvester(fake_gitlab: FakeGitLab) -> Callable[..., object]:
 
 @pytest.fixture(autouse=True)
 def _reset_harvester_logger() -> Iterator[None]:
-    """Drop handlers added to the shared harvester logger during a test."""
+    """Drop handlers added to the shared harvester logger during a test (and the status line tail)."""
     yield
+    from glh.utils import terminal_utils
+
+    terminal_utils.STATUS.set_tail(None)
     logger = logging.getLogger("GitlabHarvesterLogger")
     for h in list(logger.handlers):
         logger.removeHandler(h)

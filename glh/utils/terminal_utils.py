@@ -16,10 +16,39 @@ There is one status line at a time, written to stderr:
 
 Console log records go through :meth:`StatusLine.write_line` (see
 ``logging_utils.ConsoleHandler``), so they never get mixed with the status line.
+
+On a terminal, an *overlay* (:meth:`StatusLine.set_overlay`) temporarily takes
+the place of the status line, e.g. a question with a countdown that must not
+stop the run (``--auto-limits``, see ``glh.autolimit``), and a *badge*
+(:meth:`StatusLine.set_badge`) is put in front of it, e.g. ``[Limiter]``. A
+*tail* (:meth:`StatusLine.set_tail`) is appended to it on every redraw and to the
+heartbeat lines off a terminal, e.g. a live ``HTTP 429 x12`` counter.
+
+A *hint* (:meth:`StatusLine.set_hint`) is an extra line in turquoise right above
+the status line, e.g. a tip while the project index is built. Permanent lines
+and log records are written above it, and removing it erases it from the screen,
+so it never stays in the scrollback. It needs a terminal that understands ANSI
+escape sequences (on Windows the console's VT mode is switched on); elsewhere it
+is not shown at all. ``NO_COLOR`` keeps it uncoloured.
+
+Summaries with several facts (the index, the search plan, the results of a
+run) are *blocks* (:func:`format_block`): a title, then one aligned
+``label  value`` row per fact, so nothing has to be read out of a sentence::
+
+    Search plan
+      terms     2
+      projects  5 of 9
+      skipped   1 empty
+                3 inactive since 2024-06-02
+      branches  13
+
+The run journal gets a block as one line (:func:`compact_block`), so it stays
+easy to grep: ``Search plan: terms 2; projects 5 of 9; skipped 1 empty, ...``.
 """
 
 from __future__ import annotations
 
+import os
 import shutil
 import sys
 import threading
@@ -28,6 +57,38 @@ import unicodedata
 from typing import Callable, TextIO
 
 ELLIPSIS = "…"
+HINT_COLOR = "\x1b[38;5;80m"  # turquoise (xterm-256 #5fd7d7)
+RESET = "\x1b[0m"
+_CURSOR_UP_CLEAR = "\x1b[1A\r\x1b[2K"
+
+
+def _enable_windows_vt(stream: TextIO) -> bool:
+    """Switch the Windows console of ``stream`` to VT mode (ANSI escapes); False if impossible."""
+    try:
+        import ctypes
+        import msvcrt
+
+        handle = msvcrt.get_osfhandle(stream.fileno())
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        mode = ctypes.c_uint32()
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return False
+        vt = 0x0004  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        return bool(mode.value & vt) or bool(kernel32.SetConsoleMode(handle, mode.value | vt))
+    except Exception:  # noqa: BLE001 - no console, no ctypes: just no ANSI
+        return False
+
+
+def supports_ansi(stream: TextIO) -> bool:
+    """True if ``stream`` is a terminal that understands ANSI escape sequences."""
+    try:
+        if not stream.isatty():
+            return False
+    except (AttributeError, ValueError, OSError):
+        return False
+    if os.environ.get("TERM") == "dumb":
+        return False
+    return _enable_windows_vt(stream) if os.name == "nt" else True
 
 
 # --------------------------------------------------------------------------- formatting
@@ -119,6 +180,52 @@ def _single_line(text: str) -> str:
     return "".join(" " if unicodedata.category(ch) == "Cc" else ch for ch in text)
 
 
+COMMAND_STYLE = "1;94"  # bold bright blue
+
+
+def style(text: str, codes: str, stream: TextIO) -> str:
+    """``text`` in the ANSI style ``codes`` (e.g. '1;94') on an ANSI terminal without NO_COLOR, else as is."""
+    if os.environ.get("NO_COLOR") or not supports_ansi(stream):
+        return text
+    return f"\x1b[{codes}m{text}{RESET}"
+
+
+# --------------------------------------------------------------------------- blocks
+
+# A block row: a label and its value; a list value continues on the next lines.
+Row = tuple[str, "str | int | list[str]"]
+
+
+def _values(value: "str | int | list[str]") -> list[str]:
+    if isinstance(value, (list, tuple)):
+        return [str(v) for v in value]
+    return [str(value)]
+
+
+def format_block(title: str, rows: "list[Row]") -> list[str]:
+    """
+    A title and aligned ``label  value`` rows; rows with an empty value are left out.
+
+    A list value puts its first item next to the label and the others on
+    their own lines, aligned under it.
+    """
+    rows = [(label, value) for label, value in rows if _values(value) and any(_values(value))]
+    width = max((len(label) for label, _ in rows), default=0)
+    lines = [title]
+    for label, value in rows:
+        values = [v for v in _values(value) if v]
+        lines.append(f"  {label.ljust(width)}  {values[0]}")
+        lines += [f"  {' ' * width}  {v}" for v in values[1:]]
+    return lines
+
+
+def compact_block(title: str, rows: "list[Row]") -> str:
+    """The block as one line, for the run journal: 'Title: label value; label value, value'."""
+    parts = [f"{label} {', '.join(v for v in _values(value) if v)}" for label, value in rows
+             if any(_values(value))]
+    return f"{title}: {'; '.join(parts)}"
+
+
 # --------------------------------------------------------------------------- status line
 
 
@@ -141,9 +248,11 @@ class StatusLine:
             heartbeat_interval: float = 60.0,
             ticker: bool = True,
             clock: Callable[[], float] = time.monotonic,
+            ansi: bool | None = None,
     ) -> None:
         self._stream = stream
         self._interactive = interactive
+        self._ansi = ansi
         self._columns = columns
         self._refresh_interval = refresh_interval
         self._tick_interval = tick_interval
@@ -153,7 +262,18 @@ class StatusLine:
 
         self._lock = threading.RLock()
         self._provider: Callable[[], str] | None = None
+        # Shown instead of the provider's text while set (terminal only).
+        self._overlay: Callable[[], str] | None = None
+        # Put in front of the provider's text, e.g. "[Limiter]".
+        self._badge = ""
+        # Appended to the provider's text (also in heartbeats), e.g. "HTTP 429 x12"; '' = nothing.
+        self._tail: Callable[[], str] | None = None
+        # Turquoise line above the status line (ANSI terminals only).
+        self._hint: str | None = None
+        self._hint_shown = False
         self._listeners: list[Callable[[str], None]] = []
+        # The last permanent output ended with an empty line (blocks don't add another one).
+        self._after_blank = True
         self._shown_width = 0
         self._last_refresh = 0.0
         self._last_heartbeat = 0.0
@@ -176,6 +296,13 @@ class StatusLine:
         except (AttributeError, ValueError, OSError):
             return False
 
+    @property
+    def ansi(self) -> bool:
+        """True when ANSI escapes can be used (hint line): an ANSI terminal."""
+        if self._ansi is None:
+            self._ansi = self.interactive and supports_ansi(self.stream)
+        return bool(self._ansi) and self.interactive
+
     def _width(self) -> int:
         cols = self._columns() if self._columns else shutil.get_terminal_size(fallback=(80, 24)).columns
         # Writing into the last column makes some terminals wrap; stay one cell short.
@@ -195,10 +322,45 @@ class StatusLine:
             self._write(self.stream, "\r" + " " * self._shown_width + "\r")
             self._shown_width = 0
 
-    def _draw(self) -> None:
-        if self._provider is None:
+    def _show_hint(self) -> None:
+        """Lock held, status line erased: write the hint line; the status line goes below it."""
+        if self._hint is None or self._hint_shown or not self.ansi:
             return
-        text = fit_width(_single_line(self._provider()), self._width())
+        text = fit_width(_single_line(self._hint), self._width())
+        colored = text if os.environ.get("NO_COLOR") else f"{HINT_COLOR}{text}{RESET}"
+        self._write(self.stream, colored + "\n")
+        self._hint_shown = True
+
+    def _hide_hint(self) -> None:
+        """Lock held, status line erased: clear the hint line and move back onto it."""
+        if self._hint_shown:
+            self._write(self.stream, _CURSOR_UP_CLEAR)
+            self._hint_shown = False
+
+    def _text(self) -> str | None:
+        """What the line shows now: the overlay, else the badge and the provider's text."""
+        if self._overlay is not None:
+            return self._overlay()
+        if self._provider is None:
+            return None
+        text = self._with_tail(self._provider())
+        return f"{self._badge} {text}" if self._badge else text
+
+    def _with_tail(self, text: str) -> str:
+        if self._tail is not None:
+            try:
+                tail = self._tail()
+            except Exception:  # noqa: BLE001 - the status line must never break the run
+                tail = ""
+            if tail:
+                return f"{text} | {tail}"
+        return text
+
+    def _draw(self) -> None:
+        raw = self._text()
+        if raw is None:
+            return
+        text = fit_width(_single_line(raw), self._width())
         width = display_width(text)
         # Pad with spaces to overwrite the remainder of a longer previous line.
         self._write(self.stream, "\r" + text + " " * max(self._shown_width - width, 0))
@@ -217,16 +379,76 @@ class StatusLine:
         self._ensure_ticker()
 
     def detach(self) -> None:
-        """Remove the status line."""
+        """Remove the status line (an overlay stays)."""
         with self._lock:
+            self._provider = None
+            if self.interactive:
+                if self._overlay is not None:
+                    self._draw()
+                else:
+                    self._erase()
+
+    def set_overlay(self, provider: Callable[[], str] | None) -> None:
+        """
+        Show ``provider()`` instead of the status line until called with None.
+
+        Terminal only: elsewhere nothing is drawn. The ticker redraws it every
+        second, so a countdown in it keeps moving.
+        """
+        with self._lock:
+            self._overlay = provider
+            if self.interactive:
+                if provider is not None or self._provider is not None:
+                    self._draw()
+                else:
+                    self._erase()
+        if provider is not None:
+            self._ensure_ticker()
+
+    def set_badge(self, badge: str) -> None:
+        """Put ``badge`` in front of the status line ('' removes it)."""
+        with self._lock:
+            if badge == self._badge:
+                return
+            self._badge = badge
+            if self.interactive and (self._provider is not None or self._overlay is not None):
+                self._draw()
+
+    @property
+    def badge(self) -> str:
+        return self._badge
+
+    def set_hint(self, text: str | None) -> None:
+        """
+        Show ``text`` in turquoise on its own line above the status line until
+        called with None, which erases it. Shown only on ANSI terminals.
+        """
+        with self._lock:
+            if text == self._hint:
+                return
             if self.interactive:
                 self._erase()
-            self._provider = None
+                self._hide_hint()
+            self._hint = text
+            if self.interactive:
+                self._show_hint()
+                self._draw()
+
+    @property
+    def hint(self) -> str | None:
+        return self._hint
+
+    def set_tail(self, provider: Callable[[], str] | None) -> None:
+        """Append ``provider()`` (when not empty) to the status line; None removes it."""
+        with self._lock:
+            self._tail = provider
+            if self.interactive and (self._provider is not None or self._overlay is not None):
+                self._draw()
 
     def refresh(self, *, force: bool = False) -> None:
         """Redraw the status line (throttled unless ``force``)."""
         with self._lock:
-            if self._provider is None or not self.interactive:
+            if (self._provider is None and self._overlay is None) or not self.interactive:
                 return
             if force or self._clock() - self._last_refresh >= self._refresh_interval:
                 self._draw()
@@ -242,8 +464,11 @@ class StatusLine:
             interactive = self.interactive
             if interactive:
                 self._erase()
+                self._hide_hint()  # the permanent line goes above the hint
             self._write(stream if stream is not None else self.stream, text + "\n")
+            self._after_blank = text == ""
             if interactive:
+                self._show_hint()
                 self._draw()
         if stream is None:
             # Permanent progress lines (plan, phase summaries) also go to listeners,
@@ -253,6 +478,29 @@ class StatusLine:
                     listener(text)
                 except Exception:  # noqa: BLE001 - a broken listener must not break output
                     pass
+
+    def write_block(self, title: str, rows: "list[Row]") -> None:
+        """
+        A block (:func:`format_block`) of permanent lines after an empty line;
+        listeners (the run journal) get it as one line (:func:`compact_block`).
+        """
+        with self._lock:
+            lines = ([] if self._after_blank else [""]) + [*format_block(title, rows), ""]
+            self._after_blank = True
+            interactive = self.interactive
+            if interactive:
+                self._erase()
+                self._hide_hint()
+            self._write(self.stream, "\n".join(lines) + "\n")
+            if interactive:
+                self._show_hint()
+                self._draw()
+        compact = compact_block(title, rows)
+        for listener in list(self._listeners):
+            try:
+                listener(compact)
+            except Exception:  # noqa: BLE001 - a broken listener must not break output
+                pass
 
     def add_listener(self, listener: Callable[[str], None]) -> None:
         """Also pass every permanent status line (not log records) to ``listener``."""
@@ -284,13 +532,15 @@ class StatusLine:
     def tick(self) -> None:
         """Periodic update: redraw on a terminal, heartbeat line otherwise."""
         with self._lock:
+            if self.interactive:
+                if self._provider is not None or self._overlay is not None:
+                    self._draw()
+                return
             if self._provider is None:
                 return
-            if self.interactive:
-                self._draw()
-            elif self._clock() - self._last_heartbeat >= self._heartbeat_interval:
+            if self._clock() - self._last_heartbeat >= self._heartbeat_interval:
                 self._last_heartbeat = self._clock()
-                self._write(self.stream, _single_line(self._provider()) + "\n")
+                self._write(self.stream, _single_line(self._with_tail(self._provider())) + "\n")
 
 
 STATUS = StatusLine()

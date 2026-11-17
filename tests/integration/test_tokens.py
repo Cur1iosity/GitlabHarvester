@@ -66,8 +66,10 @@ def test_an_invalid_extra_token_fails_fast(fake_gitlab: FakeGitLab, make_harvest
 
 
 def test_an_invalid_first_token_still_fails(fake_gitlab: FakeGitLab, make_harvester):
-    with pytest.raises(gitlab.exceptions.GitlabAuthenticationError):
+    with pytest.raises(GitlabHarvesterError, match=r"Token #1 of 2 failed to authenticate .*HTTP 401 Unauthorized"):
         make_harvester(tokens=["nope-token", "dev-token"])
+    with pytest.raises(GitlabHarvesterError, match=r"^The token failed to authenticate .*read_api scope"):
+        make_harvester(token="nope-token")
 
 
 # --------------------------------------------------------------------------- search

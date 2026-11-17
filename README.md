@@ -60,7 +60,7 @@ config files:
 <p align="center">
   <a href="docs/USE_CASES.md">
     <img src="docs/assets/use-cases.svg"
-         alt="Use cases at a glance: gitlab-harvester branches into scenarios from docs/USE_CASES.md (search terms, only some files, keep the files, project inventory, branches and forks, fresh findings, speed and rate limits, several tokens, reports, config file), each with its main flags; shortcuts such as -b, --time-after and --rpm show what they expand to"
+         alt="Use cases at a glance: gitlab-harvester branches into scenarios from docs/USE_CASES.md (search terms, only some files, keep the files in one ZIP, every file by name without a term, only some projects, project inventory, branches and forks, fresh findings, speed and rate limits, several tokens, reports, config file), each with its main flags; shortcuts such as -b, --time-after and --rpm show what they expand to"
          width="900">
   </a>
 </p>
@@ -73,16 +73,19 @@ config files:
 | `--forks include\|skip\|branch-diff\|all-branches` | how forks are handled |
 | `--time-after DATE`, `--time-before DATE` | limit the index, its projects and the files with hits to a time window |
 | `--started-from 2024-06-01` | search only indexed projects with activity since the date |
-| `--filename '*.env'`, `--extension py` | search only files with this name (exact, or a mask with `*`) or extension |
+| `--project-filter k8s,infra/*` | search only the indexed projects whose path matches (substring or mask) |
+| `--filename '*.env'`, `--extension py` | search only files with this name (exact, or a mask with `*`) or extension; without a term, collect every such file |
 | `--download-files`, `--download-max-size 10M` | save every file with hits to `<term>/files/` for offline analysis |
 | `-t "tok1;tok2"`, `--token-file FILE` | several tokens run in parallel, each with its own workers and rate-limit budget |
 | `-w, --workers N` | parallel API requests per token, for instances without rate limits |
 | `--rpm N`, `--index-rpm N`, `--search-rpm N` | requests per minute per worker: all, non-search, search |
+| `-m find-limits`, `--auto-limits` | *experimental*: measure the API rate limits and get `--workers`/`--*-rpm` for them; during a search, propose lower limits after HTTP 429 |
 | `--jitter 0.01-0.05` | random delay before every request (seconds, or `10ms-50ms`) |
 | `-A STRING`, `--user-agent-file FILE` | fixed User-Agent, or a random one from the file for every request |
 | `-m dump-index`, `--dump-projects` | build or rebuild the project index |
 | `--session NAME`, `--resume` | name a session and continue it later |
 | `--post-process dedup,convert`, `--final-only` | deduplicate and convert the session right after the search |
+| `--to-zip` | pack the run's results (session, term files, downloaded files) into `<session>.zip` |
 | `-c, --config FILE` | read options from an INI file ([config.example.ini](config.example.ini)) |
 
 See [docs/usage.md](docs/usage.md) for every option, branch and fork strategies, and the output formats,

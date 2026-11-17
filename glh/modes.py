@@ -5,6 +5,7 @@ Mode dispatcher for GitlabHarvester.
 This module maps CLI arguments to concrete workflows:
 - search: ensure index, scan terms, write session JSONL
 - dump-index: rebuild index JSONL
+- find-limits: measure the API rate limits and print settings for them
 - dedup: remove duplicates from session output
 - convert: convert JSONL -> JSON
 
@@ -13,17 +14,21 @@ The dispatcher is intentionally thin; core logic lives in GitlabHarvester and po
 
 from __future__ import annotations
 
+import contextlib
 import os
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from urllib.parse import urlparse
 
-from glh import GitlabHarvester, ratelimit, tokens, user_agents
+from glh import GitlabHarvester, archive, limits, ratelimit, tokens, user_agents
+from glh.autolimit import LimitAdvisor, LimiterConsole
 from glh.exceptions import GitlabHarvesterError
 from glh.cli import CliArgs, _get_version
 from glh.downloads import FileDownloader, format_size
+from glh.filefilter import FileFilter
 from glh.output import OutputLayout, SessionOutput
 from glh.planner import ScanOptions, TimeWindow, parse_timestamp
 from glh.postprocess.convert import convert_jsonl_to_json
@@ -109,6 +114,29 @@ def _format_age(seconds: float) -> str:
     return f"{int(seconds // 86400)} days ago"
 
 
+def index_rows(path: str | Path, meta: dict[str, Any], projects: int,
+               now: datetime | None = None) -> list[terminal_utils.Row]:
+    """The rows of the 'Index' block: which index a search uses and how current it is."""
+    built = parse_timestamp(meta.get("timestamp_utc"))
+    if built is None:
+        when = "unknown"
+    else:
+        built_utc = built.astimezone(UTC)
+        age = _format_age(((now or datetime.now(UTC)) - built_utc).total_seconds())
+        when = f"{built_utc:%Y-%m-%d %H:%M:%S} UTC ({age})"
+    window = TimeWindow(parse_timestamp(meta.get("last_activity_after")),
+                        parse_timestamp(meta.get("last_activity_before")))
+    return [
+        ("file", str(path)),
+        ("built", when),
+        ("projects", f"{projects:,}"),
+        ("branches", str(meta["branches"]) if meta.get("branches") is not None else ""),
+        ("active", f"projects active {window.describe()}" if window else ""),
+        ("status", "INCOMPLETE: listing failed; rebuild with --dump-projects"
+         if meta.get("is_completed") is False else ""),
+    ]
+
+
 def describe_index(path: str | Path, meta: dict[str, Any], projects: int, now: datetime | None = None) -> str:
     """
     One line about the index a search uses, so the user can judge how current it is.
@@ -141,6 +169,42 @@ def _report(message: str) -> None:
     JOURNAL.write(message)
 
 
+def _report_block(title: str, rows: list[terminal_utils.Row]) -> None:
+    """Print a block of results (stdout) after an empty line; the run journal gets it as one line."""
+    print()
+    for line in terminal_utils.format_block(title, rows):
+        print(line)
+    JOURNAL.write(terminal_utils.compact_block(title, rows))
+
+
+class _Summary:
+    """The 'Results' block of a run, filled while it goes on and printed at the end."""
+
+    def __init__(self, title: str = "Results") -> None:
+        self.title = title
+        self.rows: list[terminal_utils.Row] = []
+        self.notes: list[str] = []  # lines after the block (what to do next)
+
+    def add(self, label: str, value: Any) -> None:
+        self.rows.append((label, value))
+
+    def note(self, text: str) -> None:
+        self.notes.append(text)
+
+    def report(self) -> None:
+        if self.rows:
+            _report_block(self.title, self.rows)
+        for note in self.notes:
+            _report(note)
+
+
+def _rate_limit_row(glh: GitlabHarvester, summary: _Summary) -> None:
+    """The HTTP 429 count of the run (counted, not logged one by one), if any; clears the status counter."""
+    terminal_utils.STATUS.set_tail(None)
+    if (text := glh.rate_limit_summary()) is not None:
+        summary.add("rate limit", text.removeprefix("Rate limit: "))
+
+
 def _when(after: datetime | None, before: datetime | None) -> str | None:
     window = TimeWindow(after, before)
     return window.describe() if window else None
@@ -159,7 +223,7 @@ def _describe_token_source(args: CliArgs) -> str | None:
 def _describe_options(args: CliArgs) -> str:
     """The settings that shape a run, for the run journal (never the token)."""
     opts: dict[str, Any] = {}
-    if args.mode in ("search", "dump-index"):
+    if args.mode in ("search", "dump-index", "find-limits"):
         opts.update({
             "tls": "UNVERIFIED (--insecure)" if args.insecure else (f"ca-bundle {args.ca_bundle}" if args.ca_bundle else "verified"),
             "index-file": args.index_file or "(default)",
@@ -173,6 +237,13 @@ def _describe_options(args: CliArgs) -> str:
             "user-agent": (f"file {args.user_agent_file}" if args.user_agent_file
                            else (repr(args.user_agent) if args.user_agent else "python-gitlab")),
             "index-active": _when(args.index_active_after, args.index_active_before),
+            "auto-limits": args.auto_limits or None,
+        })
+    if args.mode == "find-limits" or args.auto_limits:
+        opts.update({
+            "probe-apis": ",".join(args.probe_apis) or "(auto)",
+            "probe-max": args.probe_max,
+            "probe-margin": args.probe_margin,
         })
     if args.mode == "search":
         if args.search:
@@ -191,6 +262,8 @@ def _describe_options(args: CliArgs) -> str:
             "file-changed": _when(args.file_changed_after, args.file_changed_before),
             "filename": args.filename,
             "extension": args.extension,
+            "project-filter": ",".join(args.project_filter) or None,
+            "file-listing": args.file_listing if not (args.search or args.terms_file or args.terms) else None,
             "download-files": args.download_files or None,
             "download-max-size": (format_size(args.download_max_size) if args.download_max_size else "no limit")
             if args.download_files else None,
@@ -199,13 +272,14 @@ def _describe_options(args: CliArgs) -> str:
             "output-separated": args.output_separated or None,
             "post-process": ",".join(args.post_process) or None,
             "final-only": args.final_only if args.post_process else None,
+            "to-zip": args.to_zip or None,
         })
     if args.mode in ("dedup", "convert"):
         opts.update({"input-file": args.input_file, "output-file": args.output_file})
     return "Options: " + ", ".join(f"{k}={v}" for k, v in opts.items() if v is not None)
 
 
-def run_mode(args: CliArgs) -> None:
+def run_mode(args: CliArgs, argv: list[str] | None = None) -> None:
     """
     Dispatch execution based on args.mode.
 
@@ -216,10 +290,12 @@ def run_mode(args: CliArgs) -> None:
     started = time.perf_counter()
     if args.log_file:
         JOURNAL.open(args.log_file)
-        url = f", url={args.url}" if args.url and args.mode in ("search", "dump-index") else ""
+        url = f", url={args.url}" if args.url and args.mode in ("search", "dump-index", "find-limits") else ""
         config = f", config={args.config}" if args.config else ""
         JOURNAL.write(f"Run started: gitlab-harvester {_get_version()}, mode={args.mode}{url}{config}, "
                       f"cwd={Path.cwd()}")
+        if argv is not None:
+            JOURNAL.write("Command: " + " ".join(["gitlab-harvester", *tokens.mask_argv(argv)]))
         options = _describe_options(args)
         if options != "Options: ":
             JOURNAL.write(options)
@@ -229,6 +305,8 @@ def run_mode(args: CliArgs) -> None:
                 _run_search(args)
             case "dump-index":
                 _run_dump_index(args)
+            case "find-limits":
+                _run_find_limits(args)
             case "dedup":
                 _run_dedup(args)
             case "convert":
@@ -280,6 +358,7 @@ def _mk_harvester(args: CliArgs) -> GitlabHarvester:
         "log_level": args.log_level,
         "log_file": args.log_file,
         "ssl_verify": False if args.insecure else (args.ca_bundle or True),
+        "adjustable_limits": args.auto_limits,
     }
     if args.proxy:
         kwargs["proxy"] = args.proxy
@@ -290,47 +369,226 @@ def _mk_harvester(args: CliArgs) -> GitlabHarvester:
         raise SystemExit(str(e)) from None
 
 
+def index_hint(index_file: str, *, mode: str, rebuild: bool) -> str:
+    """The tip shown while the project index is built (see _building_index)."""
+    if mode == "dump-index":
+        return (f"Tip: searches reuse this index: run them from this directory, or pass "
+                f"--index-file {index_file} (no --dump-projects).")
+    if rebuild:
+        return (f"Tip: --dump-projects rebuilds {index_file}; without it, the next searches reuse "
+                f"the index (--index-file FILE picks another one).")
+    return (f"Tip: next time this index is reused: --index-file {index_file} (found automatically "
+            f"from this directory; --dump-projects rebuilds it).")
+
+
+@contextlib.contextmanager
+def _building_index(args: CliArgs, glh: GitlabHarvester, *, mode: str) -> Iterator[None]:
+    """While the index is built (not when an existing one is reused): the reuse tip above the status line."""
+    index_file = _index_path(args, glh)
+    rebuild = mode == "dump-index" or args.dump_projects
+    if not (rebuild or not os.path.exists(index_file)):
+        yield
+        return
+    terminal_utils.STATUS.set_hint(index_hint(index_file, mode=mode, rebuild=rebuild and mode != "dump-index"))
+    try:
+        yield
+    finally:
+        terminal_utils.STATUS.set_hint(None)
+
+
 def _run_dump_index(args: CliArgs) -> None:
     """Rebuild the Instance Project Index and write to disk."""
     glh = _mk_harvester(args)
+    console = _start_auto_limits(args, glh, (limits.INDEX,)) if args.auto_limits else None
+    try:
+        with _building_index(args, glh, mode="dump-index"):
+            index_file = glh.build_project_index(
+                per_page=args.batch_size,
+                filename=args.index_file,
+                enforce_dump=True,
+                branches=args.index_branches,
+                branches_per_page=args.branches_per_page,
+                last_activity_after=args.index_active_after,
+                last_activity_before=args.index_active_before,
+            )
+        summary = _Summary()
+        summary.add("index", str(index_file))
+        _rate_limit_row(glh, summary)
+    finally:
+        limiter = _stop_auto_limits(console)
+    summary.rows += limiter
+    summary.report()
 
-    index_file = glh.build_project_index(
-        per_page=args.batch_size,
-        filename=args.index_file,
-        enforce_dump=True,
-        branches=args.index_branches,
-        branches_per_page=args.branches_per_page,
-        last_activity_after=args.index_active_after,
-        last_activity_before=args.index_active_before,
-    )
-    _report(f"Project index saved to: {index_file}")
+
+# --------------------------------------------------------------------------- rate limits
+
+
+def _index_path(args: CliArgs, glh: GitlabHarvester) -> str:
+    """The index file a search would use (same default name as build_project_index)."""
+    return args.index_file or f"{glh.get_instance_id()}_project_index.jsonl"
+
+
+def _current_settings(args: CliArgs) -> limits.Settings:
+    return limits.Settings(workers=args.workers, index_rpm=args.index_rpm, search_rpm=args.search_rpm)
+
+
+def _measure(args: CliArgs, glh: GitlabHarvester, kinds: tuple[str, ...]
+             ) -> tuple[limits.LimitFinder, dict[str, limits.ProbeResult], limits.Recommendation]:
+    """Probe ``kinds``, print what was found and the recommended settings."""
+    terminal_utils.STATUS.write_line(limits.EXPERIMENTAL_NOTE)
+    finder = limits.LimitFinder(glh, max_requests=args.probe_max, margin=args.probe_margin)
+    project = finder.project_for_search(_index_path(args, glh)) if limits.SEARCH in kinds else None
+    terminal_utils.STATUS.write_line(
+        f"Measuring rate limits of {', '.join(limits.API_NAMES[k] for k in kinds)} "
+        f"(up to {args.probe_max:,} requests each; this provokes HTTP 429 on purpose)")
+    results = finder.find(kinds, project_id=project)
+    recommendation = finder.recommend(results, current=_current_settings(args), explicit=args.explicit_limits)
+
+    rows: list[terminal_utils.Row] = [(results[kind].api, results[kind].lines()) for kind in kinds]
+    if note := finder.token_note():
+        rows.append(("tokens", note.removeprefix("Tokens: ")))
+    _report_block(f"Rate limits at {args.url} (token #1)", rows)
+
+    def rpm(value: int) -> str:
+        return f"{value} per worker" if value else "0 (no limit)"
+
+    kept = set(recommendation.kept)
+    _report_block("Suggested settings", [
+        ("workers", f"{recommendation.workers}" + (" (kept as set)" if "workers" in kept else "")),
+        ("index-rpm", rpm(recommendation.index_rpm) + (" (kept as set)" if "index-rpm" in kept else "")),
+        ("search-rpm", rpm(recommendation.search_rpm) + (" (kept as set)" if "search-rpm" in kept else "")),
+        ("notes", list(recommendation.notes)),
+    ])
+    return finder, results, recommendation
+
+
+def _confirm(question: str) -> bool:
+    """Ask a yes/no question on the terminal (Enter = yes)."""
+    sys.stderr.write(question)
+    sys.stderr.flush()
+    try:
+        answer = sys.stdin.readline()
+    except (OSError, ValueError):
+        return False
+    if not answer:
+        return False
+    return answer.strip().lower() in ("", "y", "yes", "д", "да", "н")
+
+
+def _start_auto_limits(args: CliArgs, glh: GitlabHarvester, kinds: tuple[str, ...]) -> LimiterConsole:
+    """
+    --auto-limits before a run: measure ``kinds`` (unless every option they
+    need was set explicitly), offer the settings, wait for the probed windows to
+    reset, then watch the run for HTTP 429 (returned console; stop it after the run).
+    """
+    kinds = tuple(k for k in kinds if k in (args.probe_apis or kinds))
+    needed = {"workers", *(f"{k}_rpm" for k in kinds)}
+    if not kinds or needed <= args.explicit_limits:
+        terminal_utils.STATUS.write_line(limits.EXPERIMENTAL_NOTE)
+        terminal_utils.STATUS.write_line(
+            "Auto limits: --workers and the rpm options are set, nothing to measure; "
+            "watching the run for HTTP 429.")
+    else:
+        finder, results, recommendation = _measure(args, glh, kinds)
+        current = _current_settings(args)
+        if recommendation.differs_from(current):
+            if not (sys.stdin.isatty() and sys.stderr.isatty()):
+                _report_block("Next run", [("command", recommendation.command(sys.argv[1:]))])
+                raise SystemExit("--auto-limits: no terminal to confirm the settings. "
+                                 "Run the command above (or add the suggested options) to start.")
+            if _confirm(f"Apply {recommendation.describe()} to this run? [Y/n] "):
+                glh.set_rate_limits(workers=recommendation.workers, index_rpm=recommendation.index_rpm,
+                                    search_rpm=recommendation.search_rpm)
+                terminal_utils.STATUS.write_line(f"Auto limits: applied {recommendation.describe()}")
+            else:
+                terminal_utils.STATUS.write_line(
+                    f"Auto limits: kept --workers {current.workers} --index-rpm {current.index_rpm} "
+                    f"--search-rpm {current.search_rpm}; next time: {' '.join(recommendation.flags())}")
+        finder.wait_cooldown(results.values())
+    advisor = LimitAdvisor(glh, margin=args.probe_margin).attach()
+    return LimiterConsole(advisor, logger=glh.logger).start()
+
+
+def _stop_auto_limits(console: LimiterConsole | None) -> list[terminal_utils.Row]:
+    """End the run's limit watch; rows about what it did, for the 'Results' block."""
+    if console is None:
+        return []
+    console.stop()
+    advisor = console.advisor
+    advisor.detach()
+    harvester = advisor.harvester
+    lines = []
+    if advisor.applied:
+        lines.append(f"limits changed during the run; next run: --workers {harvester.workers} "
+                     f"--index-rpm {harvester.index_rpm} --search-rpm {harvester.search_rpm}")
+    if (pending := advisor.pending) is not None:
+        lines.append(f"proposal not applied: {pending.flags()} ({pending.describe()})")
+    return [("limiter", lines)] if lines else []
+
+
+def _run_find_limits(args: CliArgs) -> None:
+    """Measure the rate limits (-m find-limits) and print the settings to use; no search."""
+    glh = _mk_harvester(args)
+    kinds = args.probe_apis or limits.KINDS
+    _, results, recommendation = _measure(args, glh, kinds)
+    reset = max((r.finished_at + r.cooldown - time.monotonic() for r in results.values() if r.limited),
+                default=0.0)
+    _report_block("Next run", [
+        ("command", recommendation.command(sys.argv[1:])),
+        ("config file", recommendation.ini().split("\n")),
+        ("budget back", f"in about {format_duration(reset)} (the probe used it up)" if reset > 0 else ""),
+    ])
 
 
 def _run_search(args: CliArgs) -> None:
     """Run term search workflow and write a session JSONL file."""
     glh = _mk_harvester(args)
-    stamp = _run_stamp()
-
     keywords = _load_keywords(search=args.search, terms_file=args.terms_file, terms=args.terms)
+    files_only = False
+    if not keywords and (args.filename or args.extension):
+        # No term: collect the files by name. The filter string is the session term.
+        keywords = [FileFilter(args.filename, args.extension).query("").strip()]
+        files_only = True
     if not keywords:
-        raise SystemExit("Nothing to do: provide --search, --terms-file or `terms` in the config file.")
+        raise SystemExit("Nothing to do: provide --search, --terms-file or `terms` in the config file "
+                         "(or only --filename/--extension to collect files by name).")
+
+    console = None
+    if args.auto_limits:
+        # The index API is measured only when the index is going to be built.
+        build_index = args.dump_projects or not os.path.exists(_index_path(args, glh))
+        console = _start_auto_limits(args, glh, limits.KINDS if build_index else (limits.SEARCH,))
+    summary = _Summary()
+    try:
+        _search(args, glh, keywords, summary, files_only=files_only)
+    finally:
+        limiter = _stop_auto_limits(console)
+    summary.rows += limiter
+    summary.report()
+
+
+def _search(args: CliArgs, glh: GitlabHarvester, keywords: list[str], summary: _Summary, *,
+            files_only: bool = False) -> None:
+    """The search workflow proper (see _run_search)."""
+    stamp = _run_stamp()
     # The full supplied list (before --resume drops already-done terms): the
     # --output-separated split names and covers files for every term.
     all_keywords = list(keywords)
 
-    index_file = glh.build_project_index(
-        per_page=args.batch_size,
-        filename=args.index_file,
-        enforce_dump=args.dump_projects,
-        branches=args.index_branches,
-        branches_per_page=args.branches_per_page,
-        last_activity_after=args.index_active_after,
-        last_activity_before=args.index_active_before,
-    )
+    with _building_index(args, glh, mode="search"):
+        index_file = glh.build_project_index(
+            per_page=args.batch_size,
+            filename=args.index_file,
+            enforce_dump=args.dump_projects,
+            branches=args.index_branches,
+            branches_per_page=args.branches_per_page,
+            last_activity_after=args.index_active_after,
+            last_activity_before=args.index_active_before,
+        )
 
     data = glh.load_projects_from_file(index_file)
     projects = data.get("projects", [])
-    terminal_utils.STATUS.write_line(describe_index(index_file, data.get("meta") or {}, len(projects)))
+    terminal_utils.STATUS.write_block("Index", index_rows(index_file, data.get("meta") or {}, len(projects)))
     if not projects:
         raise SystemExit(f"Project index is empty: {index_file}")
 
@@ -344,6 +602,9 @@ def _run_search(args: CliArgs) -> None:
         file_changed_before=args.file_changed_before,
         filename=args.filename,
         extension=args.extension,
+        project_filter=args.project_filter,
+        files_only=files_only,
+        file_listing=args.file_listing,
     )
 
     session_path = _resolve_session_path(glh.get_instance_id(), args.session, args.session_file, stamp)
@@ -376,9 +637,10 @@ def _run_search(args: CliArgs) -> None:
                 index_file=str(index_file),
                 batch_size=args.batch_size,
                 tokens=len(glh.tokens),
-                workers=args.workers,
-                index_rpm=args.index_rpm,
-                search_rpm=args.search_rpm,
+                workers=glh.workers,
+                index_rpm=glh.index_rpm,
+                search_rpm=glh.search_rpm,
+                auto_limits=args.auto_limits,
                 jitter=list(args.jitter),
                 user_agent=args.user_agent,
                 user_agent_file=args.user_agent_file,
@@ -392,11 +654,15 @@ def _run_search(args: CliArgs) -> None:
                 file_changed_after=args.file_changed_after.isoformat() if args.file_changed_after else None,
                 file_changed_before=args.file_changed_before.isoformat() if args.file_changed_before else None,
                 **options.file_filter.to_meta(),
+                project_filter=list(args.project_filter) or None,
+                files_only=files_only,
+                file_listing=args.file_listing if files_only else None,
                 keywords_count=len(keywords),
                 output_separated=args.output_separated,
                 download_files=args.download_files,
                 download_max_size=args.download_max_size if args.download_files else None,
                 post_process=list(args.post_process),
+                to_zip=args.to_zip,
                 final_only=args.final_only,
             )
 
@@ -418,65 +684,87 @@ def _run_search(args: CliArgs) -> None:
             timestamp_utc=datetime.now(UTC).isoformat(),
         )
 
-    _report(f"Session saved to: {session_path}")
-    _report(f"Done. Keywords: {len(keywords)} | Hits: {hits} | Search time: {format_duration(search_elapsed)}")
+    summary.add("hits", f"{hits:,}")
+    summary.add("files" if files_only else "terms", keywords[0] if files_only else f"{len(keywords):,}")
+    summary.add("search time", format_duration(search_elapsed))
+    summary.add("session", str(session_path))
     if downloader is not None:
-        _report(f"Downloaded files: {downloader.summary()}")
+        summary.add("downloaded", downloader.summary_lines())
+    _rate_limit_row(glh, summary)
     if incomplete:
-        _report(
-            f"INCOMPLETE: searches failed for {len(incomplete)} of {len(keywords)} terms "
-            f"({', '.join(repr(t) for t in incomplete)}); they are not marked done. "
-            f"Repeat the command with --resume to search them again."
-        )
+        summary.add("INCOMPLETE", [f"searches failed for {len(incomplete)} of {len(keywords)} terms: "
+                                   f"{', '.join(repr(t) for t in incomplete)}", "not marked done"])
+        summary.note("Repeat the command with --resume to search the incomplete terms again.")
+
+    # Files with hits for --to-zip: read from the session before --final-only may delete it.
+    downloaded = list(dict.fromkeys(archive.downloaded_files(session_path))) if args.to_zip else []
 
     # Split before post-processing: --final-only there may delete the session.
-    if args.output_separated:
-        _separate_output(all_keywords, layout)
+    separated = _separate_output(all_keywords, layout, summary) if args.output_separated else []
 
+    processed: list[Path] = []
     if args.post_process:
-        _post_process(args, session_path, keep_session=bool(incomplete))
+        processed = _post_process(args, session_path, summary, keep_session=bool(incomplete))
+
+    if args.to_zip:
+        _zip_results(layout, [session_path, *processed, *separated, *downloaded], summary)
+
+
+def _zip_results(layout: OutputLayout, paths: list[Path | str], summary: _Summary) -> None:
+    """--to-zip: pack this run's results into <dir>/<session>.zip, keeping their layout."""
+    target = archive.archive_path(layout.session_path)
+    terminal_utils.STATUS.write_line(f"Packing the results into {target} ...")
+    started = time.perf_counter()
+    existing = [p for p in paths if Path(p).exists()]  # --final-only removed some on purpose
+    try:
+        result = archive.zip_results(target, layout.root, existing)
+    except OSError as e:
+        raise SystemExit(f"--to-zip failed: {e}. The results are unchanged in {layout.root}.") from None
+    summary.add("archive", f"{result.describe()}, packed in {format_duration(time.perf_counter() - started)}")
+    for path in result.missing:
+        JOURNAL.write(f"Archive: missing, not archived: {path}")
 
 
 def _warn_changed_file_filter(glh: GitlabHarvester, session_path: Path, options: ScanOptions) -> None:
     """
-    --resume with other --filename/--extension than the session's first run:
-    the completed terms were searched in other files, so say so.
+    --resume with other --filename/--extension/--project-filter than the session's
+    first run: the completed terms were searched in other files or projects, so say so.
     """
     meta = load_session_meta(session_path)
     if meta is None:
         return
-    before = {key: meta.get(key) for key in ("filename", "extension")}
-    now = options.file_filter.to_meta()
+    before = {key: meta.get(key) for key in ("filename", "extension", "project_filter")}
+    now = {**options.file_filter.to_meta(), "project_filter": list(options.project_filter) or None}
     if before != now:
         def show(values: dict[str, Any]) -> str:
-            return ", ".join(f"{k} {v}" for k, v in values.items() if v) or "none"
+            return ", ".join(f"{k.replace('_', '-')} {','.join(v) if isinstance(v, list) else v}"
+                             for k, v in values.items() if v) or "none"
         glh.logger.warning(
-            "Resuming %s with other file filters (%s) than it was started with (%s): "
+            "Resuming %s with other filters (%s) than it was started with (%s): "
             "terms already completed were searched with the old filters.",
             session_path, show(now), show(before),
         )
 
 
-def _separate_output(terms: list[str], layout: OutputLayout) -> None:
+def _separate_output(terms: list[str], layout: OutputLayout, summary: _Summary) -> list[Path]:
     """Write each term's hits to <dir>/<term>/<session>.jsonl (--output-separated); needs several terms."""
     if len(terms) < 2:
-        _report("--output-separated ignored: it needs several search terms.")
-        return
+        summary.add("term files", "none: --output-separated needs several terms")
+        return []
     files = split_session_by_term(layout.session_path, terms, layout)
     if not files:
-        _report("Separated output: no hits, no per-term files written.")
-        return
-    shown = (", ".join(f.relative_to(layout.root).as_posix() for f in files) if len(files) <= 10
-             else f"{len(files)} files")
-    _report(f"Separated output: {terminal_utils.plural(len(files), 'term file')} "
-            f"in {layout.root} ({shown})")
+        summary.add("term files", "none: no hits")
+        return []
+    shown = ([f.relative_to(layout.root).as_posix() for f in files] if len(files) <= 10 else [])
+    summary.add("term files", [f"{terminal_utils.plural(len(files), 'file')} in {layout.root}", *shown])
+    return files
 
 
-def _post_process(args: CliArgs, session_path: Path, keep_session: bool = False) -> None:
+def _post_process(args: CliArgs, session_path: Path, summary: _Summary, keep_session: bool = False) -> list[Path]:
     """Run --post-process steps on a finished session (files are deleted only if all steps succeed)."""
     final_only = args.final_only and not keep_session
     if args.final_only and keep_session:
-        _report("--final-only ignored: the search is incomplete, the session is kept for --resume.")
+        summary.note("--final-only ignored: the search is incomplete, the session is kept for --resume.")
     result = run_pipeline(
         session_path,
         args.post_process,
@@ -488,10 +776,10 @@ def _post_process(args: CliArgs, session_path: Path, keep_session: bool = False)
     )
     for note in result.notes:
         JOURNAL.write(f"Post-processing {note}")
-    _report(f"Post-processing: {' -> '.join(str(p) for p in [session_path, *result.outputs])}")
-    if result.removed:
-        _report(f"Removed (--final-only): {', '.join(str(p) for p in result.removed)}")
-    _report(f"Final result: {result.final}")
+    summary.add("post-process", result.details)
+    summary.add("removed", [str(p) for p in result.removed])
+    summary.add("final result", str(result.final))
+    return [p for p in result.outputs if p not in result.removed]
 
 
 def _require_path(value: str | None, *, name: str) -> Path:
@@ -515,8 +803,13 @@ def _run_dedup(args: CliArgs) -> None:
         hash_algo=args.hash_algo,
         normalize=args.normalize_hits,
     )
-    JOURNAL.write(f"Dedup: {input_path} -> {output_path} (kept {stats['kept']} records, "
-                  f"dropped {stats['dropped']} duplicate-only hit records)")
+    _report_block("Dedup", [
+        ("input", str(input_path)),
+        ("output", str(output_path)),
+        ("kept", f"{stats['kept']:,} records"),
+        ("dropped", f"{stats['dropped']:,} duplicate-only hit records"),
+        ("seen-db", stats.get("seen_db") or ""),
+    ])
 
 
 def _run_convert(args: CliArgs) -> None:
@@ -529,4 +822,8 @@ def _run_convert(args: CliArgs) -> None:
         output_path=output_path,
         sort_keys=args.sort_keys,
     )
-    JOURNAL.write(f"Convert: {input_path} -> {output_path} ({count} objects)")
+    _report_block("Convert", [
+        ("input", str(input_path)),
+        ("output", str(output_path)),
+        ("objects", f"{count:,}"),
+    ])

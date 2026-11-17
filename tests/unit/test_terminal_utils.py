@@ -365,3 +365,115 @@ def test_broken_listener_does_not_break_output():
     status.add_listener(lambda text: 1 / 0)
     status.write_line("still printed")
     assert stream.getvalue() == "still printed\n"
+
+
+# --------------------------------------------------------------------------- overlay and badge
+
+
+def test_overlay_replaces_the_status_line_and_badge_prefixes_it():
+    from tests.helpers import FakeStream
+
+    stream = FakeStream(tty=True)
+    status = StatusLine(stream, interactive=True, ticker=False, columns=lambda: 200)
+    status.attach(lambda: "Searching")
+    status.set_badge("[Limiter: L]")
+    assert stream.getvalue().endswith("[Limiter: L] Searching")
+    status.set_overlay(lambda: "[Limiter] Apply? 20s")
+    assert stream.getvalue().rstrip().endswith("[Limiter] Apply? 20s")
+    status.write_line("a log line")
+    assert stream.getvalue().rstrip().endswith("[Limiter] Apply? 20s")  # redrawn after the line
+    status.detach()
+    assert stream.getvalue().rstrip().endswith("[Limiter] Apply? 20s")  # the overlay stays
+    status.set_overlay(None)
+    assert stream.getvalue().endswith("\r")  # erased: nothing left to show
+
+
+def test_overlay_is_never_drawn_off_a_terminal():
+    from tests.helpers import FakeStream
+
+    stream = FakeStream(tty=False)
+    status = StatusLine(stream, interactive=False, ticker=False)
+    status.set_overlay(lambda: "question")
+    status.set_badge("[Limiter]")
+    status.tick()
+    assert stream.getvalue() == ""
+
+
+def test_tail_is_appended_to_the_status_line_and_heartbeats():
+    from tests.helpers import FakeStream
+
+    stream = FakeStream(tty=True)
+    status = StatusLine(stream, interactive=True, ticker=False, columns=lambda: 200)
+    status.attach(lambda: "Searching")
+    count = {"n": 0}
+    status.set_tail(lambda: f"HTTP 429 x{count['n']}" if count["n"] else "")
+    assert stream.getvalue().endswith("Searching")  # empty tail: nothing added
+    count["n"] = 12
+    status.refresh(force=True)
+    assert stream.getvalue().endswith("Searching | HTTP 429 x12")
+    status.set_tail(None)
+    assert stream.getvalue().rstrip().endswith("Searching")
+
+    clock = FakeClock()
+    plain = FakeStream(tty=False)
+    status = StatusLine(plain, interactive=False, ticker=False, heartbeat_interval=60, clock=clock)
+    status.attach(lambda: "Searching")
+    status.set_tail(lambda: "HTTP 429 x3")
+    clock.now += 61
+    status.tick()
+    assert plain.getvalue() == "Searching | HTTP 429 x3\n"
+
+
+# --------------------------------------------------------------------------- hint line
+
+
+def test_hint_is_a_turquoise_line_above_the_status_line_and_is_erased(monkeypatch):
+    from tests.helpers import FakeStream
+
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    stream = FakeStream(tty=True)
+    status = StatusLine(stream, interactive=True, ticker=False, columns=lambda: 200, ansi=True)
+    status.attach(lambda: "Listing projects")
+    status.set_hint("Tip: reuse the index")
+    out = stream.getvalue()
+    assert terminal_utils.HINT_COLOR + "Tip: reuse the index" + terminal_utils.RESET + "\n" in out
+    assert out.endswith("Listing projects")
+    status.write_line("Indexed 9 projects")
+    tail = stream.getvalue()[len(out):]
+    # The hint is cleared, the permanent line takes its place, the hint comes back below it.
+    assert tail.index("\x1b[1A") < tail.index("Indexed 9 projects") < tail.index("Tip: reuse the index")
+    before = len(stream.getvalue())
+    status.set_hint(None)
+    assert "\x1b[1A\r\x1b[2K" in stream.getvalue()[before:] and status.hint is None
+    after = len(stream.getvalue())
+    status.write_line("Listed 19 branches")
+    assert "Tip" not in stream.getvalue()[after:] and "\x1b[" not in stream.getvalue()[after:]
+
+
+def test_hint_without_ansi_or_terminal_is_not_shown():
+    from tests.helpers import FakeStream
+
+    for status in (StatusLine(FakeStream(tty=True), interactive=True, ticker=False, ansi=False),
+                   StatusLine(FakeStream(tty=False), interactive=False, ticker=False, ansi=True)):
+        status.set_hint("Tip")
+        status.write_line("line")
+        status.set_hint(None)
+        assert status.stream.getvalue() == "line\n"
+
+
+def test_no_color_keeps_the_hint_plain(monkeypatch):
+    from tests.helpers import FakeStream
+
+    monkeypatch.setenv("NO_COLOR", "1")
+    stream = FakeStream(tty=True)
+    status = StatusLine(stream, interactive=True, ticker=False, columns=lambda: 200, ansi=True)
+    status.set_hint("Tip")
+    assert stream.getvalue() == "Tip\n"
+
+
+def test_supports_ansi_needs_a_terminal(monkeypatch):
+    from tests.helpers import FakeStream
+
+    assert not terminal_utils.supports_ansi(FakeStream(tty=False))
+    monkeypatch.setenv("TERM", "dumb")
+    assert not terminal_utils.supports_ansi(FakeStream(tty=True))

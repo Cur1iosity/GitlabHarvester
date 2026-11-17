@@ -357,8 +357,11 @@ def test_progress_counts_only_projects_that_are_scanned(fake_gitlab: FakeGitLab,
     searched = {int(r.path.split("/")[4]) for r in fake_gitlab.api_requests("project_search")}
     assert searched == {103, 301}
     out = tty.getvalue()
-    assert ("Search plan: 2 terms, 2 of 9 projects, 4 branches "
-            "(skipped: 1 empty, 3 forks, 3 inactive since 2024-06-02)\n") in out
+    from tests.helpers import parse_blocks
+
+    plan = parse_blocks(out.replace("\r", "\n"))["Search plan"]
+    assert (plan["terms"], plan["projects"], plan["branches"]) == (["2"], ["2 of 9"], ["4"])
+    assert plan["skipped"] == ["1 empty", "3 forks", "3 inactive since 2024-06-02"]
 
     frames = [f.strip() for f in out.split("\r") if "projects (" in f]
     counts = {m.group(2) for f in frames for m in re.finditer(r"(\d+)/(\d+) projects", f)}

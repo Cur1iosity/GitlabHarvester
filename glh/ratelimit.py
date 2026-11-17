@@ -26,6 +26,10 @@ Retries of python-gitlab (HTTP 429) go through the same pacing.
 
 The same adapter also sets the User-Agent (-A/--user-agent, --user-agent-file;
 see ``glh.user_agents``).
+
+Limits can change while a run goes on (``--auto-limits``, see ``glh.autolimit``):
+:meth:`ThrottledAdapter.set_limits` swaps the limiters of a mounted adapter, and
+``limit_session(..., always=True)`` mounts one even when nothing is shaped yet.
 """
 
 from __future__ import annotations
@@ -156,10 +160,26 @@ class ThrottledAdapter(HTTPAdapter):
     def __init__(self, *, index_rpm: int = 0, search_rpm: int = 0, jitter: Jitter = NO_JITTER,
                  user_agents: Sequence[str] = (), rng: random.Random | None = None, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self.index_limiter = _limiter(index_rpm, jitter)
-        self.search_limiter = _limiter(search_rpm, jitter)
+        self.index_limiter: RateLimiter | None = None
+        self.search_limiter: RateLimiter | None = None
+        self.set_limits(index_rpm=index_rpm, search_rpm=search_rpm, jitter=jitter)
         self.user_agents: tuple[str, ...] = tuple(user_agents)
         self._rng = rng or random.Random()
+
+    def set_limits(self, *, index_rpm: int, search_rpm: int, jitter: Jitter = NO_JITTER) -> None:
+        """
+        Replace both limiters (a running request keeps the one it waited on).
+
+        A limiter whose rate and jitter are unchanged is kept, so its spacing
+        carries on without a burst.
+        """
+        def updated(current: RateLimiter | None, rpm: int) -> RateLimiter | None:
+            if current is not None and current.rpm == rpm and current.jitter == jitter:
+                return current
+            return _limiter(rpm, jitter)
+
+        self.index_limiter = updated(self.index_limiter, index_rpm)
+        self.search_limiter = updated(self.search_limiter, search_rpm)
 
     def send(self, request: Any, *args: Any, **kwargs: Any) -> Any:
         limiter = self.search_limiter if is_search_request(request.url or "") else self.index_limiter
@@ -172,13 +192,19 @@ class ThrottledAdapter(HTTPAdapter):
 
 
 def limit_session(session: Any, *, index_rpm: int = 0, search_rpm: int = 0, jitter: Jitter = NO_JITTER,
-                  user_agents: Sequence[str] = ()) -> None:
-    """Mount a fresh :class:`ThrottledAdapter` on ``session`` (no-op when there is nothing to shape)."""
-    if index_rpm <= 0 and search_rpm <= 0 and jitter[1] <= 0 and not user_agents:
-        return
+                  user_agents: Sequence[str] = (), always: bool = False) -> ThrottledAdapter | None:
+    """
+    Mount a fresh :class:`ThrottledAdapter` on ``session`` and return it.
+
+    No-op (None) when there is nothing to shape, unless ``always``: then the
+    adapter is mounted anyway, so its limits can be set later.
+    """
+    if not always and index_rpm <= 0 and search_rpm <= 0 and jitter[1] <= 0 and not user_agents:
+        return None
     adapter = ThrottledAdapter(index_rpm=index_rpm, search_rpm=search_rpm, jitter=jitter, user_agents=user_agents)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
+    return adapter
 
 
 def describe(index_rpm: int, search_rpm: int, jitter: Jitter = NO_JITTER) -> str:

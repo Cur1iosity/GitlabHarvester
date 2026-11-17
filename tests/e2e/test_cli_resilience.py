@@ -19,7 +19,7 @@ import pytest
 from fakegitlab import FakeGitLab
 from tests.conftest import cli_env, kill_process_tree
 from glh.session import load_done_keywords
-from tests.helpers import PASSWORD_HITS_DEFAULT_BRANCH, Session, load_index
+from tests.helpers import PASSWORD_HITS_DEFAULT_BRANCH, Session, load_index, row
 
 
 def gl_args(fake: FakeGitLab) -> list[str]:
@@ -112,7 +112,7 @@ def test_interrupted_session_resumes_remaining_keywords(fake_gitlab: FakeGitLab,
     searched = {r.arg("search") for r in fake_gitlab.api_requests("project_search")}
     assert searched == {"api_key", "FAKE-token"}  # completed keyword is not repeated
     assert fake_gitlab.api_requests("projects") == []  # existing index reused
-    assert "Done. Keywords: 2" in proc2.stdout
+    assert row(proc2.stdout, "Results", "terms") == "2"
 
     s = Session.load(session)
     assert [r.get("type") for r in s.records if r.get("type")] == [
@@ -204,7 +204,8 @@ def test_unreachable_server(run_cli, tmp_path: Path):
     proc = run_cli("-u", f"http://127.0.0.1:{port}", "-t", "x", "-s", "password", "--timeout", "2")
     assert proc.returncode != 0
     # Linux: "Connection refused"; Windows retries SYNs and reports a connect timeout.
-    assert "requests.exceptions.Connect" in proc.stderr
+    assert f"Cannot reach http://127.0.0.1:{port} (Connect" in proc.stderr
+    assert "Traceback" not in proc.stderr
 
 
 def test_partial_failures_still_produce_a_complete_session(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
@@ -251,7 +252,7 @@ def test_flaky_scenario_completes(fake_gitlab: FakeGitLab, run_cli, tmp_path: Pa
     applied = {name for r in fake_gitlab.requests for name in r.faults}
     assert applied == {"projects-rate-limited", "payments-branches-unavailable", "terraform-search-slow",
                        "web-app-search-garbage"}
-    assert "Done." in proc.stdout
+    assert "\nResults\n" in proc.stdout
 
 
 # --------------------------------------------------------------------------- legacy console encodings (Windows)
@@ -285,7 +286,7 @@ def test_search_output_survives_legacy_code_pages(fake_gitlab, encoding, tmp_pat
     assert proc.returncode == 0, err
     assert "Logging error" not in out + err and "UnicodeEncodeError" not in out + err
     assert err.lstrip().startswith("GitlabHarvester v")  # plain banner instead of escaped box characters
-    assert "Done. Keywords: 1 | Hits: 1" in out
+    assert (row(out, "Results", "terms"), row(out, "Results", "hits")) == ("1", "1")
 
 
 # --------------------------------------------------------------------------- failed searches and --resume
@@ -302,7 +303,8 @@ def test_failed_term_is_reported_and_resumed(fake_gitlab: FakeGitLab, run_cli, t
                            "response": {"status": 500, "json": {"message": "500 Internal Server Error"}}})
 
     first = run_cli(*args, check=True)
-    assert "INCOMPLETE: searches failed for 1 of 3 terms ('api_key')" in first.stdout
+    assert row(first.stdout, "Results", "INCOMPLETE").startswith("searches failed for 1 of 3 terms: 'api_key'")
+    assert "Repeat the command with --resume" in first.stdout
     assert "--resume" in first.stdout
     assert "searches FAILED, not marked done" in first.stderr
     session = Session.load(tmp_path / "s.jsonl")
@@ -326,3 +328,13 @@ def test_final_only_keeps_an_incomplete_session(fake_gitlab: FakeGitLab, run_cli
                    "--session-file", "s.jsonl", "--post-process", "dedup,convert", "--final-only", check=True)
     assert "--final-only ignored: the search is incomplete" in proc.stdout
     assert (tmp_path / "s.jsonl").exists() and (tmp_path / "s.deduped.converted.json").exists()
+
+
+def test_rate_limit_is_warned_once_and_counted(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
+    fake_gitlab.add_fault({"match": {"path": "/search$"}, "times": 4,
+                           "response": {"status": 429, "headers": {"Retry-After": "0"}}})
+    proc = run_cli("-u", fake_gitlab.url, "-t", fake_gitlab.token, "-s", "password", "--session", "s",
+                   "--workers", "2", "--log-file", "run.log", check=True)
+    assert (proc.stdout + proc.stderr).count("GitLab rate limit (HTTP 429)") == 1
+    assert row(proc.stdout, "Results", "rate limit").startswith("4 HTTP 429 responses")
+    assert "; rate limit 4 HTTP 429 responses" in (tmp_path / "run.log").read_text(encoding="utf-8")

@@ -195,9 +195,4 @@ def dedup_session_file(
     finally:
         store.close()
 
-    print(f"[dedup] input:  {input_path}")
-    print(f"[dedup] output: {output_path}")
-    print(f"[dedup] kept records: {kept}")
-    print(f"[dedup] dropped empty hit-records: {dropped}")
-    print(f"[dedup] seen-db: {sqlite_path}")
-    return {"kept": kept, "dropped": dropped}
+    return {"kept": kept, "dropped": dropped, "seen_db": str(sqlite_path)}

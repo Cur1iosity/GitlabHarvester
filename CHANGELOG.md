@@ -4,6 +4,103 @@ All notable changes to GitlabHarvester are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.1] - 2026-11-17
+
+### Changed
+
+- **Easier to read output**: the command as typed is echoed right after the banner
+  (bold blue on a terminal; tokens as `<TOKEN>`, a proxy password as `***`), before any
+  warning. The index, the search plan and the results of a run are blocks with one
+  aligned `label  value` row per fact (skip reasons, download details and per-term
+  files one per line) instead of comma-packed sentences; `-m find-limits`,
+  `-m dump-index`, `-m dedup` and `-m convert` report the same way. The run journal
+  gets each block as one greppable line (`Search plan: terms 2; projects 5 of 9; …`)
+  and a new `Command:` line. `dedup`/`convert` no longer print from the library
+  (`dedup_session_file` also returns `seen_db`).
+
+### Fixed
+
+- A wrong token or an unreachable URL ends the run with one clear line instead of a
+  Python traceback: `The token failed to authenticate to <url> (HTTP 401 Unauthorized).
+  Check the token and that it has the read_api scope.` (`Token #1 of N ...` with
+  several tokens) or `Cannot reach <url> (...). Check the URL, the network and --proxy.`
+
+## [1.4.0] - 2026-11-17
+
+### Added
+
+The rate-limit detection below (`-m find-limits`, `--auto-limits`, the `probe-*`
+options) is **experimental**: its behavior, output and options may change in a
+minor release. Runs that use it say so.
+
+- **Find the API rate limits** (experimental): `-m find-limits` measures the limits of the token
+  and prints the `--workers`, `--index-rpm` and `--search-rpm` to use, the command
+  line (the token shown as `<TOKEN>`) and the config file keys. It reads GitLab's
+  `RateLimit-*` headers when they are sent, else sends requests at a growing
+  parallelism until HTTP 429; without `RateLimit-Limit` it waits for the window to
+  reset and counts one full window from its start (the limit and the window
+  length). No 429 within the default budget (search 60, other API 300 requests): it
+  probes deeper, up to `--probe-max` (default 600), to find a higher limit or the
+  real throughput, and notices when more threads stop helping. The suggestion keeps
+  `--probe-margin` (default 0.85) below the limit, picks the workers from the
+  measured latency, and splits the budget over tokens of the same user (GitLab
+  counts most limits per user; tokens are grouped by their `GET /user` id).
+- **`--auto-limits`** (experimental) measures before a search — only the search API when the
+  project index exists, both when it has to be built — and asks on a terminal to
+  apply the settings (elsewhere it prints the command and exits). Options set
+  explicitly are kept; with all of them set nothing is measured. It then waits for
+  the probed windows to reset and **watches the search**: after HTTP 429 it proposes
+  a lower `--search-rpm`/`--index-rpm` per worker without stopping the scan — the
+  question replaces the status line for 20 seconds, `Y` applies the new pace to every
+  worker at once, `N` drops it, no answer leaves `[Limiter: L]` in the status line
+  and `L` shows the proposal again. Without a terminal proposals are logged. The run
+  ends with the limits to start the next run with.
+- `-m dump-index --auto-limits` measures the other API only.
+- **Every file by name, without a term**: `--filename`/`--extension` with no
+  `-s`/`-f`/`terms` collect every matching file (one hit per file; downloaded with
+  `--download-files`), e.g. all `*.env` files of the instance for offline analysis.
+  The session term is the filter string (`filename:*.env`). `--file-listing` picks
+  how the files of a branch are found: `search` (the search API with the filters
+  only, for backends that take it), `tree` (the repository tree API: any GitLab) or
+  `auto` (default: search, falling back to the tree per branch until the search has
+  proven itself or rejected the query). New `file-listing` key in `config.example.ini`;
+  the session `meta` has `files_only` and `file_listing`.
+- **Search only some projects of the index**: `--project-filter PATTERNS`
+  (comma-separated, case-insensitive) keeps the projects whose
+  `group/subgroup/project` path contains a pattern (`k8s`) or matches a mask
+  (`infra/*`, `*-k8s`). It filters the existing index at search time — no API
+  requests for the others, the index stays complete — and the search plan counts
+  them (`N not matching --project-filter …`). Stored in the session `meta`; `--resume`
+  with another filter warns. New `project-filter` key in `config.example.ini`.
+- **Index reuse tip**: while the project index is built, a turquoise line above the
+  status line says how to reuse it next time (`--index-file …`; `--dump-projects`
+  rebuilds) and disappears when the index is done. Shown on ANSI terminals only
+  (VT mode is switched on in the Windows console); `NO_COLOR` keeps it plain.
+- **All results in one archive**: `--to-zip` packs the results of a search run into
+  `<session>.zip` next to the session, with the same layout inside — the session,
+  the `--post-process` outputs, the `--output-separated` term files and the
+  `--download-files` files (`<term>/files/…`). Only this session's files go in (the
+  downloaded files are those its hits point to, earlier runs before `--resume`
+  included), not the rest of `results/`. It runs last (with `--final-only`: the final
+  file and the downloads), streams one file at a time (ZIP64), writes
+  `<session>.zip.part` and renames it when complete, and keeps the original files.
+  New `to-zip` key in `config.example.ini`; the session `meta` records `to_zip`.
+- New options in `config.example.ini` (`[limits]`): `auto-limits`, `probe-apis`,
+  `probe-max`, `probe-margin`. `workers` is empty there now (still 1 by default), so
+  `--auto-limits` may choose it.
+- Fake GitLab: per-user rate limits (`rate_limits` in a scenario,
+  `FakeGitLab.set_rate_limits`, `/__admin/rate-limits`) with GitLab's 429 headers,
+  and a `ratelimited` scenario.
+
+### Changed
+
+- HTTP 429 no longer floods the log: the first one of a run is a warning, the
+  others are counted — `HTTP 429 xN` at the end of the status line (and the
+  heartbeat lines off a terminal) and `Rate limit: N HTTP 429 responses, retried after
+  … of waits in total` at the end of the run and in the run journal. With `--debug`
+  the warning still repeats at most once a minute with the count so far. It points to
+  `-m find-limits` (or says that `--auto-limits` will propose limits).
+
 ## [1.3.0] - 2026-11-17
 
 ### Added

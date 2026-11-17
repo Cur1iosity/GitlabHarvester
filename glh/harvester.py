@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import itertools
 import json
+import re
 import logging
 import os
 import threading
 import time
+import weakref
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, IO, Any
@@ -59,6 +62,19 @@ _HTTP_REASONS = {
     429: "Too Many Requests", 500: "Internal Server Error", 502: "Bad Gateway",
     503: "Service Unavailable", 504: "Gateway Timeout",
 }
+
+
+_CONNECTION_REASON = re.compile(
+    r"(Failed to establish a new connection: [^'\")]+|Read timed out|Connection refused|"
+    r"Name or service not known|getaddrinfo failed|Temporary failure in name resolution|"
+    r"timed out|Remote end closed connection without response|Connection reset by peer)")
+
+
+def describe_connection_error(error: BaseException) -> str:
+    """'ConnectionError: Failed to establish a new connection: [Errno 111] Connection refused' (no urllib3 repr)."""
+    match = _CONNECTION_REASON.search(str(error))
+    name = type(error).__name__
+    return f"{name}: {match.group(1).rstrip('. ')}" if match else describe_api_error(error)
 
 
 def describe_api_error(error: BaseException) -> str:
@@ -122,6 +138,8 @@ class _BranchTask:
     file_window: TimeWindow | None = None
     file_filter: FileFilter | None = None
     downloader: FileDownloader | None = None
+    # Files-only mode (no term): "auto" | "search" | "tree"; None = term search.
+    file_listing: str | None = None
 
     @property
     def branch(self) -> str:
@@ -155,6 +173,7 @@ class GitlabHarvester:
             jitter: tuple[float, float] = ratelimit.NO_JITTER,
             user_agents: list[str] | tuple[str, ...] = (),
             tokens: list[str] | tuple[str, ...] | None = None,
+            adjustable_limits: bool = False,
     ) -> None:
         self.search_terms: list = search_terms or []
         # Tokens the run spreads its work over, each with its own pool of workers
@@ -180,6 +199,15 @@ class GitlabHarvester:
         self.jitter: tuple[float, float] = (float(jitter[0]), float(jitter[1]))
         # User-Agent of every request: one = fixed, several = random per request; () = python-gitlab's.
         self.user_agents: tuple[str, ...] = tuple(user_agents)
+        # --auto-limits: every client gets a throttling adapter (even without
+        # limits yet), so set_rate_limits() can change the pace of a running scan.
+        self.adjustable_limits = bool(adjustable_limits)
+        self._adapters: weakref.WeakSet[ratelimit.ThrottledAdapter] = weakref.WeakSet()
+        self._adapters_lock = threading.Lock()
+        # Called with every API response (any thread), e.g. glh.autolimit.LimitAdvisor.observe.
+        self.limit_observer: Callable[[Any], None] | None = None
+        # GitLab user id of every token (same order as self.tokens), from the login check.
+        self.token_users: list[Any] = []
         self._local = threading.local()
         self._gl_main: Gitlab | None = None
         self._client_kwargs: dict[str, Any] | None = None
@@ -187,16 +215,24 @@ class GitlabHarvester:
         self._file_change_cache: dict[tuple[Any, ...], bool] = {}
         # Terms of the last search_keywords() run that had failed (retryable) searches.
         self.incomplete_terms: list[str] = []
+        # Files-only mode, --file-listing auto: "unknown" until the instance has
+        # shown whether its search takes filter-only queries ("search") or not ("tree").
+        self._file_listing_lock = threading.Lock()
+        self._file_listing_state = "unknown"
+        self.file_listing_counts: Counter[str] = Counter()  # branches listed per method
         self._file_change_lock = threading.Lock()
         # What every thread is searching right now (status line, slow-task reports).
         self._active = pool.ActiveTasks()
         # Report a search task still running after this many seconds (and again
         # every as many seconds); 0 disables. Parallel search only.
         self.slow_task_report: float = 300.0
-        # HTTP 429: python-gitlab waits and retries silently, so we warn (throttled).
+        # HTTP 429: python-gitlab waits and retries silently. By default the first
+        # one is a warning and the rest only count (status line, final summary);
+        # with --debug a warning repeats at most every rate_limit_warn_interval s.
         self.rate_limit_warn_interval: float = 60.0
         self._rate_limit_lock = threading.Lock()
         self._rate_limited = 0
+        self._rate_limit_waited = 0.0  # Retry-After seconds, summed over all threads
         self._rate_limit_warned_at: float | None = None
 
         self.log_level: int = logging_utils.coerce_log_level(log_level)
@@ -266,6 +302,104 @@ class GitlabHarvester:
                 raise GitlabHarvesterError(
                     f"Token #{index} of {total} failed to authenticate to {url}: {e}"
                 ) from None
+            self.token_users.append(self._user_id(gl, index))
+
+    @staticmethod
+    def _user_id(gl: Gitlab, index: int) -> Any:
+        """GitLab user id of an authenticated client (a unique stand-in when unknown)."""
+        user_id = getattr(getattr(gl, "user", None), "id", None)
+        return user_id if user_id is not None else f"token#{index}"
+
+    # ---------------------------------------------------------------- tokens and users
+
+    def token_user_groups(self) -> list[list[int]]:
+        """Token indexes (0-based) grouped by GitLab user: tokens of one user share its rate limits."""
+        groups: dict[Any, list[int]] = {}
+        for index in range(len(self.tokens)):
+            user = self.token_users[index] if index < len(self.token_users) else f"token#{index + 1}"
+            groups.setdefault(user, []).append(index)
+        return list(groups.values())
+
+    def tokens_per_user(self) -> int:
+        """Most tokens held by one user (1 = every token has its own budget)."""
+        return max((len(g) for g in self.token_user_groups()), default=1)
+
+    def token_user_key(self, token: str | None) -> Any:
+        """The user a token belongs to (an opaque key; never the token)."""
+        if token is None:
+            return None
+        for index, known in enumerate(self.tokens):
+            if known == token:
+                return self.token_users[index] if index < len(self.token_users) else f"token#{index + 1}"
+        return None
+
+    # ------------------------------------------------------------------ rate limits
+
+    def set_rate_limits(self, *, index_rpm: int | None = None, search_rpm: int | None = None,
+                        workers: int | None = None) -> None:
+        """
+        Change the pace (and, before a scan starts, the workers) of this run.
+
+        New rpm values apply at once to every existing client (needs
+        ``adjustable_limits`` for clients created without limits) and to the
+        clients created later. ``workers`` only affects pools started afterwards.
+        """
+        if index_rpm is not None:
+            self.index_rpm = max(0, int(index_rpm))
+        if search_rpm is not None:
+            self.search_rpm = max(0, int(search_rpm))
+        if workers is not None:
+            self.workers = max(1, int(workers))
+            self.concurrency = max(1, len(self.tokens)) * self.workers
+        with self._adapters_lock:
+            adapters = list(self._adapters)
+        for adapter in adapters:
+            adapter.set_limits(index_rpm=self.index_rpm, search_rpm=self.search_rpm, jitter=self.jitter)
+
+    def probe_sender(self, path: str, query: dict[str, Any], token: str | None = None) -> Callable[[], Any]:
+        """
+        A sender for ``glh.limits.LimitProbe``: one GET of ``path`` per call
+        through a fresh client of ``token`` (default: the first) that is not
+        paced, not retried on 429 and not counted by the 429 warnings.
+        """
+        from glh.limits import ProbeResponse
+
+        gl = Gitlab(**self._worker_client_kwargs(token))
+        ratelimit.limit_session(gl.session, user_agents=self.user_agents)
+        last: dict[str, Any] = {}
+        gl.session.hooks.setdefault("response", []).append(lambda r, *a, **k: last.__setitem__("r", r))
+
+        def send() -> ProbeResponse:
+            last.clear()
+            started = time.perf_counter()
+            try:
+                gl.http_request("get", path, query_data=dict(query), obey_rate_limit=False, max_retries=0,
+                                retry_transient_errors=False)
+            except gitlab.exceptions.GitlabError:
+                pass  # the status is in the recorded response
+            except requests.exceptions.RequestException as e:
+                return ProbeResponse(0, {}, time.perf_counter() - started, error=type(e).__name__)
+            latency = time.perf_counter() - started
+            response = last.get("r")
+            if response is None:
+                return ProbeResponse(0, {}, latency, error="no response")
+            return ProbeResponse(response.status_code, dict(response.headers), latency)
+
+        return send
+
+    @client_required
+    def first_project_id(self) -> Any | None:
+        """Id of a non-empty project from the first page of /projects (for search probes)."""
+        try:
+            page = self._gl.http_get("/projects", query_data={"per_page": 20, "order_by": "id", "sort": "desc"})
+        except (gitlab.exceptions.GitlabError, requests.exceptions.RequestException) as e:
+            self.logger.warning("Cannot list projects for the limit probe: %s", describe_api_error(e))
+            return None
+        projects = [p for p in page if isinstance(p, dict) and p.get("id") is not None] if isinstance(page, list) else []
+        for project in projects:
+            if not project.get("empty_repo", False):
+                return project["id"]
+        return projects[0]["id"] if projects else None
 
     def _init_worker_client(self) -> None:
         """
@@ -293,8 +427,12 @@ class GitlabHarvester:
         if isinstance(hooks, dict):
             hooks.setdefault("response", []).append(self._on_response)
         if session is not None and hasattr(session, "mount"):
-            ratelimit.limit_session(session, index_rpm=self.index_rpm, search_rpm=self.search_rpm,
-                                    jitter=self.jitter, user_agents=self.user_agents)
+            adapter = ratelimit.limit_session(session, index_rpm=self.index_rpm, search_rpm=self.search_rpm,
+                                              jitter=self.jitter, user_agents=self.user_agents,
+                                              always=self.adjustable_limits)
+            if adapter is not None:
+                with self._adapters_lock:
+                    self._adapters.add(adapter)
         return gl
 
     @staticmethod
@@ -315,31 +453,102 @@ class GitlabHarvester:
 
         On HTTP 429 python-gitlab waits (Retry-After) and retries up to 10
         times without any output, which looks like a hung scan. Mark the
-        running task as waiting and log a throttled warning instead.
+        running task as waiting, count the response (``HTTP 429 xN`` at the
+        end of the status line, :meth:`rate_limit_summary` at the end) and
+        warn once; with --debug the warning repeats, throttled.
         """
+        observer = self.limit_observer
+        if observer is not None:
+            try:
+                observer(response)
+            except Exception:  # noqa: BLE001 - advice must never break a request
+                self.logger.debug("Limit observer failed", exc_info=True)
         if getattr(response, "status_code", None) != 429:
             self._active.set_waiting("")
             return None
         wait = self._retry_after(getattr(response, "headers", None) or {})
         wait_text = terminal_utils.format_duration(wait) if wait is not None else "a moment"
         self._active.set_waiting(f"rate limited (HTTP 429), retry in {wait_text}")
+        debug = self.log_level <= logging.DEBUG
         with self._rate_limit_lock:
             self._rate_limited += 1
+            self._rate_limit_waited += wait or 0.0
             count = self._rate_limited
             now = time.monotonic()
-            warn = (self._rate_limit_warned_at is None
-                    or now - self._rate_limit_warned_at >= self.rate_limit_warn_interval)
+            first = self._rate_limit_warned_at is None
+            warn = first or (debug and now - self._rate_limit_warned_at >= self.rate_limit_warn_interval)
             if warn:
                 self._rate_limit_warned_at = now
+        if first:
+            terminal_utils.STATUS.set_tail(self._rate_limit_tail)
         if warn:
             path = urlparse(getattr(response, "url", "") or "").path
-            self.logger.warning(
-                "GitLab rate limit (HTTP 429) on %s: waiting %s before a retry "
-                "(%s so far; python-gitlab retries up to 10 times). "
-                "Fewer --workers lowers the request rate.",
-                path or "a request", wait_text, terminal_utils.plural(count, "rate-limited response"),
-            )
+            advice = ("--auto-limits will suggest new limits." if self.limit_observer is not None
+                      else "Fewer --workers or lower --search-rpm/--index-rpm reduce the request rate "
+                           "(-m find-limits measures the limits).")
+            if debug:
+                self.logger.warning(
+                    "GitLab rate limit (HTTP 429) on %s: waiting %s before a retry "
+                    "(%s so far; python-gitlab retries up to 10 times). %s",
+                    path or "a request", wait_text, terminal_utils.plural(count, "rate-limited response"), advice,
+                )
+            else:
+                self.logger.warning(
+                    "GitLab rate limit (HTTP 429) on %s: waiting %s before a retry (python-gitlab retries "
+                    "up to 10 times). Further 429s are only counted: HTTP 429 xN in the status line and a "
+                    "summary at the end (--debug repeats this warning). %s",
+                    path or "a request", wait_text, advice,
+                )
         return None
+
+    def _rate_limit_tail(self) -> str:
+        """'HTTP 429 x12' for the end of the status line ('' before the first one)."""
+        count = self._rate_limited
+        return f"HTTP 429 x{count:,}" if count else ""
+
+    @property
+    def rate_limited(self) -> int:
+        """HTTP 429 responses so far (all threads)."""
+        return self._rate_limited
+
+    def rate_limit_summary(self) -> str | None:
+        """
+        'Rate limit: 190 HTTP 429 responses, retried after 12:30 of waits in total (all workers)';
+        None without any 429.
+        """
+        with self._rate_limit_lock:
+            count, waited = self._rate_limited, self._rate_limit_waited
+        if not count:
+            return None
+        waits = (f", retried after {terminal_utils.format_duration(waited)} of waits in total"
+                 f"{' (all workers)' if self.concurrency > 1 else ''}" if waited else ", retried")
+        return f"Rate limit: {terminal_utils.plural(count, 'HTTP 429 response')}{waits}"
+
+    def _plan_rows(self, keywords: list[str], plan: ScanPlan, options: ScanOptions,
+                   downloader: FileDownloader | None) -> list[terminal_utils.Row]:
+        """The rows of the 'Search plan' block."""
+        if options.files_only:
+            first: list[terminal_utils.Row] = [
+                ("files", f"every file matching {options.file_filter.describe()} (no term)"),
+                ("listing", options.file_listing),
+            ]
+        else:
+            first = [("terms", f"{len(keywords):,}")]
+            if options.file_filter:
+                first.append(("files", options.file_filter.describe()))
+        rows: list[terminal_utils.Row] = [
+            *first,
+            ("projects", f"{plan.project_count:,} of {plan.total_projects:,}"),
+            ("skipped", plan.skipped_reasons()),
+            ("branches", f"{plan.branch_count:,}"),
+            ("files changed", options.file_window.describe() if options.file_window else ""),
+            ("downloads", downloader.target() if downloader is not None else ""),
+            ("parallel", self._concurrency_text()),
+            ("rate limit", ratelimit.describe(self.index_rpm, self.search_rpm)),
+            ("jitter", ratelimit.format_jitter(self.jitter)),
+            ("user agent", user_agents.describe(self.user_agents)),
+        ]
+        return rows
 
     def _concurrency_text(self) -> str:
         """
@@ -530,6 +739,7 @@ class GitlabHarvester:
             gl.auth()
             self.logger.debug("Authenticated to GitLab: %s", url)
             self._client_kwargs = dict(kwargs)
+            self.token_users = [self._user_id(gl, 1)]
             return gl
         except requests.exceptions.SSLError as e:
             raise GitlabHarvesterError(
@@ -537,6 +747,17 @@ class GitlabHarvester:
                 "If the instance uses a private CA, pass it with --ca-bundle FILE. "
                 "To connect anyway without verification, use --insecure "
                 "(not recommended: the token would be sent to an unverified server)."
+            ) from None
+        except requests.exceptions.RequestException as e:
+            raise GitlabHarvesterError(
+                f"Cannot reach {url} ({describe_connection_error(e)}). Check the URL, the network and --proxy."
+            ) from None
+        except gitlab.exceptions.GitlabError as e:
+            who = "The token" if len(self.tokens) <= 1 else f"Token #1 of {len(self.tokens)}"
+            hint = (" Check the token and that it has the read_api scope."
+                    if isinstance(e, gitlab.exceptions.GitlabAuthenticationError) else "")
+            raise GitlabHarvesterError(
+                f"{who} failed to authenticate to {url} ({describe_api_error(e)}).{hint}"
             ) from None
 
     @client_required
@@ -1129,20 +1350,11 @@ class GitlabHarvester:
         n_terms = len(keywords)
         terms_text = terminal_utils.plural(n_terms, "term")
         hits_before = hit_counter
-        parallel = f", {concurrency}" if (concurrency := self._concurrency_text()) else ""
-        if limits := ratelimit.describe(self.index_rpm, self.search_rpm):
-            parallel += f", rate limit: {limits}"
-        if jitter := ratelimit.format_jitter(self.jitter):
-            parallel += f", jitter {jitter}"
-        if agents := user_agents.describe(self.user_agents):
-            parallel += f", {agents}"
-
-        files = f", files changed {options.file_window.describe()}" if options.file_window else ""
-        if options.file_filter:
-            files += f", files: {options.file_filter.describe()}"
-        if downloader is not None:
-            files += f", {downloader.describe()}"
-        terminal_utils.STATUS.write_line(f"Search plan: {terms_text}, {plan.describe()}{files}{parallel}")
+        if options.files_only:
+            with self._file_listing_lock:
+                self._file_listing_state = "unknown"
+                self.file_listing_counts = Counter()
+        terminal_utils.STATUS.write_block("Search plan", self._plan_rows(keywords, plan, options, downloader))
 
         with terminal_utils.Progress(
                 "Searching", total=plan.project_count, unit="projects", rounds=n_terms,
@@ -1151,11 +1363,16 @@ class GitlabHarvester:
                 keywords, plan, hit_counter=hit_counter, output=output,
                 progress=progress, checkpoints=True, file_window=options.file_window or None,
                 file_filter=options.file_filter or None,
+                file_listing=options.file_listing if options.files_only else None,
             )
             checks = (f", {terminal_utils.plural(len(self._file_change_cache), 'file check')}"
                       if options.file_window else "")
             incomplete = (f"; INCOMPLETE: {terminal_utils.plural(len(self.incomplete_terms), 'term')} "
                           f"with failed searches, not marked done" if self.incomplete_terms else "")
+            if options.files_only and self.file_listing_counts:
+                listed = ", ".join(f"{terminal_utils.plural(n, 'branch', 'branches')} by {how}"
+                                   for how, n in sorted(self.file_listing_counts.items()))
+                checks += f"; files listed: {listed}"
             progress.finish(
                 f"Search finished: {terms_text} x {terminal_utils.plural(plan.project_count, 'project')}, "
                 f"{terminal_utils.plural(hit_counter - hits_before, 'hit')}{checks} in "
@@ -1229,6 +1446,8 @@ class GitlabHarvester:
     def _search_branch_task(self, task: _BranchTask, name: str,
                             project_url: str) -> tuple[list[dict[str, Any]], str | None]:
         """_search_branch() body, while the task is registered as running."""
+        if task.file_listing is not None:
+            return self._collect_files_task(task, name, project_url)
         project_obj: Project = self._gl.projects.get(task.project["id"], lazy=True)
         path_filter = None
         if task.file_window or task.file_filter:
@@ -1259,6 +1478,129 @@ class GitlabHarvester:
         if retryable:
             failure = f"{name} @ {task.branch}: {describe_api_error(retryable[0])}"
         return hits, failure
+
+    # ------------------------------------------------------------ files-only mode
+
+    def _collect_files_task(self, task: _BranchTask, name: str,
+                            project_url: str) -> tuple[list[dict[str, Any]], str | None]:
+        """
+        Files-only mode (no term): one hit per file of the branch whose name
+        passes the file filters (and --file-changed-*), downloaded with
+        --download-files.
+
+        ``--file-listing``: "search" asks the search API with the filters only
+        (``filename:*.env``), which works where the search backend takes such
+        queries (advanced search); "tree" lists the repository tree (any
+        GitLab, one request per 100 entries); "auto" tries the search and falls
+        back to the tree for a branch with no results or an error, until the
+        search has found files once (then it is trusted) or rejected the query
+        as invalid (then only the tree is used).
+        """
+        errors: list[BaseException] = []
+        mode = task.file_listing or "auto"
+        paths: list[str] | None = None
+        how = "tree"
+        if mode == "search" or (mode == "auto" and self._file_listing_state != "tree"):
+            paths = self._paths_by_search(task, name, errors, strict=mode == "search")
+            how = "search"
+        if paths is None:
+            paths = self._paths_by_tree(task, name, errors)
+            how = "tree"
+        with self._file_listing_lock:
+            self.file_listing_counts[how] += 1
+
+        keep: list[str] = []
+        for path in dict.fromkeys(paths):
+            if task.file_filter and not task.file_filter.matches(path):
+                continue
+            if task.file_window and not self._file_changed_in_window(task.project["id"], task.branch, path,
+                                                                     task.file_window):
+                continue
+            keep.append(path)
+        local = self._download_files(task, name, keep) if task.downloader is not None and keep else {}
+        blob_url = f"{project_url}/-/blob/{quote(task.branch, safe='/')}"
+        hits = []
+        for path in keep:
+            hit: dict[str, Any] = {"url": f"{blob_url}/{quote(path, safe='/')}", "data": ""}
+            if path in local:
+                hit["file"] = local[path]
+            hits.append(hit)
+            self.logger.info("[+] File '%s': %s", task.term, hit["url"])
+        retryable = [e for e in errors if not is_permanent_error(e)]
+        failure = f"{name} @ {task.branch}: {describe_api_error(retryable[0])}" if retryable else None
+        return hits, failure
+
+    def _set_file_listing_state(self, state: str, message: str) -> None:
+        with self._file_listing_lock:
+            if self._file_listing_state == state:
+                return
+            self._file_listing_state = state
+        terminal_utils.STATUS.write_line(message)
+
+    def _paths_by_search(self, task: _BranchTask, name: str, errors: list[BaseException], *,
+                         strict: bool) -> list[str] | None:
+        """
+        Paths from a filter-only blob search of the branch, or None: let the
+        repository tree answer for it (auto mode, see _collect_files_task).
+        """
+        query = task.file_filter.query("").strip() if task.file_filter else ""
+        project_obj: Project = self._gl.projects.get(task.project["id"], lazy=True)
+        found: dict[str, None] = {}
+        page, per_page = 1, 100
+        try:
+            while True:
+                if page > 1:
+                    self._active.set_step(f"page {page}")
+                batch = project_obj.search(scope=SearchScope.BLOBS, ref=task.branch, search=query,
+                                           page=page, per_page=per_page)
+                for x in batch:
+                    if isinstance(x, dict) and x.get("path"):
+                        found.setdefault(x["path"])
+                page += 1
+                if len(batch) < per_page:
+                    break
+        except (gitlab.exceptions.GitlabError, requests.exceptions.RequestException) as e:
+            if strict or is_permanent_error(e):
+                self.logger.warning("Could not search %s @ %s (%s); skipping it, continuing",
+                                    name, task.branch, describe_api_error(e))
+                errors.append(e)
+                return list(found)
+            if getattr(e, "response_code", None) in (400, 422):
+                self._set_file_listing_state(
+                    "tree", "File listing: the search API rejects filter-only queries here "
+                            f"({describe_api_error(e)}); listing repository trees instead")
+            else:
+                self.logger.debug("Filter-only search of %s @ %s failed (%s); listing the tree",
+                                  name, task.branch, describe_api_error(e))
+            return None
+        if found:
+            self._set_file_listing_state(
+                "search", "File listing: the search API takes filter-only queries here; using it")
+            return list(found)
+        if strict or self._file_listing_state == "search":
+            return []
+        return None  # nothing found, and the search hasn't proven itself: ask the tree
+
+    def _paths_by_tree(self, task: _BranchTask, name: str, errors: list[BaseException]) -> list[str]:
+        """Every file (blob) path of the branch from the repository tree API (keyset pagination)."""
+        paths: list[str] = []
+        try:
+            entries = self._gl.http_list(
+                f"/projects/{EncodedId(task.project['id'])}/repository/tree",
+                query_data={"ref": task.branch, "recursive": "true", "per_page": 100, "pagination": "keyset"},
+                iterator=True,
+            )
+            for n, entry in enumerate(entries, 1):
+                if n % 1000 == 0:
+                    self._active.set_step(f"{n:,} tree entries")
+                if isinstance(entry, dict) and entry.get("type") == "blob" and entry.get("path"):
+                    if not task.file_filter or task.file_filter.matches(entry["path"]):
+                        paths.append(entry["path"])
+        except (gitlab.exceptions.GitlabError, requests.exceptions.RequestException) as e:
+            self.logger.warning("Could not list the files of %s @ %s (%s); skipping it, continuing",
+                                name, task.branch, describe_api_error(e))
+            errors.append(e)
+        return paths
 
     def _open_raw_file(self, project_id: Any, branch: str, path: str) -> requests.Response:
         """
@@ -1351,6 +1693,7 @@ class GitlabHarvester:
             checkpoints: bool,
             file_window: TimeWindow | None = None,
             file_filter: FileFilter | None = None,
+            file_listing: str | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         """
         Search ``terms`` over ``plan`` with ``self.workers`` threads.
@@ -1429,7 +1772,7 @@ class GitlabHarvester:
                 for project_no, (project, branches) in enumerate(plan.targets):
                     for branch_no, branch in enumerate(branches):
                         yield _BranchTask(term_no, term, project_no, project, branches, branch_no, file_window,
-                                          file_filter, output.downloader)
+                                          file_filter, output.downloader, file_listing)
 
         def report_slow_tasks() -> None:
             # Main thread only. A search can legitimately run for hours (huge

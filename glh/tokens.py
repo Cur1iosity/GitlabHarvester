@@ -115,3 +115,52 @@ def describe(tokens: list[str] | tuple[str, ...]) -> str:
     if n == 0:
         return ""
     return "1 token" if n == 1 else f"{n} tokens"
+
+
+TOKEN_PLACEHOLDER = "<TOKEN>"
+_TOKEN_OPTIONS = ("-t", "--token")
+_PROXY_OPTIONS = ("-p", "--proxy")
+
+
+def _mask_url_password(url: str) -> str:
+    """'http://user:secret@host' -> 'http://user:***@host'."""
+    scheme, sep, rest = url.partition("://")
+    if not sep or "@" not in rest.split("/", 1)[0]:
+        return url
+    creds, _, host = rest.partition("@")
+    user, colon, _ = creds.partition(":")
+    return f"{scheme}://{user}{':***' if colon else ''}@{host}"
+
+
+def mask_argv(argv: list[str] | tuple[str, ...]) -> list[str]:
+    """
+    The command-line arguments with secrets hidden, for printing and the run
+    journal: token values (``-t``, ``--token``, ``--token=…``, ``-t…``) become
+    ``<TOKEN>``, a password in a proxy URL becomes ``***``.
+    """
+    out: list[str] = []
+    args = list(argv)
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        name, eq, value = arg.partition("=")
+        if name in _TOKEN_OPTIONS:
+            out.append(f"{name}={TOKEN_PLACEHOLDER}" if eq else name)
+            if not eq:
+                if i + 1 < len(args):
+                    out.append(TOKEN_PLACEHOLDER)
+                i += 1
+        elif arg.startswith("-t") and not arg.startswith("--") and len(arg) > 2:
+            out.append(f"-t{TOKEN_PLACEHOLDER}")
+        elif name in _PROXY_OPTIONS:
+            if eq:
+                out.append(f"{name}={_mask_url_password(value)}")
+            else:
+                out.append(name)
+                if i + 1 < len(args):
+                    out.append(_mask_url_password(args[i + 1]))
+                i += 1
+        else:
+            out.append(arg)
+        i += 1
+    return out

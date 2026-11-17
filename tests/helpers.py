@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -143,3 +144,56 @@ PASSWORD_HITS_PER_BRANCH = {
     (203, "carol/wip"): 1, (203, "develop"): 1, (203, "main"): 1,
     (301, "main"): 2,
 }
+
+
+
+# --------------------------------------------------------------------------- output blocks
+
+
+def parse_blocks(text: str) -> dict[str, dict[str, list[str]]]:
+    """
+    The blocks of CLI output (glh.utils.terminal_utils.format_block):
+    {title: {label: [value lines]}}. A title starting with a known prefix is
+    also stored under that prefix ('Rate limits at http://... (token #1)' ->
+    'Rate limits').
+    """
+    blocks: dict[str, dict[str, list[str]]] = {}
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        title = lines[i]
+        rows: dict[str, list[str]] = {}
+        j = i + 1
+        col = None
+        last = None
+        while j < len(lines) and lines[j].startswith("  ") and lines[j].strip():
+            line = lines[j]
+            if col is None:
+                m = re.match(r"^  (\S.*?)\s{2,}(\S.*)$", line)
+                if not m:
+                    break
+                col = m.start(2)
+            label, value = line[:col].strip(), line[col:].strip()
+            if label:
+                rows.setdefault(label, []).append(value)
+                last = label
+            elif last is not None:
+                rows[last].append(value)
+            j += 1
+        if rows and title and not title.startswith(" ") and "[" not in title[:1]:
+            blocks[title] = rows
+            for prefix in ("Rate limits",):
+                if title.startswith(prefix):
+                    blocks[prefix] = rows
+            i = j
+        else:
+            i += 1
+    return blocks
+
+
+def row(text: str, title: str, label: str) -> str:
+    """The value of one row of a block, its lines joined by ' | '."""
+    block = parse_blocks(text).get(title)
+    assert block is not None, f"no block {title!r} in:\n{text}"
+    assert label in block, f"no row {label!r} in block {title!r}: {block}"
+    return " | ".join(block[label])

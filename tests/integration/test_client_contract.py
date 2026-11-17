@@ -14,6 +14,8 @@ import gitlab
 import gitlab.exceptions
 import pytest
 
+from glh.exceptions import GitlabHarvesterError
+
 from fakegitlab import FakeGitLab
 from glh.planner import ScanOptions
 
@@ -76,15 +78,15 @@ def test_invalid_token_fails_at_construction(fake_gitlab: FakeGitLab, make_harve
         # Empty token: the harvester skips client creation entirely.
         assert make_harvester(token=token)._gl is None
         return
-    with pytest.raises(gitlab.exceptions.GitlabAuthenticationError):
+    # python-gitlab raises GitlabAuthenticationError; the harvester turns it into one clear message.
+    with pytest.raises(GitlabHarvesterError, match=r"The token failed to authenticate .*HTTP 401 Unauthorized"):
         make_harvester(token=token)
 
 
-@pytest.mark.parametrize(("status", "exc"), [(403, gitlab.exceptions.GitlabGetError),
-                                             (500, gitlab.exceptions.GitlabGetError)])
-def test_auth_endpoint_errors_propagate(fake_gitlab: FakeGitLab, make_harvester, status, exc):
+@pytest.mark.parametrize("status", [403, 500])
+def test_auth_endpoint_errors_propagate(fake_gitlab: FakeGitLab, make_harvester, status):
     fake_gitlab.add_fault({"match": {"path": "^/api/v4/user$"}, "response": {"status": status, "json": {"message": "x"}}})
-    with pytest.raises(exc):
+    with pytest.raises(GitlabHarvesterError, match=rf"failed to authenticate .*HTTP {status}"):
         make_harvester()
 
 

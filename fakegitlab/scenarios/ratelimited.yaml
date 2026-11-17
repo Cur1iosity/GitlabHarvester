@@ -1,0 +1,12 @@
+# Default data behind GitLab-like per-user rate limits, for -m find-limits and
+# --auto-limits (see fakegitlab/ratelimits.py).
+#
+# - Every API request: 300 per minute per user (429 with RateLimit-* headers).
+# - Search API: 20 per minute per user (429 with Retry-After only).
+name: ratelimited
+description: Default scenario with per-user rate limits (API 300/min, search 20/min).
+extends: default
+
+rate_limits:
+  api: {limit: 300, period: 60}
+  search: {limit: 20, period: 60}

@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from importlib.metadata import version, PackageNotFoundError
 
-from glh import downloads, filefilter, ratelimit, user_agents
+from glh import downloads, filefilter, limits, projectfilter, ratelimit, user_agents
 from glh.config import TERMS_DEST, ConfigError, load_config
 from glh.planner import parse_timestamp
 from glh.postprocess.pipeline import normalize_steps
@@ -117,6 +117,34 @@ def parse_rpm(value: str) -> int:
     raise argparse.ArgumentTypeError("Use a non-negative integer (requests per minute, 0 = no limit).")
 
 
+def parse_probe_apis(value: str) -> tuple[str, ...]:
+    """Parse --probe-apis: comma-separated index, search (in probe order: index first)."""
+    names = {x.strip().lower() for x in value.split(",") if x.strip()}
+    if not names or names - set(limits.KINDS):
+        raise argparse.ArgumentTypeError("Use index, search or index,search.")
+    return tuple(k for k in limits.KINDS if k in names)
+
+
+def parse_probe_max(value: str) -> int:
+    """Parse --probe-max: requests per probed API, 1..MAX_REQUESTS_LIMIT."""
+    v = value.strip()
+    if v.isdigit() and 1 <= int(v) <= limits.MAX_REQUESTS_LIMIT:
+        return int(v)
+    raise argparse.ArgumentTypeError(f"Use an integer from 1 to {limits.MAX_REQUESTS_LIMIT}.")
+
+
+def parse_probe_margin(value: str) -> float:
+    """Parse --probe-margin: share of the found limit to use, 0.1..1 (or 10%..100%)."""
+    v = value.strip()
+    try:
+        margin = float(v[:-1]) / 100 if v.endswith("%") else float(v)
+    except ValueError:
+        margin = -1.0
+    if 0.1 <= margin <= 1.0:
+        return margin
+    raise argparse.ArgumentTypeError("Use a number from 0.1 to 1 (or 10% to 100%), e.g. 0.85.")
+
+
 def parse_jitter(value: str) -> tuple[float, float]:
     """Parse --jitter: MAX or MIN-MAX seconds, optionally with ms/s (0.03, 0.01-0.05, 10ms-50ms)."""
     try:
@@ -148,6 +176,14 @@ def parse_extension(value: str) -> str:
         return filefilter.normalize_extension(value)
     except filefilter.FileFilterError as e:
         raise argparse.ArgumentTypeError(str(e)) from None
+
+
+def parse_project_filter(value: str) -> tuple[str, ...]:
+    """Parse --project-filter: comma-separated project path patterns (k8s, infra/*)."""
+    try:
+        return projectfilter.parse_patterns(value)
+    except projectfilter.ProjectFilterError as e:
+        raise argparse.ArgumentTypeError(f"{e}. Use e.g. k8s, infra/* or k8s,*-deploy.") from None
 
 
 def parse_size(value: str) -> int:
@@ -222,6 +258,14 @@ class CliArgs:
     user_agent: str | None
     user_agent_file: str | None
 
+    auto_limits: bool
+    probe_apis: tuple[str, ...]
+    probe_max: int
+    probe_margin: float
+    # Which of workers, index_rpm, search_rpm were set on the command line or in
+    # the config file (--auto-limits keeps them).
+    explicit_limits: frozenset[str]
+
     log_file: str | None
     log_level: str
     debug: bool
@@ -248,6 +292,8 @@ class CliArgs:
     terms: tuple[str, ...]
     filename: str | None
     extension: str | None
+    project_filter: tuple[str, ...]
+    file_listing: str
     session: str | None
     session_file: str | None
     resume: bool
@@ -259,6 +305,7 @@ class CliArgs:
     output_file: str | None
     post_process: tuple[str, ...]
     final_only: bool
+    to_zip: bool
 
     sqlite_path: str | None
     hash_algo: str
@@ -326,10 +373,11 @@ class CliParser:
         parser.add_argument(
             "-w", "--workers",
             type=parse_workers,
-            default=1,
+            default=None,
             metavar="N",
             help=f"Parallel API requests (1-{MAX_WORKERS}, default 1 = sequential). Speeds up project listing, "
-                 "branch listing and search; use more than 1 only if the instance has no API rate limits.",
+                 "branch listing and search; use more than 1 only if the instance has no API rate limits "
+                 "(--auto-limits or -m find-limits measure them).",
         )
         parser.add_argument(
             "--rpm", type=parse_rpm, default=None, metavar="N",
@@ -350,6 +398,37 @@ class CliParser:
             help="Random delay before every API request, drawn anew for each one: MAX or MIN-MAX seconds, "
                  "e.g. 0.03, 0.01-0.05 or 10ms-50ms (default: off). Adds to the --*-rpm spacing.",
         )
+        lim = parser.add_argument_group(
+            "rate-limit detection (EXPERIMENTAL)",
+            "Experimental: behavior, output and options may change in future releases.\n"
+            "-m find-limits measures the GitLab API rate limits of the token and prints the --workers,\n"
+            "--index-rpm and --search-rpm to use. --auto-limits does it before a search (only the\n"
+            "search API when the project index already exists) and watches the run for HTTP 429.",
+        )
+        lim.add_argument(
+            "--auto-limits", action=argparse.BooleanOptionalAction, default=False,
+            help="[experimental] Before a search, measure the rate limits and offer settings for them (asks on a terminal; "
+                 "elsewhere prints the command and exits). During the search, propose lower limits after "
+                 "HTTP 429 without stopping (L shows the proposal again). Options set explicitly are kept; "
+                 "with all of them set, nothing is measured.",
+        )
+        lim.add_argument(
+            "--probe-apis", type=parse_probe_apis, default=None, metavar="APIS",
+            help="[experimental] APIs to measure: index, search or index,search. Default: both with -m find-limits; "
+                 "with --auto-limits search, plus index when the project index has to be built.",
+        )
+        lim.add_argument(
+            "--probe-max", type=parse_probe_max, default=limits.DEFAULT_MAX_REQUESTS, metavar="N",
+            help=f"[experimental] Most requests to send per measured API (default {limits.DEFAULT_MAX_REQUESTS}). The probe "
+                 f"first sends a default budget (search {limits.DEFAULT_BUDGET[limits.SEARCH]}, other API "
+                 f"{limits.DEFAULT_BUDGET[limits.INDEX]}); without HTTP 429 it goes deeper up to N to find "
+                 "a higher limit or the real throughput.",
+        )
+        lim.add_argument(
+            "--probe-margin", type=parse_probe_margin, default=limits.DEFAULT_MARGIN, metavar="SHARE",
+            help=f"[experimental] Share of a found limit the suggested settings use, 0.1-1 (default {limits.DEFAULT_MARGIN}).",
+        )
+
         ua = parser.add_mutually_exclusive_group()
         ua.add_argument("-A", "--user-agent", type=parse_user_agent, default=None, metavar="STRING",
                         help="User-Agent of every API request (default: python-gitlab's).")
@@ -367,9 +446,9 @@ class CliParser:
         parser.add_argument(
             "-m",
             "--mode",
-            choices=("search", "dump-index", "dedup", "convert"),
+            choices=("search", "dump-index", "find-limits", "dedup", "convert"),
             default="search",
-            help="Execution mode.",
+            help="Execution mode (find-limits is experimental).",
         )
 
         # Index
@@ -437,7 +516,8 @@ class CliParser:
             "file filters",
             "Search the terms only in some files (case-insensitive; together, a file must match both).\n"
             "GitLab applies them on its side (filename:/extension: in the search string) and the\n"
-            "harvester re-checks every result. They narrow a search: a term (-s/-f) is still needed.",
+            "harvester re-checks every result. Without a term (-s/-f) they collect every matching\n"
+            "file instead (one hit per file; with --download-files, the files): see --file-listing.",
         )
         ff.add_argument(
             "--filename", type=parse_filename, default=None, metavar="PATTERN",
@@ -445,6 +525,24 @@ class CliParser:
                  "(settings.py, .env, Dockerfile), or a mask where * matches any characters (*.env, "
                  "config*, docker-compose*.yml, *secret*). A PATTERN with / matches the end of the "
                  "path (config/*.yml).",
+        )
+        pf = parser.add_argument_group(
+            "project filter",
+            "Search only some projects of the index (it stays complete; filtered projects cost no requests).",
+        )
+        pf.add_argument(
+            "--project-filter", type=parse_project_filter, default=(), metavar="PATTERNS",
+            help="Search only indexed projects whose path (group/subgroup/project) matches one of these "
+                 "comma-separated patterns, case-insensitive: without * a substring (k8s), with * the "
+                 "whole path (infra/*, *-k8s). Applied to the existing index, no extra API requests; "
+                 "the index itself stays complete.",
+        )
+        ff.add_argument(
+            "--file-listing", choices=("auto", "search", "tree"), default="auto",
+            help="Without a term: how the files of a branch are found. search: the search API with the "
+                 "filters only (works where the search backend takes such queries, e.g. advanced search); "
+                 "tree: the repository tree, any GitLab, one request per 100 entries; auto (default): "
+                 "search, falling back to the tree.",
         )
         ff.add_argument(
             "--extension", type=parse_extension, default=None, metavar="EXT",
@@ -498,6 +596,15 @@ class CliParser:
             default=False,
             help="With --post-process: keep only the last file and delete the session JSONL and "
                  "intermediate files (saves space; the session can't be resumed afterwards).",
+        )
+        parser.add_argument(
+            "--to-zip",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help="After the search (and --post-process), pack the run's results into <session>.zip next to "
+                 "the session, in the same layout: the session, --post-process outputs, the "
+                 "--output-separated term files and the --download-files files of the session's hits. "
+                 "The original files are kept.",
         )
         parser.add_argument("--input-file", default=None, help="Input file for postprocess modes.")
         parser.add_argument("--output-file", default=None, help="Output file for postprocess modes.")
@@ -598,6 +705,10 @@ class CliParser:
             grouped = TIME_BOUNDS + RATE_LIMITS + (("time_after", ""), ("time_before", ""), ("rpm", ""))
             cls._resolve_group_options(ns, {d for d, _ in grouped if getattr(ns, d) is not None}, {})
 
+        explicit_limits = frozenset(d for d in ("workers", *(dest for dest, _ in RATE_LIMITS))
+                                    if getattr(ns, d) is not None)
+        if ns.workers is None:
+            ns.workers = 1
         for dest, _ in RATE_LIMITS:
             if getattr(ns, dest) is None:
                 setattr(ns, dest, 0)
@@ -638,6 +749,11 @@ class CliParser:
             jitter=ns.jitter or ratelimit.NO_JITTER,
             user_agent=ns.user_agent,
             user_agent_file=ns.user_agent_file,
+            auto_limits=ns.auto_limits,
+            probe_apis=tuple(ns.probe_apis or ()),
+            probe_max=ns.probe_max,
+            probe_margin=ns.probe_margin,
+            explicit_limits=explicit_limits,
             log_file=ns.log_file,
             log_level=ns.log_level,
             debug=ns.debug,
@@ -661,6 +777,8 @@ class CliParser:
             terms=tuple(ns.terms),
             filename=ns.filename,
             extension=ns.extension,
+            project_filter=tuple(ns.project_filter),
+            file_listing=ns.file_listing,
             session=ns.session,
             session_file=ns.session_file,
             resume=ns.resume,
@@ -671,6 +789,7 @@ class CliParser:
             output_file=ns.output_file,
             post_process=tuple(ns.post_process),
             final_only=ns.final_only,
+            to_zip=ns.to_zip,
             sqlite_path=ns.sqlite_path,
             hash_algo=ns.hash_algo,
             normalize_hits=ns.normalize_hits,
