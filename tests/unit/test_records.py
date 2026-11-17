@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -117,3 +118,33 @@ def test_session_meta_reads_old_and_new_records():
     assert list(SessionMeta().to_record()) == list(META)  # every field, in file order
     assert SummaryRecord.from_record(SUMMARY).incomplete_terms == ("token",)
     assert ResumeRecord.from_record(RESUME).remaining_keywords == 1
+
+
+# --------------------------------------------------------------------------- --resume: the same search
+
+
+def test_scope_changes_name_what_a_resumed_run_may_not_change():
+    started = SessionMeta(url="https://gitlab.test/", scan_branches="all", forks="branch-diff",
+                          fork_diff_bases="main,dev", filename="*.env", extension=None, project_filter=("infra/*",),
+                          files_only=False, workers=1, search_rpm=10, jitter=(0.0, 0.0), download_files=False)
+    same = replace(started, url="https://gitlab.test", workers=4, search_rpm=60, jitter=(0.01, 0.05),
+                   download_files=True, index_file="other.jsonl", keywords_count=3)
+    assert started.scope_changes(same) == []  # speed, limits and outputs may change
+    changed = replace(same, scan_branches="default", fork_diff_bases="main", extension="py", project_filter=None,
+                      started_from="2024-06-01T00:00:00+00:00")
+    assert started.scope_changes(changed) == [
+        ("scan_branches", "all", "default"), ("fork_diff_bases", "main,dev", "main"),
+        ("started_from", None, "2024-06-01T00:00:00+00:00"), ("extension", None, "py"),
+        ("project_filter", ("infra/*",), None),
+    ]
+    # The bases only matter for branch-diff.
+    include = replace(started, forks="include")
+    assert include.scope_changes(replace(include, fork_diff_bases="x")) == []
+
+
+def test_scope_changes_of_an_older_session_meta():
+    # Written before the filters existed: they were off; unknown other fields are not compared.
+    old = SessionMeta.from_record({"type": "meta", "url": "https://gitlab.test", "scan_branches": "default"})
+    now = SessionMeta(url="https://gitlab.test", scan_branches="default", forks="skip", files_only=False)
+    assert old.scope_changes(now) == []
+    assert old.scope_changes(replace(now, filename="*.env")) == [("filename", None, "*.env")]

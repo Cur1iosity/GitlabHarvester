@@ -116,15 +116,28 @@ def test_invalid_values_fail_before_any_request(fake_gitlab: FakeGitLab, run_cli
     assert fake_gitlab.requests == []
 
 
-def test_resume_with_other_filters_warns(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
-    run_cli(*gl_args(fake_gitlab), "-s", "password", "--extension", "py", "--session", "audit", check=True)
-    proc = run_cli(*gl_args(fake_gitlab), "-s", "password", "--extension", "md", "--session", "audit",
-                   "--resume", check=True)
-    # The harvester's console log handler writes to stdout.
-    assert "other filters (extension md) than it was started with (extension py)" in proc.stdout + proc.stderr
-    proc = run_cli(*gl_args(fake_gitlab), "-s", "password", "--extension", "py", "--session", "audit",
-                   "--resume", check=True)
-    assert "other filters" not in proc.stdout + proc.stderr
+def _terms(tmp_path: Path) -> Path:
+    terms = tmp_path / "terms.txt"
+    terms.write_text("password\ntoken\n", encoding="utf-8")
+    return terms
+
+
+def test_resume_with_other_search_conditions_is_refused(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
+    session = tmp_path / "audit.jsonl"
+    run_cli(*gl_args(fake_gitlab), "-f", str(_terms(tmp_path)), "--extension", "py", "--session", "audit", check=True)
+    before = session.read_text(encoding="utf-8")
+    proc = run_cli(*gl_args(fake_gitlab), "-f", str(_terms(tmp_path)), "--extension", "md", "--session", "audit",
+                   "--project-filter", "acme/*", "-b", "all", "--resume")
+    assert proc.returncode == 1
+    assert "audit.jsonl: it was started with other search conditions:" in proc.stderr
+    assert "  --scan-branches   default -> all" in proc.stderr
+    assert "  --extension       py -> md" in proc.stderr
+    assert "  --project-filter  none -> acme/*" in proc.stderr
+    assert session.read_text(encoding="utf-8") == before  # nothing appended
+    # Speed, limits and outputs may change.
+    proc = run_cli(*gl_args(fake_gitlab), "-f", str(_terms(tmp_path)), "--extension", "py", "--session", "audit",
+                   "--resume", "-w", "2", "--search-rpm", "600", "--jitter", "0.001", check=True)
+    assert "Cannot resume" not in proc.stderr
 
 
 def test_run_journal_records_filters_and_downloads(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):

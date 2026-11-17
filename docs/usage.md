@@ -181,7 +181,7 @@ case-insensitively:
 - It combines with the other filters (`--active-after`, `--forks skip`, file filters).
   Fork upstreams are still resolved against the whole index for `--forks branch-diff`.
 - The session `meta` stores it (`"project_filter"`), the run journal records it, and
-  `--resume` with another filter warns.
+  `--resume` with another filter is refused (see [Sessions and resume](#sessions-and-resume)).
 
 ## Branches
 
@@ -318,7 +318,7 @@ gitlab-harvester -u ... -t ... -s token --filename 'config*' --extension yml
 - With `--file-changed-*`, the name check runs first, so files outside the filter
   never cost a commits request.
 - The session `meta` records `filename` and `extension`. `--resume` with other
-  filters warns: the terms already done were searched with the old ones.
+  filters is refused: the terms already done were searched with the old ones.
 
 ### Without a term: every file by name
 
@@ -657,6 +657,22 @@ gitlab-harvester -u ... -t ... -f words.txt --session audit --resume
 
 - Completed terms are skipped. The term that was in progress is searched again,
   so its hits may appear twice; run `dedup` afterwards.
+- A resumed run must search the same way, or one session would mix two different
+  searches. `--resume` is refused, with nothing written, when any of these differ from
+  the session's `meta`: `--url`, `--scan-branches` (`-b`), `--forks`,
+  `--fork-diff-bases` (with `branch-diff`), `--started-from`, `--active-before`,
+  `--file-changed-after`/`-before`, `--filename`, `--extension`, `--project-filter`,
+  or files by name without a term. The message lists what changed:
+
+  ```
+  Cannot resume audit.jsonl: it was started with other search conditions:
+    --extension       py -> md
+    --project-filter  none -> acme/*
+  ```
+
+  Resume with the original options, or start a new session. Speed and outputs may
+  change: tokens, `--workers`, the rate limits, `--jitter`, the User-Agent,
+  downloads, post-processing.
 - A term is **completed** only if all its searches succeeded. If a search failed with
   an error that may hide hits (HTTP 5xx, 429 after the retries, 401, a timeout, a
   connection error, an invalid response), the run continues, but the term gets a

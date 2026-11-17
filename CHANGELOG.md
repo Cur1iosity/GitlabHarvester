@@ -38,6 +38,15 @@ All notable changes to GitlabHarvester are documented here. The format follows
 
 ### Fixed
 
+- **`--resume` keeps the search the same.** Resuming with another `--filename`,
+  `--extension` or `--project-filter` only warned, and other changed conditions
+  were not noticed at all, so one session could mix the results of two different
+  searches: terms completed in Python files, the rest in every file. Now `--resume`
+  is refused, before anything is written, when the URL, the branch or fork modes
+  (`-b`/`--scan-branches`, `--forks`, `--fork-diff-bases`), the activity and file
+  time windows or the file and project filters differ from the session's `meta`;
+  the message lists what changed. Tokens, workers, rate limits, jitter, the
+  User-Agent and the outputs may still change.
 - **`--forks branch-diff` compares commits, not just branch names.** A fork's
   branch was skipped whenever the upstream had a branch of the same name, so
   commits the fork added to it (a token pushed to its copy of `feature/auth`)

@@ -277,6 +277,38 @@ class SessionMeta:
     def to_record(self) -> dict[str, Any]:
         return _typed_record("meta", self)
 
+    def scope_changes(self, now: "SessionMeta") -> list[tuple[str, Any, Any]]:
+        """
+        (field, this session's value, ``now``'s value) for every condition of the
+        search that differs: what was searched, where and in which files. A
+        resumed run must keep them, or one session would mix two different searches.
+        Speed, tokens, limits and outputs may change.
+
+        A field missing from an older session's meta: for SCOPE_FILTERS the option
+        didn't exist yet (= off, compared as None), for the others unknown (skipped).
+        """
+        changes: list[tuple[str, Any, Any]] = []
+        for name in SCOPE_FIELDS:
+            before, after = getattr(self, name), getattr(now, name)
+            if before is None and name not in SCOPE_FILTERS:
+                continue
+            if name == "fork_diff_bases" and not (self.forks == now.forks == "branch-diff"):
+                continue  # used by --forks branch-diff only
+            if name == "url":
+                before, after = before.rstrip("/"), (after or "").rstrip("/")
+            if before != after:
+                changes.append((name, before, after))
+        return changes
+
+
+# Fields of SessionMeta that decide what a session searched (see SessionMeta.scope_changes), in file order.
+SCOPE_FIELDS = ("url", "scan_branches", "forks", "fork_diff_bases", "started_from", "active_before",
+                "file_changed_after", "file_changed_before", "filename", "extension", "project_filter",
+                "files_only")
+# Of these, the filters that are off when an older meta doesn't record them.
+SCOPE_FILTERS = frozenset({"started_from", "active_before", "file_changed_after", "file_changed_before",
+                           "filename", "extension", "project_filter"})
+
 
 @dataclass(frozen=True, slots=True)
 class ResumeRecord:
