@@ -4,6 +4,15 @@ All notable changes to GitlabHarvester are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.1] - 2026-11-17
+
+### Fixed
+
+- A wrong token or an unreachable URL ends the run with one clear line instead of a
+  Python traceback: `The token failed to authenticate to <url> (HTTP 401 Unauthorized).
+  Check the token and that it has the read_api scope.` (`Token #1 of N ...` with
+  several tokens) or `Cannot reach <url> (...). Check the URL, the network and --proxy.`
+
 ## [1.4.0] - 2026-11-17
 
 ### Added

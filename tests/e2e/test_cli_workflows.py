@@ -602,7 +602,7 @@ def test_log_file_records_failed_runs_and_postprocess_modes(fake_gitlab: FakeGit
     run_cli("-m", "convert", "--input-file", "d.jsonl", "--output-file", "d.json", "--log-file", "runs.log", check=True)
 
     messages = [msg for _, msg in _journal(tmp_path / "runs.log")]
-    assert any(m.startswith("Run failed after ") and "GitlabAuthenticationError" in m for m in messages)
+    assert any(m.startswith("Run failed after ") and "The token failed to authenticate" in m for m in messages)
     assert any(m.startswith("Dedup: s.jsonl -> d.jsonl (kept ") for m in messages)
     assert any(m.startswith("Convert: d.jsonl -> d.json (") for m in messages)
     assert sum(m.startswith("Run started: ") for m in messages) == 4
@@ -619,3 +619,14 @@ def test_log_file_from_config_is_relative_to_the_config(fake_gitlab: FakeGitLab,
 def test_no_log_file_means_no_journal(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
     run_cli(*gl_args(fake_gitlab), "-s", "token", "--session-file", "s.jsonl", check=True)
     assert not list(tmp_path.glob("*.log"))
+
+
+def test_a_wrong_token_or_url_is_one_clear_line_not_a_traceback(fake_gitlab: FakeGitLab, run_cli):
+    proc = run_cli("-u", fake_gitlab.url, "-t", "wrong-token", "-s", "x")
+    assert proc.returncode != 0 and "Traceback" not in proc.stderr
+    assert f"The token failed to authenticate to {fake_gitlab.url} (HTTP 401 Unauthorized)" in proc.stderr
+    assert "wrong-token" not in proc.stderr
+
+    proc = run_cli("-u", "http://127.0.0.1:9", "-t", "x", "-s", "x", "--timeout", "5")
+    assert proc.returncode != 0 and "Traceback" not in proc.stderr
+    assert "Cannot reach http://127.0.0.1:9 (ConnectionError" in proc.stderr

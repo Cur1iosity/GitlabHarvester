@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import re
 import logging
 import os
 import threading
@@ -61,6 +62,19 @@ _HTTP_REASONS = {
     429: "Too Many Requests", 500: "Internal Server Error", 502: "Bad Gateway",
     503: "Service Unavailable", 504: "Gateway Timeout",
 }
+
+
+_CONNECTION_REASON = re.compile(
+    r"(Failed to establish a new connection: [^'\")]+|Read timed out|Connection refused|"
+    r"Name or service not known|getaddrinfo failed|Temporary failure in name resolution|"
+    r"timed out|Remote end closed connection without response|Connection reset by peer)")
+
+
+def describe_connection_error(error: BaseException) -> str:
+    """'ConnectionError: Failed to establish a new connection: [Errno 111] Connection refused' (no urllib3 repr)."""
+    match = _CONNECTION_REASON.search(str(error))
+    name = type(error).__name__
+    return f"{name}: {match.group(1).rstrip('. ')}" if match else describe_api_error(error)
 
 
 def describe_api_error(error: BaseException) -> str:
@@ -707,6 +721,17 @@ class GitlabHarvester:
                 "If the instance uses a private CA, pass it with --ca-bundle FILE. "
                 "To connect anyway without verification, use --insecure "
                 "(not recommended: the token would be sent to an unverified server)."
+            ) from None
+        except requests.exceptions.RequestException as e:
+            raise GitlabHarvesterError(
+                f"Cannot reach {url} ({describe_connection_error(e)}). Check the URL, the network and --proxy."
+            ) from None
+        except gitlab.exceptions.GitlabError as e:
+            who = "The token" if len(self.tokens) <= 1 else f"Token #1 of {len(self.tokens)}"
+            hint = (" Check the token and that it has the read_api scope."
+                    if isinstance(e, gitlab.exceptions.GitlabAuthenticationError) else "")
+            raise GitlabHarvesterError(
+                f"{who} failed to authenticate to {url} ({describe_api_error(e)}).{hint}"
             ) from None
 
     @client_required

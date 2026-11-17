@@ -204,7 +204,8 @@ def test_unreachable_server(run_cli, tmp_path: Path):
     proc = run_cli("-u", f"http://127.0.0.1:{port}", "-t", "x", "-s", "password", "--timeout", "2")
     assert proc.returncode != 0
     # Linux: "Connection refused"; Windows retries SYNs and reports a connect timeout.
-    assert "requests.exceptions.Connect" in proc.stderr
+    assert f"Cannot reach http://127.0.0.1:{port} (Connect" in proc.stderr
+    assert "Traceback" not in proc.stderr
 
 
 def test_partial_failures_still_produce_a_complete_session(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
