@@ -234,9 +234,12 @@ The files a run reads and writes are defined once, as frozen slots dataclasses:
   index appends them to the raw records, so keys this version doesn't know
   survive. dedup, convert and the per-term split stream the session as dicts
   for the same reason: they pass through records of any version unchanged.
-- **Memory.** An index of 30,000 projects takes 38.7 MB as dicts and 18.8 MB as
-  `Project` objects (`ProjectIndexer.load_index`). The engine works on
-  `Project`.
+- **Memory and speed.** The engine works on `Project`. An index of 30,000
+  projects with 3 branches each takes 41.0 MB as dicts and 20.7 MB as `Project`
+  objects (`ProjectIndexer.load_index`). The CLI process peaks at 62 MB instead
+  of 84 MB, and planning a search is about 25% faster. Loading costs about 0.09 s
+  more, because `Project.from_record` runs once per line and is kept lean for that
+  reason. See the CHANGELOG of 1.4.3 for the measurements.
 - **Dicts at the facade.** `GitlabHarvester` keeps its dict interface:
   - `search_keywords` and `scan_project` take Projects or index records;
   - they and `scan_branch` return dicts;

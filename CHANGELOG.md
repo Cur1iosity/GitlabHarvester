@@ -19,9 +19,25 @@ unchanged. The index and session files are byte-identical to the ones 1.4.2 writ
     `ProjectResult`, `BranchResult`, `Hit`, `Checkpoint`, `SummaryRecord`, and
     `read_record()` for any session line.
 
-  The engine works on `Project` objects, so a loaded index takes about half the
-  memory: 18.8 MB instead of 38.7 MB for 30,000 projects. See
-  [docs/architecture.md](docs/architecture.md), "Data models".
+  What it gives: one definition of each file format for its writers and
+  readers (a field can no longer be written under one name and read under
+  another), typed access instead of string keys in the engine, and less memory.
+  See [docs/architecture.md](docs/architecture.md), "Data models".
+- **Performance**, measured against 1.4.2 on an index of 30,000 projects with
+  3 branches each:
+
+  | | 1.4.2 | 1.4.3 |
+  |---|---|---|
+  | peak memory of the CLI process (index + plan) | 84 MB | 62 MB (−26%) |
+  | the loaded index | 41.0 MB | 20.7 MB (−50%) |
+  | planning a search (which projects and branches) | 0.044 s | 0.033 s (−25%) |
+  | loading the index | 0.17 s | 0.26 s (+0.09 s) |
+
+  Typed objects cost a little time to build. That is paid once per run, and
+  half the memory is worth it on large instances. The search itself is as fast
+  as before: its time goes to API requests. A full search of a
+  1,000-project instance with 1 and 4 workers takes the same time within the
+  noise.
 - `GitlabHarvester` keeps its dict interface. `search_keywords`, `search_keyword`
   and `scan_project` take `Project` objects or index records. They and
   `scan_branch` return dicts, and so does `load_projects_from_file`.
@@ -73,6 +89,22 @@ A technical release: the command line, the config file and every file format
   `FileLister`. Its constructor and public methods are unchanged, and
   `GitlabHarvester.from_settings(HarvesterSettings(...))` is new. See
   [docs/architecture.md](docs/architecture.md), Part I.
+
+  What it gives:
+  - **One place for every client.** TLS verification, proxy, timeout,
+    User-Agent and request pacing are the same for the main client, every
+    worker thread and the rate-limit probe. A new client setting is added in
+    one place.
+  - **Replaceable parts.** Tests swap a part (`harvester.connection.use_client(stub)`)
+    instead of patching private attributes, and the layer rule is a test.
+  - **Smaller modules.** The largest module went from 2,014 lines
+    (`harvester.py`) to under 600, and `docs/architecture.md` says where new code
+    goes.
+
+  It is a structural change only: speed and memory are the same as 1.4.1 within
+  the noise. Measured on an index of 30,000 projects (loading 0.19 s vs 0.20 s,
+  planning 0.05 s vs 0.06 s, peak memory of the CLI 84.5 MB vs 84.2 MB) and on a
+  full search of a 1,000-project instance.
 - **Module paths.** Only `from glh import GitlabHarvester, CliParser, __version__`
   is stable. Code that imported other modules needs the new paths:
 
