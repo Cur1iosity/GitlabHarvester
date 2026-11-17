@@ -202,7 +202,9 @@ class SearchEngine:
         name = task.project_name
         n_branches = len(task.branches)
         label = f"{name} @ {task.branch}" + (f" [{task.branch_no + 1}/{n_branches}]" if n_branches > 1 else "")
-        with self.active.running(label, report=f"'{task.term}' in {name} @ {task.branch}"):
+        doing = (f"listing the files ({task.term}) of" if task.file_listing is not None
+                 else f"searching '{task.term}' in")
+        with self.active.running(label, report=f"{doing} {name} @ {task.branch}"):
             if self.connection.concurrency <= 1:
                 # Inline (main thread): show the new task now. Worker threads
                 # leave redraws to the status ticker.
@@ -349,7 +351,7 @@ class SearchEngine:
                     running.reported_at = now
                     details = ", ".join(x for x in (running.step, running.waiting) if x)
                     progress.note(
-                        f"Still searching {running.report}"
+                        f"Still {running.report}"
                         f"{f' ({details})' if details else ''}: running for "
                         f"{format_duration(self.active.elapsed(running))}"
                     )

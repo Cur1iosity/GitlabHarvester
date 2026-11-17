@@ -11,7 +11,10 @@ How the files of a branch are found (``--file-listing``):
 - ``tree``: the repository tree (any GitLab, one request per 100 entries);
 - ``auto``: the search first, the tree for a branch with no results or an
   error, until the search has found files once (then it is trusted) or
-  rejected the query as invalid (then only the tree is used).
+  rejected the query as invalid (then only the tree is used). Once trusted, a
+  failed search is a failure of that branch (warned, the term is not marked
+  done, ``--resume`` repeats it), never a fallback to the tree: the tree of a
+  large repository can take hours to list.
 """
 
 from __future__ import annotations
@@ -118,7 +121,7 @@ class FileLister:
                 if len(batch) < per_page:
                     break
         except (gitlab.exceptions.GitlabError, requests.exceptions.RequestException) as e:
-            if strict or is_permanent_error(e):
+            if strict or self.state == "search" or is_permanent_error(e):
                 self.logger.warning("Could not search %s @ %s (%s); skipping it, continuing",
                                     task.project_name, task.branch, describe_api_error(e))
                 errors.append(e)
@@ -128,8 +131,8 @@ class FileLister:
                     "tree", "File listing: the search API rejects filter-only queries here "
                             f"({describe_api_error(e)}); listing repository trees instead")
             else:
-                self.logger.debug("Filter-only search of %s @ %s failed (%s); listing the tree",
-                                  task.project_name, task.branch, describe_api_error(e))
+                self.logger.info("Filter-only search of %s @ %s failed (%s); listing its repository tree",
+                                 task.project_name, task.branch, describe_api_error(e))
             return None
         if found:
             self._set_state("search", "File listing: the search API takes filter-only queries here; using it")

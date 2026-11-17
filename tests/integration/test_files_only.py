@@ -74,6 +74,22 @@ def test_auto_trusts_the_search_once_it_found_files(fake_gitlab: FakeGitLab, mak
     assert len(fake_gitlab.api_requests("tree")) == glh.file_listing_counts["tree"]
 
 
+def test_auto_never_falls_back_to_the_tree_once_the_search_is_trusted(fake_gitlab: FakeGitLab, make_harvester,
+                                                                     index):
+    # A trusted search that fails for one project (a timeout or 5xx on a huge repository) must not
+    # silently turn into listing that repository's whole tree: it is a failed search of that branch.
+    fake_gitlab.reset(scenario={"extends": "default", "instance": {"search_filters_only": "paths"}})
+    fake_gitlab.add_fault({"match": {"path": "^/api/v4/projects/101/search$"},
+                           "response": {"status": 500, "json": {"message": "500 Internal Server Error"}}})
+    glh = make_harvester()
+    fake_gitlab.clear_journal()
+    found = collect(glh, index, "auto", PY)
+    assert glh.file_listing_counts["search"] > 0
+    assert not [r for r in fake_gitlab.api_requests("tree") if "/projects/101/" in r.path]
+    assert found == {f for f in expected_files(fake_gitlab, index, PY) if f[0] != 101}
+    assert glh.incomplete_terms == ["extension:py"]  # not marked done: --resume searches it again
+
+
 def test_auto_stops_searching_when_the_query_is_rejected(fake_gitlab: FakeGitLab, make_harvester, index):
     fake_gitlab.reset(scenario={"extends": "default", "instance": {"search_filters_only": "error"}})
     glh = make_harvester()
