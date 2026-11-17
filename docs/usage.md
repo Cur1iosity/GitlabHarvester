@@ -348,6 +348,21 @@ gitlab-harvester -u ... -t ... -s password --download-files --session audit
 gitlab-harvester -u ... -t ... -f words.txt --extension yml --download-files --download-max-size 2M
 ```
 
+Why: a hit is a few lines around the match. With the whole file on disk you can:
+- **read the whole document**: the connection string next to the password, the
+  host it is for, the other keys in the same `.env`;
+- **hand the files to a secret scanner** for a detailed look, offline and without
+  more API requests, e.g. [TruffleHog](https://github.com/trufflesecurity/trufflehog):
+
+  ```bash
+  trufflehog filesystem results/password/files --no-verification
+  ```
+
+  Without `--no-verification`, TruffleHog checks the secrets it finds against the
+  services they belong to, which is a request from your machine to each of them;
+- keep the evidence: `--to-zip` packs the session, the results and the files into
+  one archive.
+
 Every file that produced a hit is saved into the term's `files` directory next to
 the session: `<dir>/<term>/files/` (`results/<term>/files/` with the default session
 location), created on the first download. The name is

@@ -50,7 +50,17 @@ gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -s password
 ```
 
 The first run builds a project index (`<host>_project_index.jsonl`), and later runs reuse it.
-Hits are written to a JSONL session file as they are found.
+Hits are written to a JSONL session file as they are found: a link to the file and line,
+and the lines around the match. Read them with `jq`:
+
+```bash
+jq -r 'select(.result) | .result.project_search_result[].branch_search_result[] | .url, .data' results/*.jsonl
+```
+
+With `--download-files` every file with hits is saved whole: read the full document, or
+run a secret scanner over the files offline, e.g.
+`trufflehog filesystem results/password/files --no-verification`
+([details](docs/usage.md#downloading-the-files-with-hits---download-files)).
 
 Lists of terms, specific files only, saving the files with hits, all branches and forks,
 fresh findings only, resuming, parallel requests and rate limits, deduplicated reports,
