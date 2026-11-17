@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "gitlab-harvester"
 version = "1.4.3"
-description = "Build a GitLab instance project index and search repositories for sensitive keywords (API-only, no cloning)."
+description = "Hunt credentials, tokens and secrets across every repository of a GitLab instance through the API: no cloning, works on GitLab CE. Built for red teams and pentesters: one token, the whole instance, rate limits, jitter and User-Agent rotation to keep the noise down."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
