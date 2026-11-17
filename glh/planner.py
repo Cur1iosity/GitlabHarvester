@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from glh.filefilter import FileFilter
+from glh.projectfilter import ProjectFilter
 
 BranchesMode = str | int  # "default" | "all" | int
 
@@ -44,6 +45,8 @@ class ScanOptions:
         filename / extension: Optional file filters (--filename, --extension),
             see glh/filefilter.py: sent to GitLab inside the search string and
             re-checked on every result path.
+        project_filter: Patterns of --project-filter (glh/projectfilter.py):
+            only indexed projects whose path matches one of them are searched.
     """
     scan_branches: BranchesMode = "default"  # default|all|N
     forks_mode: str = "include"  # skip|include|branch-diff|all-branches
@@ -54,6 +57,12 @@ class ScanOptions:
     file_changed_before: datetime | None = None
     filename: str | None = None
     extension: str | None = None
+    project_filter: tuple[str, ...] = ()
+
+    @property
+    def projects(self) -> ProjectFilter:
+        """Project path filter of the search (falsy when unset)."""
+        return ProjectFilter(tuple(self.project_filter))
 
     @property
     def file_window(self) -> "TimeWindow":
@@ -210,6 +219,7 @@ def get_upstream_id(project: dict[str, Any]) -> int | None:
 
 
 # Reasons a project is left out of a scan (keys of ScanPlan.skipped).
+SKIP_FILTERED = "filtered"
 SKIP_EMPTY = "empty"
 SKIP_FORK = "fork"
 SKIP_INACTIVE = "inactive"
@@ -223,6 +233,7 @@ def skip_reason(project: dict[str, Any], options: ScanOptions) -> str | None:
 
     Rules, checked in this order:
 
+    - SKIP_FILTERED: the path matches none of options.project_filter.
     - SKIP_EMPTY: empty repositories are always skipped.
     - SKIP_FORK: forked projects are skipped when forks_mode is "skip".
     - SKIP_INACTIVE: projects inactive since options.started_from are skipped.
@@ -235,6 +246,8 @@ def skip_reason(project: dict[str, Any], options: ScanOptions) -> str | None:
     Returns:
         One of the SKIP_* constants, or None.
     """
+    if options.project_filter and not options.projects.matches(project):
+        return SKIP_FILTERED
     if project.get("empty_repo", False):
         return SKIP_EMPTY
     if is_fork_project(project) and options.forks_mode == "skip":
@@ -432,6 +445,7 @@ class ScanPlan:
         skipped: Excluded project count per SKIP_* reason.
         started_from: Activity bound used for SKIP_INACTIVE (for messages).
         active_before: Activity bound used for SKIP_TOO_RECENT (for messages).
+        project_filter: Patterns used for SKIP_FILTERED (for messages).
         projects_by_id: Index lookup used for fork/upstream resolution.
     """
     targets: tuple[tuple[dict[str, Any], tuple[str, ...]], ...]
@@ -439,6 +453,7 @@ class ScanPlan:
     skipped: dict[str, int] = field(default_factory=dict)
     started_from: datetime | None = None
     active_before: datetime | None = None
+    project_filter: tuple[str, ...] = ()
     projects_by_id: dict[int, dict[str, Any]] = field(default_factory=dict, repr=False)
 
     @property
@@ -457,6 +472,8 @@ class ScanPlan:
         text = f"{self.project_count:,} of {self.total_projects:,} {noun}, {self.branch_count:,} "
         text += "branch" if self.branch_count == 1 else "branches"
         reasons: list[str] = []
+        if n := self.skipped.get(SKIP_FILTERED, 0):
+            reasons.append(f"{n:,} not matching --project-filter {', '.join(self.project_filter)}")
         if n := self.skipped.get(SKIP_EMPTY, 0):
             reasons.append(f"{n:,} empty")
         if n := self.skipped.get(SKIP_FORK, 0):
@@ -510,5 +527,6 @@ def build_scan_plan(projects: list[dict[str, Any]], options: ScanOptions) -> Sca
         skipped=dict(skipped),
         started_from=options.started_from,
         active_before=options.active_before,
+        project_filter=tuple(options.project_filter),
         projects_by_id=projects_by_id,
     )

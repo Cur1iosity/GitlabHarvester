@@ -143,6 +143,32 @@ gitlab-harvester -u ... -t ... -s password --index-file acme.jsonl    # custom l
   console's VT mode is switched on); elsewhere it isn't shown. `NO_COLOR` turns the
   color off.
 
+### Only some projects: --project-filter
+
+```bash
+gitlab-harvester -u ... -t ... -f words.txt --project-filter k8s            # paths containing k8s
+gitlab-harvester -u ... -t ... -f words.txt --project-filter 'infra/*,*-k8s'
+```
+
+`--project-filter PATTERNS` searches only the indexed projects whose path
+(`group/subgroup/project`) matches one of the comma-separated patterns,
+case-insensitively:
+
+| Pattern | Matches |
+|---|---|
+| `k8s` (no `*`/`?`) | a substring anywhere: `infra/k8s-deploy`, `k8s/charts`, `team/my-k8s` |
+| `infra/*` | the whole path: everything under the `infra` group, subgroups included |
+| `*-k8s` | paths ending with `-k8s` |
+| `*/api-servic?` | `?` is one character |
+
+- It works on the existing index at search time; the index itself stays complete,
+  so each search can pick other projects without rebuilding it. Filtered projects
+  cost no API request.
+- The search plan counts them: `(skipped: 7 not matching --project-filter k8s, ...)`.
+- It combines with the other filters (`--active-after`, `--forks skip`, file filters).
+  Fork upstreams are still resolved against the whole index for `--forks branch-diff`.
+- The session `meta` stores it (`"project_filter"`), the run journal records it, and
+  `--resume` with another filter warns.
 
 ## Branches
 
@@ -864,6 +890,7 @@ are URL-encoded. With `--download-files`, a hit whose file was saved also has
 | `-f, --terms-file FILE` | — | file with one term per line |
 | `--filename PATTERN` | — | search only files with this name: exact (`settings.py`, extension included) or a mask with `*` (`*.env`, `config*`) |
 | `--extension EXT` | — | search only files with this extension (`py`, `.py` and `*.py` are the same) |
+| `--project-filter PATTERNS` | — | search only indexed projects whose path matches: substring (`k8s`) or mask (`infra/*`), comma-separated |
 | `--index-file FILE` | `<host>_project_index.jsonl` | project index location |
 | `--dump-projects` | off | rebuild the index before searching |
 | `-bs, --batch-size N` | 100 | page size for project listing |

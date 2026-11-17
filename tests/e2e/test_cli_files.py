@@ -118,10 +118,10 @@ def test_resume_with_other_filters_warns(fake_gitlab: FakeGitLab, run_cli, tmp_p
     proc = run_cli(*gl_args(fake_gitlab), "-s", "password", "--extension", "md", "--session", "audit",
                    "--resume", check=True)
     # The harvester's console log handler writes to stdout.
-    assert "other file filters (extension md) than it was started with (extension py)" in proc.stdout + proc.stderr
+    assert "other filters (extension md) than it was started with (extension py)" in proc.stdout + proc.stderr
     proc = run_cli(*gl_args(fake_gitlab), "-s", "password", "--extension", "py", "--session", "audit",
                    "--resume", check=True)
-    assert "other file filters" not in proc.stdout + proc.stderr
+    assert "other filters" not in proc.stdout + proc.stderr
 
 
 def test_run_journal_records_filters_and_downloads(fake_gitlab: FakeGitLab, run_cli, tmp_path: Path):
@@ -182,5 +182,23 @@ def test_to_zip_from_the_config_file(fake_gitlab: FakeGitLab, run_cli, tmp_path:
     run_cli("-c", str(cfg), *gl_args(fake_gitlab), "-s", "password", "--session", "again", "--no-to-zip",
             check=True)
     assert not (tmp_path / "again.zip").exists()
+
+
+# --------------------------------------------------------------------------- --project-filter
+
+
+def test_project_filter_searches_only_matching_projects_of_the_index(fake_gitlab: FakeGitLab, run_cli,
+                                                                     tmp_path: Path):
+    run_cli(*gl_args(fake_gitlab), "-m", "dump-index", check=True)
+    fake_gitlab.clear_journal()
+    proc = run_cli(*gl_args(fake_gitlab), "-s", "password", "--session", "s", "--project-filter", "API-SERVICE",
+                   check=True)
+    assert "not matching --project-filter API-SERVICE" in proc.stderr
+    searched = {r.path.split("/")[4] for r in fake_gitlab.api_requests("project_search")}
+    assert searched == {"101", "201"}  # acme/backend/api-service, alice/api-service
+    assert not fake_gitlab.api_requests("projects")  # the index was reused, not rebuilt
+    s = Session.load(tmp_path / "s.jsonl")
+    assert s.records[0]["project_filter"] == ["API-SERVICE"]
+    assert {h["project_id"] for h in s.hits()} == {101, 201}
 
 

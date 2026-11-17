@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from importlib.metadata import version, PackageNotFoundError
 
-from glh import downloads, filefilter, limits, ratelimit, user_agents
+from glh import downloads, filefilter, limits, projectfilter, ratelimit, user_agents
 from glh.config import TERMS_DEST, ConfigError, load_config
 from glh.planner import parse_timestamp
 from glh.postprocess.pipeline import normalize_steps
@@ -178,6 +178,14 @@ def parse_extension(value: str) -> str:
         raise argparse.ArgumentTypeError(str(e)) from None
 
 
+def parse_project_filter(value: str) -> tuple[str, ...]:
+    """Parse --project-filter: comma-separated project path patterns (k8s, infra/*)."""
+    try:
+        return projectfilter.parse_patterns(value)
+    except projectfilter.ProjectFilterError as e:
+        raise argparse.ArgumentTypeError(f"{e}. Use e.g. k8s, infra/* or k8s,*-deploy.") from None
+
+
 def parse_size(value: str) -> int:
     """Parse --download-max-size: bytes or with k/M/G (500k, 10M, 1G); 0 = no limit."""
     try:
@@ -284,6 +292,7 @@ class CliArgs:
     terms: tuple[str, ...]
     filename: str | None
     extension: str | None
+    project_filter: tuple[str, ...]
     session: str | None
     session_file: str | None
     resume: bool
@@ -514,6 +523,17 @@ class CliParser:
                  "(settings.py, .env, Dockerfile), or a mask where * matches any characters (*.env, "
                  "config*, docker-compose*.yml, *secret*). A PATTERN with / matches the end of the "
                  "path (config/*.yml).",
+        )
+        pf = parser.add_argument_group(
+            "project filter",
+            "Search only some projects of the index (it stays complete; filtered projects cost no requests).",
+        )
+        pf.add_argument(
+            "--project-filter", type=parse_project_filter, default=(), metavar="PATTERNS",
+            help="Search only indexed projects whose path (group/subgroup/project) matches one of these "
+                 "comma-separated patterns, case-insensitive: without * a substring (k8s), with * the "
+                 "whole path (infra/*, *-k8s). Applied to the existing index, no extra API requests; "
+                 "the index itself stays complete.",
         )
         ff.add_argument(
             "--extension", type=parse_extension, default=None, metavar="EXT",
@@ -748,6 +768,7 @@ class CliParser:
             terms=tuple(ns.terms),
             filename=ns.filename,
             extension=ns.extension,
+            project_filter=tuple(ns.project_filter),
             session=ns.session,
             session_file=ns.session_file,
             resume=ns.resume,

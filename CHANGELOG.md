@@ -35,6 +35,13 @@ minor release. Runs that use it say so.
   and `L` shows the proposal again. Without a terminal proposals are logged. The run
   ends with the limits to start the next run with.
 - `-m dump-index --auto-limits` measures the other API only.
+- **Search only some projects of the index**: `--project-filter PATTERNS`
+  (comma-separated, case-insensitive) keeps the projects whose
+  `group/subgroup/project` path contains a pattern (`k8s`) or matches a mask
+  (`infra/*`, `*-k8s`). It filters the existing index at search time — no API
+  requests for the others, the index stays complete — and the search plan counts
+  them (`N not matching --project-filter …`). Stored in the session `meta`; `--resume`
+  with another filter warns. New `project-filter` key in `config.example.ini`.
 - **Index reuse tip**: while the project index is built, a turquoise line above the
   status line says how to reuse it next time (`--index-file …`; `--dump-projects`
   rebuilds) and disappears when the index is done. Shown on ANSI terminals only

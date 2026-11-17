@@ -209,6 +209,7 @@ def _describe_options(args: CliArgs) -> str:
             "file-changed": _when(args.file_changed_after, args.file_changed_before),
             "filename": args.filename,
             "extension": args.extension,
+            "project-filter": ",".join(args.project_filter) or None,
             "download-files": args.download_files or None,
             "download-max-size": (format_size(args.download_max_size) if args.download_max_size else "no limit")
             if args.download_files else None,
@@ -522,6 +523,7 @@ def _search(args: CliArgs, glh: GitlabHarvester, keywords: list[str]) -> None:
         file_changed_before=args.file_changed_before,
         filename=args.filename,
         extension=args.extension,
+        project_filter=args.project_filter,
     )
 
     session_path = _resolve_session_path(glh.get_instance_id(), args.session, args.session_file, stamp)
@@ -571,6 +573,7 @@ def _search(args: CliArgs, glh: GitlabHarvester, keywords: list[str]) -> None:
                 file_changed_after=args.file_changed_after.isoformat() if args.file_changed_after else None,
                 file_changed_before=args.file_changed_before.isoformat() if args.file_changed_before else None,
                 **options.file_filter.to_meta(),
+                project_filter=list(args.project_filter) or None,
                 keywords_count=len(keywords),
                 output_separated=args.output_separated,
                 download_files=args.download_files,
@@ -641,19 +644,20 @@ def _zip_results(layout: OutputLayout, paths: list[Path | str]) -> None:
 
 def _warn_changed_file_filter(glh: GitlabHarvester, session_path: Path, options: ScanOptions) -> None:
     """
-    --resume with other --filename/--extension than the session's first run:
-    the completed terms were searched in other files, so say so.
+    --resume with other --filename/--extension/--project-filter than the session's
+    first run: the completed terms were searched in other files or projects, so say so.
     """
     meta = load_session_meta(session_path)
     if meta is None:
         return
-    before = {key: meta.get(key) for key in ("filename", "extension")}
-    now = options.file_filter.to_meta()
+    before = {key: meta.get(key) for key in ("filename", "extension", "project_filter")}
+    now = {**options.file_filter.to_meta(), "project_filter": list(options.project_filter) or None}
     if before != now:
         def show(values: dict[str, Any]) -> str:
-            return ", ".join(f"{k} {v}" for k, v in values.items() if v) or "none"
+            return ", ".join(f"{k.replace('_', '-')} {','.join(v) if isinstance(v, list) else v}"
+                             for k, v in values.items() if v) or "none"
         glh.logger.warning(
-            "Resuming %s with other file filters (%s) than it was started with (%s): "
+            "Resuming %s with other filters (%s) than it was started with (%s): "
             "terms already completed were searched with the old filters.",
             session_path, show(now), show(before),
         )

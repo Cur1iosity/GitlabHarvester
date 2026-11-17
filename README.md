@@ -73,6 +73,7 @@ config files:
 | `--forks include\|skip\|branch-diff\|all-branches` | how forks are handled |
 | `--time-after DATE`, `--time-before DATE` | limit the index, its projects and the files with hits to a time window |
 | `--started-from 2024-06-01` | search only indexed projects with activity since the date |
+| `--project-filter k8s,infra/*` | search only the indexed projects whose path matches (substring or mask) |
 | `--filename '*.env'`, `--extension py` | search only files with this name (exact, or a mask with `*`) or extension |
 | `--download-files`, `--download-max-size 10M` | save every file with hits to `<term>/files/` for offline analysis |
 | `-t "tok1;tok2"`, `--token-file FILE` | several tokens run in parallel, each with its own workers and rate-limit budget |
