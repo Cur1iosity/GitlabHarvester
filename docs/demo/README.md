@@ -12,7 +12,7 @@ the version of the checkout, not whatever is on PyPI at recording time.
 
 | File | Purpose |
 |---|---|
-| `demo.tape` | what is typed; waits for the output (`Wait /done!/`, `Wait /Done\. Keywords/`) instead of fixed pauses |
+| `demo.tape` | what is typed; waits for the output (`Wait /done!/`, then the last row of the final `Results` block) instead of fixed pauses. `tests/e2e/test_demo_tape.py` checks the patterns against the real CLI output, and that the output fits the terminal height |
 | `demo.yaml` | Fake GitLab scenario: the default dataset plus ~90 generated projects (~100 total, hundreds of hits) with small response delays, so the scan looks substantial and the progress line stays readable |
 | `setup.sh` | hidden setup: private CA and certificate, HTTPS Fake GitLab, term list, token |
 | `Dockerfile` | VHS image with pipx, a local wheel directory for GitlabHarvester, and the Fake GitLab |

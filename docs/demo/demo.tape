@@ -8,7 +8,7 @@ Output demo/out/demo.gif
 Set Shell "bash"
 Set FontSize 16
 Set Width 1300
-Set Height 560
+Set Height 900
 Set Padding 18
 Set Framerate 24
 Set TypingSpeed 28ms
@@ -31,5 +31,7 @@ Sleep 1s
 Type "gitlab-harvester -u https://gitlab.example.com -t $GITLAB_TOKEN -f words.txt -b all --forks branch-diff --session audit"
 Sleep 400ms
 Enter
-Wait+Screen@90s /Done\. Keywords/
+# The last row of the final 'Results' block (tests/e2e/test_demo_tape.py checks the
+# patterns against the real output, so a change of the console output fails the tests).
+Wait+Screen@90s /session +audit\.jsonl/
 Sleep 3s
