@@ -4,6 +4,62 @@ All notable changes to GitlabHarvester are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.4] - 2026-11-17
+
+### Added
+
+- **A live status panel.** On a terminal that understands ANSI, the progress of
+  a phase is a small block with a spinner instead of one long line. It is
+  readable on narrow screens too, and with `--workers` it shows every running
+  task on its own line:
+
+  ```
+  ⠹ Searching 'api_key' (2/3)
+    term     32/99 projects (32%) · 0:01 · ETA 0:02
+    total    131/297 (44%) · 0:04 · ETA 0:06
+    found    304 hits · HTTP 429 x3
+    running  acme/team-32/service-032 @ main, page 3, 0:01
+             acme/team-33/service-033 @ main, 0:00
+  ```
+
+  It is redrawn in place line by line, and every line is fitted to the terminal
+  width, so nothing wraps. Where escape sequences don't work, the one-line status
+  stays: pipes, files, CI, the run journal and old Windows consoles. The spinner
+  falls back to `|/-\` where the console can't show braille characters.
+- `GitlabHarvester.list_branches()`: the branch names and whether the listing ran
+  to its end (`get_branches()` is unchanged).
+
+### Changed
+
+- **Loading the index is faster:** 0.26 s instead of 0.33 s for 30,000 projects
+  (1.4.2: 0.17 s), from a leaner `Project.from_record`. Memory is unchanged.
+
+### Fixed
+
+- **Branch listing errors no longer drop projects from the search.** When an API
+  error (5xx, a timeout, 429 after its retries) cut a project's branch list
+  (`--index-branches all|N`), the cut list was stored as if it were complete. A
+  failure on the first page left the project with no branches, and the search
+  skipped it without a word in the results. Now a cut list keeps its default
+  branch, so the project is still searched; a warning names the affected
+  projects; the index is saved with `"is_completed": false` and
+  `"branches_incomplete": N`, so later runs say it is incomplete and
+  `--dump-projects` rebuilds it. No access to a repository (403/404) won't change
+  on a retry and doesn't mark the index incomplete.
+- **Files by name without a term, `--file-listing auto`.** Once the search API had
+  proven to take filter-only queries, a failed search of one branch (a timeout or
+  a 5xx, typically on a very large repository) silently fell back to listing that
+  repository's whole tree. On a monorepo that took hours, while the output still
+  said the search was used. Now such a branch counts as a failed search: it is
+  warned about, the run is not marked done, and `--resume` searches it again. The
+  tree is only used while the search hasn't proven itself. A long-running task now
+  says what it does: `Still listing the files (filename:*env) of group/repo @ main
+  (45,000 tree entries)`, not `Still searching`.
+- **The status line keeps its numbers in place.** The `HTTP 429 xN` counter was
+  appended after the repository being searched, so it jumped left and right with
+  the length of each name, and a narrow terminal cut it off. All the counters
+  (hits, HTTP 429) now come before the repository name.
+
 ## [1.4.3] - 2026-11-17
 
 A technical release: the command line, the config file and every file format are
@@ -31,7 +87,7 @@ unchanged. The index and session files are byte-identical to the ones 1.4.2 writ
   | peak memory of the CLI process (index + plan) | 84 MB | 62 MB (−26%) |
   | the loaded index | 41.0 MB | 20.7 MB (−50%) |
   | planning a search (which projects and branches) | 0.044 s | 0.033 s (−25%) |
-  | loading the index | 0.17 s | 0.26 s (+0.09 s) |
+  | loading the index | 0.17 s | 0.33 s (+0.16 s; 0.26 s in 1.4.4) |
 
   Typed objects cost a little time to build. That is paid once per run, and
   half the memory is worth it on large instances. The search itself is as fast
@@ -55,40 +111,6 @@ unchanged. The index and session files are byte-identical to the ones 1.4.2 writ
 
 - `GitlabHarvester.load_index()`: the index file as `IndexMeta` and `Project`
   objects.
-- **A live status panel.** On a terminal that understands ANSI, the progress of
-  a phase is a small block with a spinner instead of one long line. It is
-  readable on narrow screens too, and with `--workers` it shows every running
-  task on its own line:
-
-  ```
-  ⠹ Searching 'api_key' (2/3)
-    term     32/99 projects (32%) · 0:01 · ETA 0:02
-    total    131/297 (44%) · 0:04 · ETA 0:06
-    found    304 hits · HTTP 429 x3
-    running  acme/team-32/service-032 @ main, page 3, 0:01
-             acme/team-33/service-033 @ main, 0:00
-  ```
-
-  It is redrawn in place line by line, and every line is fitted to the terminal
-  width, so nothing wraps. Where escape sequences don't work, the one-line status
-  stays: pipes, files, CI, the run journal and old Windows consoles. The spinner
-  falls back to `|/-\` where the console can't show braille characters.
-
-### Fixed
-
-- **Files by name without a term, `--file-listing auto`.** Once the search API had
-  proven to take filter-only queries, a failed search of one branch (a timeout or
-  a 5xx, typically on a very large repository) silently fell back to listing that
-  repository's whole tree. On a monorepo that took hours, while the output still
-  said the search was used. Now such a branch counts as a failed search: it is
-  warned about, the run is not marked done, and `--resume` searches it again. The
-  tree is only used while the search hasn't proven itself. A long-running task now
-  says what it does: `Still listing the files (filename:*env) of group/repo @ main
-  (45,000 tree entries)`, not `Still searching`.
-- **The status line keeps its numbers in place.** The `HTTP 429 xN` counter was
-  appended after the repository being searched, so it jumped left and right with
-  the length of each name, and a narrow terminal cut it off. All the counters
-  (hits, HTTP 429) now come before the repository name.
 
 ## [1.4.2] - 2026-11-17
 
