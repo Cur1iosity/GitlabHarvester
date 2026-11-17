@@ -23,8 +23,8 @@ Library use::
 
     harvester = GitlabHarvester(url="https://gitlab.example.com", token="...")
     index_file = harvester.build_project_index()
-    projects = harvester.load_projects_from_file(index_file)["projects"]
-    results, hits = harvester.search_keywords(projects, ["password"], options=ScanOptions())
+    index = harvester.load_index(index_file)  # IndexMeta and Project objects (glh.domain.models)
+    results, hits = harvester.search_keywords(index.projects, ["password"], options=ScanOptions())
 
     # or with every setting in one object:
     from glh.engine.factory import HarvesterSettings

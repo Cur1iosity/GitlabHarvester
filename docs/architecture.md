@@ -11,20 +11,21 @@ the harvester relies on. For day-to-day use of the test environment see
 - [1. Layers and the dependency rule](#1-layers-and-the-dependency-rule)
 - [2. Package map](#2-package-map)
 - [3. Core objects and factories](#3-core-objects-and-factories)
-- [4. A search, from the command line to the session file](#4-a-search-from-the-command-line-to-the-session-file)
-- [5. Threads, tokens and rate limits](#5-threads-tokens-and-rate-limits)
-- [6. Output, progress and the run journal](#6-output-progress-and-the-run-journal)
-- [7. Where new code goes](#7-where-new-code-goes)
+- [4. Data models](#4-data-models)
+- [5. A search, from the command line to the session file](#5-a-search-from-the-command-line-to-the-session-file)
+- [6. Threads, tokens and rate limits](#6-threads-tokens-and-rate-limits)
+- [7. Output, progress and the run journal](#7-output-progress-and-the-run-journal)
+- [8. Where new code goes](#8-where-new-code-goes)
 
 **Part II. Fake GitLab: research, design and API contract**
 
-- [8. Goals](#8-goals)
-- [9. Survey of existing tools](#9-survey-of-existing-tools)
-- [10. Decision](#10-decision)
-- [11. Test environment](#11-test-environment)
-- [12. GitLab API contract used by GitlabHarvester](#12-gitlab-api-contract-used-by-gitlabharvester)
-- [13. Defects found while building the environment](#13-defects-found-while-building-the-environment)
-- [14. Known limitations of the emulation](#14-known-limitations-of-the-emulation)
+- [9. Goals](#9-goals)
+- [10. Survey of existing tools](#10-survey-of-existing-tools)
+- [11. Decision](#11-decision)
+- [12. Test environment](#12-test-environment)
+- [13. GitLab API contract used by GitlabHarvester](#13-gitlab-api-contract-used-by-gitlabharvester)
+- [14. Defects found while building the environment](#14-defects-found-while-building-the-environment)
+- [15. Known limitations of the emulation](#15-known-limitations-of-the-emulation)
 
 ## Part I. Package architecture
 
@@ -127,6 +128,7 @@ glh/
 │   ├── user_agents.py    -A / --user-agent-file
 │   └── errors.py         permanent or retryable, one-line descriptions
 ├── output/
+│   ├── records.py        session records: SessionMeta, HitRecord, Checkpoint, SummaryRecord, …
 │   ├── layout.py         OutputLayout: every path of a run
 │   ├── sink.py           SearchOutput, SessionOutput
 │   ├── session_reader.py done terms and meta of a session (--resume)
@@ -134,6 +136,7 @@ glh/
 │   └── archive.py        --to-zip
 ├── postprocess/          dedup, convert, split (--output-separated), pipeline (--post-process)
 ├── domain/
+│   ├── models.py         index records: Project, IndexMeta, ProjectIndex
 │   ├── planning.py       ScanOptions, ScanPlan, build_scan_plan, skip reasons, branch selection
 │   ├── timewindow.py     TimeWindow and timestamps
 │   ├── file_filter.py    FileFilter (--filename, --extension)
@@ -202,7 +205,49 @@ Tests replace a part instead of patching private attributes. For example,
 `SearchEngine.search_branch`, and `harvester.clients.create` can be wrapped to see
 every client that is made.
 
-### 4. A search, from the command line to the session file
+### 4. Data models
+
+The files a run reads and writes are defined once, as frozen slots dataclasses:
+
+| File | Record | Model | Module |
+|---|---|---|---|
+| index | first line (`"type": "meta"`) | `IndexMeta` | `domain/models.py` |
+| index | one line per project | `Project` | `domain/models.py` |
+| session | `meta` | `SessionMeta` (built by `cli.factory.session_meta`) | `output/records.py` |
+| session | `resume` | `ResumeRecord` | `output/records.py` |
+| session | `{"term", "result"}` | `HitRecord` → `ProjectResult` → `BranchResult` → `Hit` | `output/records.py` |
+| session | `keyword_done`, `keyword_incomplete` | `Checkpoint` | `output/records.py` |
+| session | `summary` | `SummaryRecord` | `output/records.py` |
+
+- **`to_record()`** gives the record this version writes, with the keys in file
+  order. The files are byte-identical to the ones earlier versions wrote:
+  `tests/unit/test_models.py` and `test_records.py` round-trip records of the
+  1.4.2 writer, and `tests/e2e/test_session_format.py` round-trips every line of
+  a real session and index.
+- **`from_record()`** reads a record of any version. Missing keys get defaults,
+  old forms are understood (`upstream_project_id`, the `keyword` of old
+  checkpoints), and a malformed part is skipped instead of raising. The one
+  exception is a project without an id: `Project.from_record` raises
+  `ValueError`, and `load_index` skips such a line with a warning.
+  `records.read_record()` picks the model of any session line.
+- **Read through a model, rewrite as a dict.** Adding branches to an existing
+  index appends them to the raw records, so keys this version doesn't know
+  survive. dedup, convert and the per-term split stream the session as dicts
+  for the same reason: they pass through records of any version unchanged.
+- **Memory.** An index of 30,000 projects takes 38.7 MB as dicts and 18.8 MB as
+  `Project` objects (`ProjectIndexer.load_index`). The engine works on
+  `Project`.
+- **Dicts at the facade.** `GitlabHarvester` keeps its dict interface:
+  - `search_keywords` and `scan_project` take Projects or index records;
+  - they and `scan_branch` return dicts;
+  - `load_projects_from_file` returns dicts;
+  - `load_index` returns the models.
+- **No pydantic.** It would add a binary runtime dependency (see the Debian/Kali
+  packaging rules in [packaging.md](packaging.md)) and more memory per object.
+  There is nothing untrusted to validate: the records come from this program or
+  from python-gitlab.
+
+### 5. A search, from the command line to the session file
 
 1. `gitlab_harvester.py` calls `glh.cli.main.main`. It installs the SIGINT/SIGTERM
    handlers (exit codes 130/143), prints the banner and the echoed command (token
@@ -221,12 +266,12 @@ every client that is made.
    the settings (`GitlabHarvester.set_rate_limits` applies them), then lets a
    `LimitAdvisor` and its `LimiterConsole` watch the run.
 5. `ProjectIndexer.build_project_index` reuses or builds the index while the status
-   line shows the tip about reusing it. The index is loaded and shown as the `Index`
-   block.
+   line shows the tip about reusing it. `load_index` reads it as `IndexMeta` and
+   `Project` objects, and it is shown as the `Index` block.
 6. `cli.factory` makes the `ScanOptions`, the run output (`OutputLayout`,
    `FileDownloader`) and the session sink. `--resume` reads the terms already done
-   (`output.session_reader`). `SessionOutput` writes the `meta` record, or `resume`
-   when resuming.
+   (`output.session_reader`). `SessionOutput` writes the `meta` record
+   (`SessionMeta`, from `cli.factory.session_meta`), or `resume` when resuming.
 7. `SearchEngine.search_keywords` builds the scan plan (`domain.planning.build_scan_plan`)
    and shows it as the `Search plan` block. Then it queues one `BranchTask` per
    (term, project, branch) on `workers.imap_unordered`:
@@ -235,16 +280,17 @@ every client that is made.
        pass `FileFilter` and `FileChangeChecker`, and lets `FileFetcher` download
        the files with hits;
      - in files-only mode, `FileLister.collect` lists the files instead;
-   - the main thread merges the branches of a project into one record
-     (`SearchOutput.hit`) and writes `keyword_done` or `keyword_incomplete` in term
-     order (`SearchOutput.checkpoint`, flushed). It also keeps the progress.
+   - the main thread merges the branches of a project into one `ProjectResult`
+     (`SearchOutput.hit`) and writes a `Checkpoint` (`keyword_done` or
+     `keyword_incomplete`) in term order (`SearchOutput.checkpoint`, flushed). It
+     also keeps the progress.
 8. After the search, `SessionOutput` writes the `summary` record. Then, in order:
    - `--output-separated` splits the session by term (`postprocess.split`);
    - `--post-process` runs `postprocess.pipeline` (dedup, convert);
    - `--to-zip` packs the run's own files (`output.archive`);
    - `cli.report.Summary` prints the `Results` block.
 
-### 5. Threads, tokens and rate limits
+### 6. Threads, tokens and rate limits
 
 - **One writer.** Worker threads only make HTTP requests. Downloaded files are the
   exception: workers write them through the thread-safe `FileDownloader`. The main
@@ -275,7 +321,7 @@ every client that is made.
   - 5xx, 429 after retries, 401, timeouts and network errors are retryable: the term
     is written as `keyword_incomplete`, and `--resume` searches it again.
 
-### 6. Output, progress and the run journal
+### 7. Output, progress and the run journal
 
 - **Output.** `OutputLayout` decides every path: `<dir>/<session>.jsonl`, per-term
   files and `<term>/files/`. `SearchOutput` is the sink the engine hands hit records
@@ -294,21 +340,22 @@ every client that is made.
   options, every permanent progress line (a `STATUS` listener), each result block in
   one line, and `Run finished` / `Run failed`. Tokens are never written.
 
-### 7. Where new code goes
+### 8. Where new code goes
 
 | Change | Where |
 |---|---|
 | A CLI option | `cli/parser.py` (and a converter in `cli/values.py`), a `CliArgs` field, `config.example.ini` (enforced by `tests/unit/test_config.py`), and `cli/factory.py` if it shapes an object |
 | A mode | `cli/commands/<mode>.py`, dispatched in `cli/app.py` |
 | A rule about what to scan | `domain/` (pure, unit-tested without HTTP) |
-| A GitLab request | the use case in `engine/`, client concerns in `gitlab/`. Also extend `fakegitlab/api.py` and the [contract table](#12-gitlab-api-contract-used-by-gitlabharvester) |
+| A field of the index or the session | its model in `domain/models.py` or `output/records.py`: `to_record()` keeps the key order, and `from_record()` must accept records without the field. Extend `tests/unit/test_models.py` or `test_records.py` |
+| A GitLab request | the use case in `engine/`, client concerns in `gitlab/`. Also extend `fakegitlab/api.py` and the [contract table](#13-gitlab-api-contract-used-by-gitlabharvester) |
 | A new output file | its path in `output/layout.py`, its writer in `output/` |
 | A user-facing summary line | `STATUS.write_line` / `Progress.note`, or a block through `cli/report.py`, so that it reaches the run journal |
 | A new subpackage | its layer rule in `tests/unit/test_architecture.py` |
 
 ## Part II. Fake GitLab: research, design and API contract
 
-### 8. Goals
+### 9. Goals
 
 - Run GitlabHarvester, including its real CLI, against a **virtual GitLab REST API v4**.
   No real GitLab, no PostgreSQL or Redis, and no patching of `python-gitlab` internals.
@@ -318,7 +365,7 @@ every client that is made.
 - Keep the data **declarative** (YAML/JSON). Support pagination, content search,
   forks, special characters and configurable failures.
 
-### 9. Survey of existing tools
+### 10. Survey of existing tools
 
 | Criterion | WireMock OSS (+ GitLab template) | pytest-httpserver | requests-mock / responses | Existing "fake GitLab" projects |
 |---|---|---|---|---|
@@ -351,7 +398,7 @@ Notes:
   real GitLab CE container (several GB, minutes to boot, PostgreSQL/Redis inside)
   contradicts the "no heavy infrastructure" requirement.
 
-### 10. Decision
+### 11. Decision
 
 **`pytest-httpserver` (Werkzeug) as the HTTP layer, plus a thin data-driven
 GitLab layer (`fakegitlab/`), plus declarative YAML scenarios.**
@@ -359,7 +406,7 @@ GitLab layer (`fakegitlab/`), plus declarative YAML scenarios.**
 - No custom HTTP framework. Threading, request parsing, request log, `clear()`,
   one-shot/ordered handlers and assertions all come from `pytest-httpserver`.
 - The GitLab-specific code covers only what an off-the-shelf tool can't express
-  declaratively: routing for the endpoints of §12, GitLab pagination headers, blob
+  declaratively: routing for the endpoints of §13, GitLab pagination headers, blob
   search over scenario files, rate limits and fault rules.
 - The same `FakeGitLab` class runs:
   - in pytest (session-scoped, reset per test);
@@ -374,7 +421,7 @@ GitLab layer (`fakegitlab/`), plus declarative YAML scenarios.**
 WireMock remains a valid option for future *recorded* contract replay. It isn't
 required by any current test.
 
-### 11. Test environment
+### 12. Test environment
 
 ```
                  ┌──────────────── fakegitlab/ ───────────────────────┐
@@ -409,7 +456,7 @@ Repository layout:
 | `docker/Dockerfile`, `docker-compose.yml` | Dev images: `fake-gitlab`, `harvester` |
 | `.github/workflows/tests.yml` | CI |
 
-### 12. GitLab API contract used by GitlabHarvester
+### 13. GitLab API contract used by GitlabHarvester
 
 Derived from the engine (`glh/engine/`, `glh/gitlab/`) and the rate-limit probe
 (`glh/limits/finder.py`), and verified at the wire level against python-gitlab 8.6.0
@@ -511,7 +558,7 @@ GitLab's OpenAPI description (`doc/api/openapi/` in the GitLab repository)
 covers only part of the REST API. The endpoints above are defined by the
 Markdown docs plus the opt-in contract tests.
 
-### 13. Defects found while building the environment
+### 14. Defects found while building the environment
 
 Each one is fixed minimally and pinned by tests (all of them fail on the original code):
 
@@ -539,14 +586,14 @@ Observed behavior that was intentionally **not** changed (documented by tests):
 - After `--resume`, the `summary.hits` record counts only hits of the resumed part.
 - Branch/project listing makes one extra request for the terminating empty page.
 
-### 14. Known limitations of the emulation
+### 15. Known limitations of the emulation
 
 The fake is a **stub server**, not GitLab. Passing tests means GitlabHarvester
 works with *this model* of the API. It does **not** guarantee compatibility with
 every (or a future) GitLab version. Use the contract tests
 (`tests/contract`) against a real instance to re-validate the model.
 
-- Only the endpoints in §12 (plus `GET /version` and `GET /projects/:id`) exist.
+- Only the endpoints in §13 (plus `GET /version` and `GET /projects/:id`) exist.
 - Repository history is not modeled: every file has exactly one commit, at its
   `updated_at` (default: the project's `last_activity_at`); the commits endpoint
   supports `ref_name`, `path`, `since`, `until` and pagination only.

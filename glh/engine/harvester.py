@@ -16,8 +16,8 @@ delegates to them:
     harvester = GitlabHarvester(url="https://gitlab.example.com", token="...")
     # or: GitlabHarvester.from_settings(HarvesterSettings(url=..., tokens=(...,), workers=4))
     index_file = harvester.build_project_index()
-    projects = harvester.load_projects_from_file(index_file)["projects"]
-    results, hits = harvester.search_keywords(projects, ["password"], options=ScanOptions())
+    index = harvester.load_index(index_file)
+    results, hits = harvester.search_keywords(index.projects, ["password"], options=ScanOptions())
 """
 
 from __future__ import annotations

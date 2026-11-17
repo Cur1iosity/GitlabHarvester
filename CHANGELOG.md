@@ -4,6 +4,42 @@ All notable changes to GitlabHarvester are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.3] - 2026-11-17
+
+A technical release: the command line, the config file and every file format are
+unchanged. The index and session files are byte-identical to the ones 1.4.2 writes.
+
+### Changed
+
+- **Data models.** The records of the project index and of the session file are
+  defined once, as frozen slots dataclasses with `from_record()` (any version) and
+  `to_record()` (this version, keys in file order):
+  - `glh.domain.models`: `Project`, `IndexMeta`, `ProjectIndex`;
+  - `glh.output.records`: `SessionMeta`, `ResumeRecord`, `HitRecord`,
+    `ProjectResult`, `BranchResult`, `Hit`, `Checkpoint`, `SummaryRecord`, and
+    `read_record()` for any session line.
+
+  The engine works on `Project` objects, so a loaded index takes about half the
+  memory: 18.8 MB instead of 38.7 MB for 30,000 projects. See
+  [docs/architecture.md](docs/architecture.md), "Data models".
+- `GitlabHarvester` keeps its dict interface. `search_keywords`, `search_keyword`
+  and `scan_project` take `Project` objects or index records. They and
+  `scan_branch` return dicts, and so does `load_projects_from_file`.
+- For code that imported modules below the facade:
+  - the `glh.domain.planning` functions (`skip_reason`, `branches_to_scan`,
+    `select_*`, `is_active_*`), `ProjectFilter.matches` and `ScanPlan.targets` work
+    on `Project` (`build_scan_plan`, `is_fork_project` and `get_upstream_id` still
+    take dicts too);
+  - `SearchOutput.hit` / `checkpoint` and `SessionOutput.meta` / `resumed` /
+    `summary` take the record objects;
+  - `glh.output.session_reader.load_session_meta` returns a `SessionMeta`;
+  - `glh.cli.report.index_rows` / `describe_index` take an `IndexMeta`.
+
+### Added
+
+- `GitlabHarvester.load_index()`: the index file as `IndexMeta` and `Project`
+  objects.
+
 ## [1.4.2] - 2026-11-17
 
 A technical release: the command line, the config file and every file format
