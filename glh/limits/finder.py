@@ -11,9 +11,12 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence, TYPE_CHECKING
 
+import gitlab.exceptions
+import requests.exceptions
+
 from glh.engine.workers import MAX_WORKERS
 from glh.limits.constants import API_NAMES, DEFAULT_MARGIN, DEFAULT_MAX_REQUESTS, SEARCH, WINDOW
-from glh.limits.probe import LimitProbe, ProbeResult, Sender
+from glh.limits.probe import LimitProbe, ProbeResponse, ProbeResult, Sender
 from glh.limits.recommend import recommend, Recommendation, Settings
 from glh.ui import statusline
 from glh.ui.formatting import format_duration, plural
@@ -24,6 +27,34 @@ if TYPE_CHECKING:
     from glh.engine.harvester import GitlabHarvester
 
 # --------------------------------------------------------------------------- harvester binding
+
+
+def http_sender(gl: Any, path: str, query: dict[str, Any]) -> Sender:
+    """
+    A probe sender: one GET of ``path`` per call through ``gl`` (an unpaced
+    client of the harvester), never retried on 429; the status and headers come
+    from the recorded response.
+    """
+    last: dict[str, Any] = {}
+    gl.session.hooks.setdefault("response", []).append(lambda r, *a, **k: last.__setitem__("r", r))
+
+    def send() -> ProbeResponse:
+        last.clear()
+        started = time.perf_counter()
+        try:
+            gl.http_request("get", path, query_data=dict(query), obey_rate_limit=False, max_retries=0,
+                            retry_transient_errors=False)
+        except gitlab.exceptions.GitlabError:
+            pass  # the status is in the recorded response
+        except requests.exceptions.RequestException as e:
+            return ProbeResponse(0, {}, time.perf_counter() - started, error=type(e).__name__)
+        latency = time.perf_counter() - started
+        response = last.get("r")
+        if response is None:
+            return ProbeResponse(0, {}, latency, error="no response")
+        return ProbeResponse(response.status_code, dict(response.headers), latency)
+
+    return send
 
 
 def probe_project_from_index(path: str | Path) -> Any | None:
@@ -104,7 +135,7 @@ class LimitFinder:
             else:
                 path = "/projects"
                 query = {"per_page": 1, "simple": "true"}
-            return harvester.probe_sender(path, query)
+            return http_sender(harvester.unpaced_client(), path, query)
 
         return factory
 

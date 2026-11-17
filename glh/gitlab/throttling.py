@@ -11,7 +11,7 @@ than) the rest of the API, so there are two budgets:
   authentication): ``index_rpm``.
 
 Limits apply per python-gitlab client, i.e. per thread: every worker has its
-own client (see ``GitlabHarvester._init_worker_client``), so with
+own client (see ``GitLabConnection.init_worker_client``), so with
 ``--workers N`` the whole run sends up to N x rpm requests per minute.
 
 Requests are spaced evenly (one every 60/rpm seconds, counted from the start

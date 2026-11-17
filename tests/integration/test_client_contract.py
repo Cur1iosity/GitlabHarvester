@@ -75,7 +75,7 @@ def test_special_characters_are_transported_verbatim(fake_gitlab: FakeGitLab, ma
 def test_invalid_token_fails_at_construction(fake_gitlab: FakeGitLab, make_harvester, token):
     if not token:
         # Empty token: the harvester skips client creation entirely.
-        assert make_harvester(token=token)._gl is None
+        assert make_harvester(token=token).connection.gl is None
         return
     # python-gitlab raises GitlabAuthenticationError; the harvester turns it into one clear message.
     with pytest.raises(GitlabHarvesterError, match=r"The token failed to authenticate .*HTTP 401 Unauthorized"):

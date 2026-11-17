@@ -82,7 +82,7 @@ def test_token_users_group_tokens_of_one_user(fake_gitlab: FakeGitLab, make_harv
 
 def test_set_rate_limits_reaches_clients_already_created(make_harvester):
     glh = make_harvester(adjustable_limits=True)
-    adapter = glh._gl.session.get_adapter(glh._gl.url)
+    adapter = glh.connection.gl.session.get_adapter(glh.connection.gl.url)
     assert adapter.search_limiter is None
     glh.set_rate_limits(search_rpm=30, workers=3)
     assert adapter.search_limiter.rpm == 30 and glh.concurrency == 3

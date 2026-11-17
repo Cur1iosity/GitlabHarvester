@@ -59,7 +59,7 @@ class StubProjects:
 
 def harvester_with(projects: StubProjects, url: str = "https://gitlab.test") -> GitlabHarvester:
     glh = GitlabHarvester()  # no url/token -> no network
-    glh._gl = SimpleNamespace(url=url, projects=projects)  # type: ignore[assignment]
+    glh.connection.use_client(SimpleNamespace(url=url, projects=projects))
     return glh
 
 
@@ -114,7 +114,7 @@ def test_concurrency_is_tokens_times_workers(tokens, workers, concurrency, text)
     assert glh.tokens == tuple(tokens)
     assert glh.workers == workers
     assert glh.concurrency == concurrency
-    assert glh._concurrency_text() == text
+    assert glh.connection.concurrency_text() == text
 
 
 def test_single_token_argument_still_works():
@@ -124,11 +124,11 @@ def test_single_token_argument_still_works():
 
 def test_worker_threads_cycle_through_tokens():
     glh = GitlabHarvester(tokens=["a", "b", "c"], workers=2)  # concurrency 6
-    assigned = [glh._next_worker_token() for _ in range(glh.concurrency)]
+    assigned = [glh.connection.next_token() for _ in range(glh.concurrency)]
     # One client per token per worker: every token used exactly `workers` times.
     assert sorted(assigned) == ["a", "a", "b", "b", "c", "c"]
     # The cycle keeps its phase, so the next phase stays balanced too.
-    assert glh._next_worker_token() == "a"
+    assert glh.connection.next_token() == "a"
 
 
 @pytest.mark.parametrize(

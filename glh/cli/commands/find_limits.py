@@ -10,7 +10,7 @@ import time
 
 from glh.cli.args import CliArgs
 from glh.cli.commands.auto_limits import measure
-from glh.cli.commands.common import connect_harvester
+from glh.cli.factory import create_harvester
 from glh.cli.report import report_block
 from glh.limits.constants import KINDS
 from glh.ui.formatting import format_duration
@@ -18,7 +18,7 @@ from glh.ui.formatting import format_duration
 
 def run_find_limits(args: CliArgs) -> None:
     """Measure the rate limits (-m find-limits) and print the settings to use; no search."""
-    glh = connect_harvester(args)
+    glh = create_harvester(args)
     kinds = args.probe_apis or KINDS
     _, results, recommendation = measure(args, glh, kinds)
     reset = max((r.finished_at + r.cooldown - time.monotonic() for r in results.values() if r.limited),

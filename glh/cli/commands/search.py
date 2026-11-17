@@ -13,25 +13,16 @@ from typing import Any
 
 from glh.cli.args import CliArgs
 from glh.cli.commands.auto_limits import start_auto_limits, stop_auto_limits
-from glh.cli.commands.common import (
-    building_index,
-    connect_harvester,
-    index_path,
-    load_keywords,
-    resolve_session_path,
-    run_stamp,
-    UTC,
-)
+from glh.cli.commands.common import building_index, index_path, load_keywords, resolve_session_path, run_stamp, UTC
+from glh.cli.factory import create_harvester, create_run_output, open_session, scan_options
 from glh.cli.report import index_rows, rate_limit_row, report, Summary
 from glh.domain.file_filter import FileFilter
 from glh.domain.planning import ScanOptions
 from glh.engine.harvester import GitlabHarvester
 from glh.limits.constants import KINDS, SEARCH
 from glh.output import archive
-from glh.output.downloads import FileDownloader
 from glh.output.layout import OutputLayout
 from glh.output.session_reader import load_done_keywords, load_session_meta
-from glh.output.sink import SessionOutput
 from glh.postprocess.pipeline import run_pipeline
 from glh.postprocess.split import split_session_by_term
 from glh.ui import statusline
@@ -41,7 +32,7 @@ from glh.ui.journal import JOURNAL
 
 def run_search(args: CliArgs) -> None:
     """Run term search workflow and write a session JSONL file."""
-    glh = connect_harvester(args)
+    glh = create_harvester(args)
     keywords = load_keywords(search=args.search, terms_file=args.terms_file, terms=args.terms)
     files_only = False
     if not keywords and (args.filename or args.extension):
@@ -91,25 +82,11 @@ def _search(args: CliArgs, glh: GitlabHarvester, keywords: list[str], summary: S
     if not projects:
         raise SystemExit(f"Project index is empty: {index_file}")
 
-    options = ScanOptions(
-        scan_branches=args.scan_branches,
-        forks_mode=args.forks,
-        fork_diff_bases=tuple(x.strip() for x in args.fork_diff_bases.split(",") if x.strip()),
-        started_from=args.started_from,
-        active_before=args.active_before,
-        file_changed_after=args.file_changed_after,
-        file_changed_before=args.file_changed_before,
-        filename=args.filename,
-        extension=args.extension,
-        project_filter=args.project_filter,
-        files_only=files_only,
-        file_listing=args.file_listing,
-    )
+    options = scan_options(args, files_only=files_only)
 
     session_path = resolve_session_path(glh.get_instance_id(), args.session, args.session_file, stamp)
-    layout = OutputLayout(session_path, all_keywords)
-    downloader = (FileDownloader(layout, stamp, max_size=args.download_max_size)
-                  if args.download_files else None)
+    run = create_run_output(args, session_path, all_keywords, stamp)
+    layout, downloader = run.layout, run.downloader
 
     done_keywords: set[str] = set()
     if args.resume:
@@ -121,7 +98,7 @@ def _search(args: CliArgs, glh: GitlabHarvester, keywords: list[str], summary: S
             report(f"Nothing to resume: all keywords already completed in {session_path}")
             return
 
-    with SessionOutput(layout, resume=args.resume, downloader=downloader) as output:
+    with open_session(run, resume=args.resume) as output:
         if args.resume:
             output.resumed(
                 timestamp_utc=datetime.now(UTC).isoformat(),

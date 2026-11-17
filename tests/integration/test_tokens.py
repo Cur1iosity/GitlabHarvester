@@ -113,10 +113,10 @@ def test_token_worker_rpm_wiring(fake_gitlab: FakeGitLab, make_harvester, tmp_pa
     # only the pool's worker clients (one per thread) are captured.
     seen: list[tuple[str, int | None, int | None]] = []
     lock = threading.Lock()
-    build_client = glh._setup_client
+    build_client = glh.clients.create
 
-    def spy(gl):
-        gl = build_client(gl)
+    def spy(token):
+        gl = build_client(token)
         adapter = gl.session.get_adapter("https://x")  # the mounted ThrottledAdapter
         search_rpm = getattr(getattr(adapter, "search_limiter", None), "rpm", None)
         index_rpm = getattr(getattr(adapter, "index_limiter", None), "rpm", None)
@@ -124,7 +124,7 @@ def test_token_worker_rpm_wiring(fake_gitlab: FakeGitLab, make_harvester, tmp_pa
             seen.append((gl.private_token, search_rpm, index_rpm))
         return gl
 
-    glh._setup_client = spy
+    glh.clients.create = spy
     run_search(glh, projects)
 
     assert len(seen) == glh.concurrency                       # one client per (token, worker)

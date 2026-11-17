@@ -15,6 +15,7 @@ import pytest
 from fakegitlab import FakeGitLab
 from glh import GitlabHarvester
 from glh.domain.planning import ScanOptions
+from glh.engine.search import SearchEngine
 from glh.ui import statusline
 from glh.ui.statusline import StatusLine
 from tests.helpers import load_index, Session
@@ -117,25 +118,25 @@ def test_workers_run_concurrently_with_their_own_clients(fake_gitlab: FakeGitLab
     lock = threading.Lock()
     state = {"now": 0, "peak": 0}
     clients: set[int] = set()
-    original = GitlabHarvester._search_branch
+    original = SearchEngine.search_branch
 
     def tracked(self, task):
         with lock:
             state["now"] += 1
             state["peak"] = max(state["peak"], state["now"])
-            clients.add(id(self._gl))
+            clients.add(id(self.connection.gl))
         try:
             return original(self, task)
         finally:
             with lock:
                 state["now"] -= 1
 
-    monkeypatch.setattr(GitlabHarvester, "_search_branch", tracked)
+    monkeypatch.setattr(SearchEngine, "search_branch", tracked)
     fake_gitlab.clear_journal()
     run_search(glh, index, terms=["password"], scan_branches="all")
 
     assert state["peak"] > 1
-    assert len(clients) > 1 and id(glh._gl_main) not in clients  # one python-gitlab client per worker
+    assert len(clients) > 1 and id(glh.connection.main) not in clients  # one python-gitlab client per worker
     assert fake_gitlab.api_requests("user") == []  # workers don't re-authenticate
 
 
@@ -181,7 +182,7 @@ def test_status_line_shows_the_running_task_not_the_last_finished_one(fake_gitla
     slow = "ops/infra/terraform/modules @ main"
     assert any(f" {slow}, 0:00" in f for f in frames), frames  # shown while it runs
     assert re.search(rf"Still searching 'password' in {slow}: running for 0\.\ds\n", out), out
-    assert glh._active.snapshot() == []
+    assert glh.active.snapshot() == []
 
 
 def test_rate_limit_waits_are_reported(fake_gitlab: FakeGitLab, make_harvester, index, no_retry_sleep):
@@ -200,7 +201,7 @@ def test_rate_limit_waits_are_reported(fake_gitlab: FakeGitLab, make_harvester, 
     assert "HTTP 429" in warnings[0] and "/search" in warnings[0] and "7.0s" in warnings[0]
     assert "only counted" in warnings[0]
     assert glh.rate_limited == 3
-    assert glh._rate_limit_tail() == "HTTP 429 x3"
+    assert glh.monitor.tail() == "HTTP 429 x3"
     assert glh.rate_limit_summary() == ("Rate limit: 3 HTTP 429 responses, retried after 21.0s "
                                         "of waits in total (all workers)")
 
@@ -221,4 +222,4 @@ def test_debug_repeats_the_rate_limit_warning(fake_gitlab: FakeGitLab, make_harv
 
 def test_no_rate_limit_no_summary(make_harvester):
     glh = make_harvester()
-    assert glh.rate_limited == 0 and glh.rate_limit_summary() is None and glh._rate_limit_tail() == ""
+    assert glh.rate_limited == 0 and glh.rate_limit_summary() is None and glh.monitor.tail() == ""

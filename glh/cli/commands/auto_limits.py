@@ -9,9 +9,9 @@ import sys
 
 from glh.cli.args import CliArgs
 from glh.cli.commands.common import index_path
+from glh.cli.factory import create_limit_finder, create_limit_watch
 from glh.cli.report import report_block
 from glh.engine.harvester import GitlabHarvester
-from glh.limits.advisor import LimitAdvisor
 from glh.limits.console import LimiterConsole
 from glh.limits.constants import API_NAMES, EXPERIMENTAL_NOTE, SEARCH
 from glh.limits.finder import LimitFinder
@@ -29,7 +29,7 @@ def measure(args: CliArgs, glh: GitlabHarvester, kinds: tuple[str, ...]
              ) -> tuple[LimitFinder, dict[str, ProbeResult], Recommendation]:
     """Probe ``kinds``, print what was found and the recommended settings."""
     statusline.STATUS.write_line(EXPERIMENTAL_NOTE)
-    finder = LimitFinder(glh, max_requests=args.probe_max, margin=args.probe_margin)
+    finder = create_limit_finder(args, glh)
     project = finder.project_for_search(index_path(args, glh)) if SEARCH in kinds else None
     statusline.STATUS.write_line(
         f"Measuring rate limits of {', '.join(API_NAMES[k] for k in kinds)} "
@@ -98,8 +98,7 @@ def start_auto_limits(args: CliArgs, glh: GitlabHarvester, kinds: tuple[str, ...
                     f"Auto limits: kept --workers {current.workers} --index-rpm {current.index_rpm} "
                     f"--search-rpm {current.search_rpm}; next time: {' '.join(recommendation.flags())}")
         finder.wait_cooldown(results.values())
-    advisor = LimitAdvisor(glh, margin=args.probe_margin).attach()
-    return LimiterConsole(advisor, logger=glh.logger).start()
+    return create_limit_watch(args, glh)
 
 
 def stop_auto_limits(console: LimiterConsole | None) -> list[Row]:

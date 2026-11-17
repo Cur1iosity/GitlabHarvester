@@ -255,7 +255,7 @@ def test_output_separated_flag():
 def test_token_options():
     a = CliParser.parse([])
     assert a.token is None and a.token_file is None
-    # -t keeps the raw value; the ';' split into a token list happens in glh.cli.commands.common.resolve_tokens.
+    # -t keeps the raw value; the ';' split into a token list happens in glh.cli.factory.resolve_tokens.
     assert CliParser.parse(["-t", "glpat-a;glpat-b"]).token == "glpat-a;glpat-b"
     assert CliParser.parse(["--token-file", "tokens.txt"]).token_file == "tokens.txt"
 

@@ -1,6 +1,6 @@
 # glh/cli/commands/common.py
 """
-Helpers shared by the commands: the harvester of a run, tokens, terms, session and index paths.
+Helpers shared by the commands: terms, session and index paths, the index tip.
 """
 
 from __future__ import annotations
@@ -9,37 +9,15 @@ import contextlib
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Iterator
 from urllib.parse import urlparse
 
-from glh.cli import tokens
 from glh.cli.args import CliArgs
 from glh.engine.harvester import GitlabHarvester
-from glh.exceptions import GitlabHarvesterError
-from glh.gitlab import user_agents
 from glh.ui import statusline
 
 # datetime.UTC exists only on Python 3.11+, while the package supports 3.10.
 UTC = timezone.utc
-
-
-def require_gitlab(args: CliArgs) -> str:
-    """Ensure a URL and at least one token are present for GitLab-dependent modes."""
-    if not args.url or not (args.token or args.token_file):
-        raise SystemExit("This mode requires --url and --token.")
-    return args.url
-
-
-def resolve_tokens(args: CliArgs) -> list[str]:
-    """Resolve -t/--token (';'-separated) or --token-file into a list of tokens."""
-    try:
-        if args.token_file:
-            return tokens.load_tokens(args.token_file)
-        if args.token:
-            return tokens.parse_tokens(args.token)
-    except tokens.TokenError as e:
-        raise SystemExit(str(e)) from None
-    return []
 
 
 def load_keywords(*, search: str | None, terms_file: str | None, terms: tuple[str, ...] = ()) -> list[str]:
@@ -82,45 +60,6 @@ def resolve_session_path(url: str, session: str | None, session_file: str | None
     return Path(f"results{os.sep}{default_session_name(url, stamp)}.jsonl")
 
 
-def connect_harvester(args: CliArgs) -> GitlabHarvester:
-    """Create a GitlabHarvester instance from CLI args."""
-    url = require_gitlab(args)
-    token_list = resolve_tokens(args)
-    if not token_list:
-        raise SystemExit("This mode requires --url and --token.")
-
-    agents: list[str] = []
-    if args.user_agent_file:
-        try:
-            agents = user_agents.load_user_agents(args.user_agent_file)
-        except user_agents.UserAgentError as e:
-            raise SystemExit(str(e)) from None
-    elif args.user_agent:
-        agents = [args.user_agent]
-
-    kwargs: dict[str, Any] = {
-        "url": url,
-        "tokens": token_list,
-        "timeout": args.timeout,
-        "workers": args.workers,
-        "index_rpm": args.index_rpm,
-        "search_rpm": args.search_rpm,
-        "jitter": args.jitter,
-        "user_agents": agents,
-        "log_level": args.log_level,
-        "log_file": args.log_file,
-        "ssl_verify": False if args.insecure else (args.ca_bundle or True),
-        "adjustable_limits": args.auto_limits,
-    }
-    if args.proxy:
-        kwargs["proxy"] = args.proxy
-
-    try:
-        return GitlabHarvester(**kwargs)
-    except GitlabHarvesterError as e:
-        raise SystemExit(str(e)) from None
-
-
 def index_hint(index_file: str, *, mode: str, rebuild: bool) -> str:
     """The tip shown while the project index is built (see building_index)."""
     if mode == "dump-index":
@@ -146,6 +85,7 @@ def building_index(args: CliArgs, glh: GitlabHarvester, *, mode: str) -> Iterato
         yield
     finally:
         statusline.STATUS.set_hint(None)
+
 
 # --------------------------------------------------------------------------- rate limits
 
