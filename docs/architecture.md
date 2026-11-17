@@ -235,18 +235,19 @@ The files a run reads and writes are defined once, as frozen slots dataclasses:
   index appends them to the raw records, so keys this version doesn't know
   survive. dedup, convert and the per-term split stream the session as dicts
   for the same reason: they pass through records of any version unchanged.
-- **Memory and speed.** The engine works on `Project`. An index of 30,000
-  projects with 3 branches each takes 41.0 MB as dicts and 20.7 MB as `Project`
-  objects (`ProjectIndexer.load_index`). The CLI process peaks at 62 MB instead
-  of 84 MB, and planning a search is about 25% faster. Loading costs about 0.09 s
+- **RAM and speed.** The engine works on `Project`. An index of 30,000
+  projects with 3 branches each takes 41.0 MB of RAM as dicts and 20.7 MB as
+  `Project` objects (`ProjectIndexer.load_index`). The CLI process peaks at 62 MB
+  of RAM instead of 84 MB, and planning a search is about 25% faster. Loading costs about 0.09 s
   more, because `Project.from_record` runs once per line and is kept lean for that
   reason. See the CHANGELOG of 1.4.3 for the measurements.
-- **Memory doesn't grow with the hits.** A project's hits are held until all its
+- **RAM doesn't grow with the hits.** A project's hits are held in RAM until all its
   branches are searched (the session has one record per project), then written;
   the CLI calls `search_keywords(..., keep_results=False)`, so nothing of them
-  stays. Memory is bounded by the projects being searched at the moment (about
-  `--workers` of them), not by the run: 300,000 hits peak at 47 MB, like 150,000
-  (1.4.3: 206 MB and 125 MB). The facade keeps returning every hit by default.
+  stays. RAM is bounded by the projects being searched at the moment (about
+  `--workers` of them), not by the run: with 300,000 hits the process peaks at
+  47 MB of RAM, as with 150,000 (1.4.3: 206 MB and 125 MB); the session file on
+  disk (59 MB for 300,000 hits) is the same either way. The facade keeps returning every hit by default.
 - **Dicts at the facade.** `GitlabHarvester` keeps its dict interface:
   - `search_keywords` and `scan_project` take Projects or index records;
   - they and `scan_branch` return dicts;

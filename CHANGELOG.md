@@ -38,23 +38,25 @@ All notable changes to GitlabHarvester are documented here. The format follows
 
 ### Fixed
 
-- **Memory no longer grows with the hits.** The search engine kept every hit of the
-  run in memory until the end, to return them, although the CLI only needs the
-  session file, where each hit is written as soon as its project is searched. The
+- **RAM no longer grows with the hits.** The search engine kept every hit of the
+  run in RAM until the end, to return them, although the CLI only needs the
+  session file on disk, where each hit is written as soon as its project is searched. The
   CLI now searches with `keep_results=False` (`GitlabHarvester.search_keywords`,
   default `True`: the API is unchanged), and the result pages of a branch are kept
   as just what a hit needs. Measured on 1,000 projects with 2 branches and 150 hits
-  each (300,000 hits, a 59 MB session), 4 workers:
+  each (300,000 hits; the session file on disk: 59 MB, the same before and after),
+  4 workers. RAM is the peak working set of the gitlab-harvester process (the
+  Python interpreter, its libraries and the loaded index included):
 
   | | 1.4.3 | 1.4.4 |
   |---|---|---|
-  | peak memory, 300,000 hits | 206 MB | 47 MB |
-  | peak memory, 150,000 hits | 125 MB | 47 MB |
+  | peak RAM, 300,000 hits | 206 MB | 47 MB |
+  | peak RAM, 150,000 hits | 125 MB | 47 MB |
   | search time | 26.3 s, 27.2 s | 25.6 s, 24.9 s |
 
-  Memory is now bounded by the projects being searched at the moment (one
-  session record holds a project's hits), not by the run. The time is the same
-  within the noise: it goes to the API. The session file is unchanged.
+  RAM is now bounded by the projects being searched at the moment (one session
+  record holds a project's hits), not by the run. The time is the same within
+  the noise: it goes to the API. The session file is unchanged.
 - **Searches without access are reported, not hidden.** A search answered with
   HTTP 403 (no access) or 404 (not found) was skipped with a warning and its term
   marked done like a fully searched one, so a session could look complete while
@@ -83,9 +85,9 @@ All notable changes to GitlabHarvester are documented here. The format follows
   compared by names as before, and the `Search plan` block says so
   (`forks  N compared by branch name only`); `--dump-projects` rebuilds it.
   `GitlabHarvester.list_branch_heads()` lists branches with their commits.
-  The commits are kept as raw digests in memory: an index of 30,000 projects
-  with 3 branches each takes 2.7 MB more (22.7 MB instead of 20.0 MB) and loads
-  0.11 s slower; the file is about half as large again.
+  The commits are kept as raw digests in RAM: a loaded index of 30,000 projects
+  with 3 branches each takes 2.7 MB more RAM (22.7 MB instead of 20.0 MB) and
+  loads 0.11 s slower; the index file on disk grows from 9.5 MB to 14.9 MB.
 - **Hit links point at the file page.** A hit's `url` used `/-/tree/<branch>/<path>#L<line>`,
   the address of a directory listing, not of the file. It is now `/-/blob/<branch>/<path>#L<line>`, like the links
   of files found by name (`--filename`/`--extension` without a term) already were.
@@ -132,20 +134,20 @@ unchanged. The index and session files are byte-identical to the ones 1.4.2 writ
 
   What it gives: one definition of each file format for its writers and
   readers (a field can no longer be written under one name and read under
-  another), typed access instead of string keys in the engine, and less memory.
+  another), typed access instead of string keys in the engine, and less RAM.
   See [docs/architecture.md](docs/architecture.md), "Data models".
 - **Performance**, measured against 1.4.2 on an index of 30,000 projects with
   3 branches each:
 
   | | 1.4.2 | 1.4.3 |
   |---|---|---|
-  | peak memory of the CLI process (index + plan) | 84 MB | 62 MB (−26%) |
-  | the loaded index | 41.0 MB | 20.7 MB (−50%) |
+  | peak RAM of the CLI process (index + plan) | 84 MB | 62 MB (−26%) |
+  | RAM of the loaded index | 41.0 MB | 20.7 MB (−50%) |
   | planning a search (which projects and branches) | 0.044 s | 0.033 s (−25%) |
   | loading the index | 0.17 s | 0.33 s (+0.16 s; 0.26 s in 1.4.4) |
 
   Typed objects cost a little time to build. That is paid once per run, and
-  half the memory is worth it on large instances. The search itself is as fast
+  half the RAM is worth it on large instances. The index file on disk is unchanged. The search itself is as fast
   as before: its time goes to API requests. A full search of a
   1,000-project instance with 1 and 4 workers takes the same time within the
   noise.
@@ -196,9 +198,9 @@ A technical release: the command line, the config file and every file format
     (`harvester.py`) to under 600, and `docs/architecture.md` says where new code
     goes.
 
-  It is a structural change only: speed and memory are the same as 1.4.1 within
+  It is a structural change only: speed and RAM are the same as 1.4.1 within
   the noise. Measured on an index of 30,000 projects (loading 0.19 s vs 0.20 s,
-  planning 0.05 s vs 0.06 s, peak memory of the CLI 84.5 MB vs 84.2 MB) and on a
+  planning 0.05 s vs 0.06 s, peak RAM of the CLI 84.5 MB vs 84.2 MB) and on a
   full search of a 1,000-project instance.
 - **Module paths.** Only `from glh import GitlabHarvester, CliParser, __version__`
   is stable. Code that imported other modules needs the new paths:
