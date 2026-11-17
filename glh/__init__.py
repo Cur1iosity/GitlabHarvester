@@ -9,8 +9,8 @@ The package is layered (see docs/architecture.md):
 
 ``glh.cli``          command line: options, config file, commands, reports
 ``glh.limits``       experimental rate-limit detection and runtime advice
-``glh.engine``       the work: project index, search, workers (GitlabHarvester)
-``glh.gitlab``       talking to GitLab: connections, throttling, errors
+``glh.engine``       the work: GitlabHarvester (facade) and HarvesterFactory, index, search, workers
+``glh.gitlab``       talking to GitLab: client factory, connection, pacing, HTTP 429, errors
 ``glh.output``       where results go: session files, downloads, archives
 ``glh.postprocess``  dedup and convert of session files
 ``glh.domain``       pure rules: scan planning, time windows, filters
@@ -25,6 +25,10 @@ Library use::
     index_file = harvester.build_project_index()
     projects = harvester.load_projects_from_file(index_file)["projects"]
     results, hits = harvester.search_keywords(projects, ["password"], options=ScanOptions())
+
+    # or with every setting in one object:
+    from glh.engine.factory import HarvesterSettings
+    harvester = GitlabHarvester.from_settings(HarvesterSettings(url=..., tokens=("...",), workers=4))
 
 Only ``GitlabHarvester``, ``CliParser`` and ``__version__`` are guaranteed
 between releases; the modules below them may move.

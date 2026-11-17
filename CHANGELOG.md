@@ -4,6 +4,60 @@ All notable changes to GitlabHarvester are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.2] - 2026-11-17
+
+A technical release: the command line, the config file and every file format
+(index, session, results) are unchanged.
+
+### Changed
+
+- **Layered package.** `glh` is split into layers with a one-way dependency rule:
+  `cli → limits → engine → {gitlab, output} → domain`, `postprocess → output`, and
+  `ui` for all of them. `tests/unit/test_architecture.py` enforces the rule. Objects
+  are made by one factory per layer: `ClientFactory` creates every python-gitlab
+  client, `HarvesterFactory` builds a harvester from `HarvesterSettings`, and
+  `glh.cli.factory` assembles a CLI run. `GitlabHarvester` is now a facade over
+  `GitLabConnection`, `RateLimitMonitor`, `ProjectIndexer`, `SearchEngine` and
+  `FileLister`. Its constructor and public methods are unchanged, and
+  `GitlabHarvester.from_settings(HarvesterSettings(...))` is new. See
+  [docs/architecture.md](docs/architecture.md), Part I.
+- **Module paths.** Only `from glh import GitlabHarvester, CliParser, __version__`
+  is stable. Code that imported other modules needs the new paths:
+
+  | 1.4.1 | 1.4.2 |
+  |---|---|
+  | `glh.harvester` | `glh.engine.harvester` (facade), split into `glh.engine.indexer`, `glh.engine.search`, `glh.engine.file_listing`, `glh.engine.file_checks`, `glh.gitlab.connection`, `glh.gitlab.factory`, `glh.gitlab.rate_monitor`; error helpers in `glh.gitlab.errors` |
+  | `glh.cli` (module) | `glh.cli.parser` (`CliParser`), `glh.cli.args` (`CliArgs`), `glh.cli.values` (`parse_*`), `glh.cli.banner`, `glh.version`; `MAX_WORKERS` in `glh.engine.workers` |
+  | `glh.modes` | `glh.cli.app` (`run_mode`), `glh.cli.commands.*` (one module per mode), `glh.cli.report`, `glh.cli.factory` |
+  | `gitlab_harvester.main` | still importable; defined in `glh.cli.main` (`gitlab_harvester.py` is a thin wrapper) |
+  | `glh.config`, `glh.tokens` | `glh.cli.config`, `glh.cli.tokens` |
+  | `glh.planner` | `glh.domain.planning`, `glh.domain.timewindow` |
+  | `glh.filefilter`, `glh.projectfilter` | `glh.domain.file_filter`, `glh.domain.project_filter` |
+  | `glh.workers` | `glh.engine.workers` |
+  | `glh.ratelimit`, `glh.user_agents` | `glh.gitlab.throttling`, `glh.gitlab.user_agents` |
+  | `glh.limits` (module), `glh.autolimit` | `glh.limits` (package): `constants`, `headers`, `probe`, `recommend`, `finder`, `advisor`, `console` |
+  | `glh.output` (module) | `glh.output.layout` (`OutputLayout`), `glh.output.sink` (`SearchOutput`, `SessionOutput`) |
+  | `glh.session`, `glh.downloads`, `glh.archive` | `glh.output.session_reader`, `glh.output.downloads`, `glh.output.archive` |
+  | `glh.utils.terminal_utils` | `glh.ui.statusline`, `glh.ui.progress`, `glh.ui.blocks`, `glh.ui.formatting`, `glh.ui.ansi` |
+  | `glh.utils.logging_utils`, `glh.utils.keys` | `glh.ui.logs`, `glh.ui.journal`, `glh.ui.keys` |
+  | `glh.postprocess.*` | unchanged |
+
+- `docs/architecture.md` has a new Part I on the package architecture: layers,
+  package map, core objects and factories, the path of a search, threads and rate
+  limits, output and the run journal, and where new code goes. The Fake GitLab
+  research and the API contract follow as Part II.
+
+### Added
+
+- `python -m glh` runs the command line, like `gitlab-harvester`.
+
+### Removed
+
+- `GitlabHarvester.probe_sender`, an internal of the rate-limit probe: the probe
+  now builds its sender from `GitlabHarvester.unpaced_client()`. Private
+  attributes such as `_gl` and `_active` are gone; use the parts
+  (`harvester.connection.gl`, `harvester.active`).
+
 ## [1.4.1] - 2026-11-17
 
 ### Changed
