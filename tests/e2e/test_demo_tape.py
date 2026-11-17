@@ -123,7 +123,7 @@ def test_demo_tape_fits_the_terminal_and_sees_its_patterns(fake_gitlab: FakeGitL
     # The last screen: after a clear, jq shows the first hits of the session.
     [(jq, jq_patterns)] = [c for c in commands if c[0].startswith("jq ")]
     assert "clear" in [c[0] for c in commands], "the hits are shown on a cleared screen"
-    shown = jq_output(tmp_path / "audit.jsonl", jq)
+    shown = jq_output(tmp_path / "loot.jsonl", jq)
     jq_screen = [f"$ {jq}", *shown, "$ "]
     assert len(f"$ {jq}") <= cols, f"the jq command is wider than the terminal ({cols} columns)"
     assert len(jq_screen) <= rows and all(len(line) <= cols for line in jq_screen), "\n".join(jq_screen)
