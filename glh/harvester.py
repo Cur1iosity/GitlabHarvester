@@ -7,6 +7,7 @@ import logging
 import os
 import threading
 import time
+import weakref
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, IO, Any
@@ -155,6 +156,7 @@ class GitlabHarvester:
             jitter: tuple[float, float] = ratelimit.NO_JITTER,
             user_agents: list[str] | tuple[str, ...] = (),
             tokens: list[str] | tuple[str, ...] | None = None,
+            adjustable_limits: bool = False,
     ) -> None:
         self.search_terms: list = search_terms or []
         # Tokens the run spreads its work over, each with its own pool of workers
@@ -180,6 +182,15 @@ class GitlabHarvester:
         self.jitter: tuple[float, float] = (float(jitter[0]), float(jitter[1]))
         # User-Agent of every request: one = fixed, several = random per request; () = python-gitlab's.
         self.user_agents: tuple[str, ...] = tuple(user_agents)
+        # --auto-limits: every client gets a throttling adapter (even without
+        # limits yet), so set_rate_limits() can change the pace of a running scan.
+        self.adjustable_limits = bool(adjustable_limits)
+        self._adapters: weakref.WeakSet[ratelimit.ThrottledAdapter] = weakref.WeakSet()
+        self._adapters_lock = threading.Lock()
+        # Called with every API response (any thread), e.g. glh.autolimit.LimitAdvisor.observe.
+        self.limit_observer: Callable[[Any], None] | None = None
+        # GitLab user id of every token (same order as self.tokens), from the login check.
+        self.token_users: list[Any] = []
         self._local = threading.local()
         self._gl_main: Gitlab | None = None
         self._client_kwargs: dict[str, Any] | None = None
@@ -266,6 +277,104 @@ class GitlabHarvester:
                 raise GitlabHarvesterError(
                     f"Token #{index} of {total} failed to authenticate to {url}: {e}"
                 ) from None
+            self.token_users.append(self._user_id(gl, index))
+
+    @staticmethod
+    def _user_id(gl: Gitlab, index: int) -> Any:
+        """GitLab user id of an authenticated client (a unique stand-in when unknown)."""
+        user_id = getattr(getattr(gl, "user", None), "id", None)
+        return user_id if user_id is not None else f"token#{index}"
+
+    # ---------------------------------------------------------------- tokens and users
+
+    def token_user_groups(self) -> list[list[int]]:
+        """Token indexes (0-based) grouped by GitLab user: tokens of one user share its rate limits."""
+        groups: dict[Any, list[int]] = {}
+        for index in range(len(self.tokens)):
+            user = self.token_users[index] if index < len(self.token_users) else f"token#{index + 1}"
+            groups.setdefault(user, []).append(index)
+        return list(groups.values())
+
+    def tokens_per_user(self) -> int:
+        """Most tokens held by one user (1 = every token has its own budget)."""
+        return max((len(g) for g in self.token_user_groups()), default=1)
+
+    def token_user_key(self, token: str | None) -> Any:
+        """The user a token belongs to (an opaque key; never the token)."""
+        if token is None:
+            return None
+        for index, known in enumerate(self.tokens):
+            if known == token:
+                return self.token_users[index] if index < len(self.token_users) else f"token#{index + 1}"
+        return None
+
+    # ------------------------------------------------------------------ rate limits
+
+    def set_rate_limits(self, *, index_rpm: int | None = None, search_rpm: int | None = None,
+                        workers: int | None = None) -> None:
+        """
+        Change the pace (and, before a scan starts, the workers) of this run.
+
+        New rpm values apply at once to every existing client (needs
+        ``adjustable_limits`` for clients created without limits) and to the
+        clients created later. ``workers`` only affects pools started afterwards.
+        """
+        if index_rpm is not None:
+            self.index_rpm = max(0, int(index_rpm))
+        if search_rpm is not None:
+            self.search_rpm = max(0, int(search_rpm))
+        if workers is not None:
+            self.workers = max(1, int(workers))
+            self.concurrency = max(1, len(self.tokens)) * self.workers
+        with self._adapters_lock:
+            adapters = list(self._adapters)
+        for adapter in adapters:
+            adapter.set_limits(index_rpm=self.index_rpm, search_rpm=self.search_rpm, jitter=self.jitter)
+
+    def probe_sender(self, path: str, query: dict[str, Any], token: str | None = None) -> Callable[[], Any]:
+        """
+        A sender for ``glh.limits.LimitProbe``: one GET of ``path`` per call
+        through a fresh client of ``token`` (default: the first) that is not
+        paced, not retried on 429 and not counted by the 429 warnings.
+        """
+        from glh.limits import ProbeResponse
+
+        gl = Gitlab(**self._worker_client_kwargs(token))
+        ratelimit.limit_session(gl.session, user_agents=self.user_agents)
+        last: dict[str, Any] = {}
+        gl.session.hooks.setdefault("response", []).append(lambda r, *a, **k: last.__setitem__("r", r))
+
+        def send() -> ProbeResponse:
+            last.clear()
+            started = time.perf_counter()
+            try:
+                gl.http_request("get", path, query_data=dict(query), obey_rate_limit=False, max_retries=0,
+                                retry_transient_errors=False)
+            except gitlab.exceptions.GitlabError:
+                pass  # the status is in the recorded response
+            except requests.exceptions.RequestException as e:
+                return ProbeResponse(0, {}, time.perf_counter() - started, error=type(e).__name__)
+            latency = time.perf_counter() - started
+            response = last.get("r")
+            if response is None:
+                return ProbeResponse(0, {}, latency, error="no response")
+            return ProbeResponse(response.status_code, dict(response.headers), latency)
+
+        return send
+
+    @client_required
+    def first_project_id(self) -> Any | None:
+        """Id of a non-empty project from the first page of /projects (for search probes)."""
+        try:
+            page = self._gl.http_get("/projects", query_data={"per_page": 20, "order_by": "id", "sort": "desc"})
+        except (gitlab.exceptions.GitlabError, requests.exceptions.RequestException) as e:
+            self.logger.warning("Cannot list projects for the limit probe: %s", describe_api_error(e))
+            return None
+        projects = [p for p in page if isinstance(p, dict) and p.get("id") is not None] if isinstance(page, list) else []
+        for project in projects:
+            if not project.get("empty_repo", False):
+                return project["id"]
+        return projects[0]["id"] if projects else None
 
     def _init_worker_client(self) -> None:
         """
@@ -293,8 +402,12 @@ class GitlabHarvester:
         if isinstance(hooks, dict):
             hooks.setdefault("response", []).append(self._on_response)
         if session is not None and hasattr(session, "mount"):
-            ratelimit.limit_session(session, index_rpm=self.index_rpm, search_rpm=self.search_rpm,
-                                    jitter=self.jitter, user_agents=self.user_agents)
+            adapter = ratelimit.limit_session(session, index_rpm=self.index_rpm, search_rpm=self.search_rpm,
+                                              jitter=self.jitter, user_agents=self.user_agents,
+                                              always=self.adjustable_limits)
+            if adapter is not None:
+                with self._adapters_lock:
+                    self._adapters.add(adapter)
         return gl
 
     @staticmethod
@@ -317,6 +430,12 @@ class GitlabHarvester:
         times without any output, which looks like a hung scan. Mark the
         running task as waiting and log a throttled warning instead.
         """
+        observer = self.limit_observer
+        if observer is not None:
+            try:
+                observer(response)
+            except Exception:  # noqa: BLE001 - advice must never break a request
+                self.logger.debug("Limit observer failed", exc_info=True)
         if getattr(response, "status_code", None) != 429:
             self._active.set_waiting("")
             return None
@@ -333,11 +452,13 @@ class GitlabHarvester:
                 self._rate_limit_warned_at = now
         if warn:
             path = urlparse(getattr(response, "url", "") or "").path
+            advice = ("--auto-limits will suggest new limits." if self.limit_observer is not None
+                      else "Fewer --workers or lower --search-rpm/--index-rpm reduce the request rate "
+                           "(-m find-limits measures the limits).")
             self.logger.warning(
                 "GitLab rate limit (HTTP 429) on %s: waiting %s before a retry "
-                "(%s so far; python-gitlab retries up to 10 times). "
-                "Fewer --workers lowers the request rate.",
-                path or "a request", wait_text, terminal_utils.plural(count, "rate-limited response"),
+                "(%s so far; python-gitlab retries up to 10 times). %s",
+                path or "a request", wait_text, terminal_utils.plural(count, "rate-limited response"), advice,
             )
         return None
 
@@ -530,6 +651,7 @@ class GitlabHarvester:
             gl.auth()
             self.logger.debug("Authenticated to GitLab: %s", url)
             self._client_kwargs = dict(kwargs)
+            self.token_users = [self._user_id(gl, 1)]
             return gl
         except requests.exceptions.SSLError as e:
             raise GitlabHarvesterError(

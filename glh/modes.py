@@ -5,6 +5,7 @@ Mode dispatcher for GitlabHarvester.
 This module maps CLI arguments to concrete workflows:
 - search: ensure index, scan terms, write session JSONL
 - dump-index: rebuild index JSONL
+- find-limits: measure the API rate limits and print settings for them
 - dedup: remove duplicates from session output
 - convert: convert JSONL -> JSON
 
@@ -14,13 +15,15 @@ The dispatcher is intentionally thin; core logic lives in GitlabHarvester and po
 from __future__ import annotations
 
 import os
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from glh import GitlabHarvester, ratelimit, tokens, user_agents
+from glh import GitlabHarvester, archive, limits, ratelimit, tokens, user_agents
+from glh.autolimit import LimitAdvisor, LimiterConsole
 from glh.exceptions import GitlabHarvesterError
 from glh.cli import CliArgs, _get_version
 from glh.downloads import FileDownloader, format_size
@@ -159,7 +162,7 @@ def _describe_token_source(args: CliArgs) -> str | None:
 def _describe_options(args: CliArgs) -> str:
     """The settings that shape a run, for the run journal (never the token)."""
     opts: dict[str, Any] = {}
-    if args.mode in ("search", "dump-index"):
+    if args.mode in ("search", "dump-index", "find-limits"):
         opts.update({
             "tls": "UNVERIFIED (--insecure)" if args.insecure else (f"ca-bundle {args.ca_bundle}" if args.ca_bundle else "verified"),
             "index-file": args.index_file or "(default)",
@@ -173,6 +176,13 @@ def _describe_options(args: CliArgs) -> str:
             "user-agent": (f"file {args.user_agent_file}" if args.user_agent_file
                            else (repr(args.user_agent) if args.user_agent else "python-gitlab")),
             "index-active": _when(args.index_active_after, args.index_active_before),
+            "auto-limits": args.auto_limits or None,
+        })
+    if args.mode == "find-limits" or args.auto_limits:
+        opts.update({
+            "probe-apis": ",".join(args.probe_apis) or "(auto)",
+            "probe-max": args.probe_max,
+            "probe-margin": args.probe_margin,
         })
     if args.mode == "search":
         if args.search:
@@ -216,7 +226,7 @@ def run_mode(args: CliArgs) -> None:
     started = time.perf_counter()
     if args.log_file:
         JOURNAL.open(args.log_file)
-        url = f", url={args.url}" if args.url and args.mode in ("search", "dump-index") else ""
+        url = f", url={args.url}" if args.url and args.mode in ("search", "dump-index", "find-limits") else ""
         config = f", config={args.config}" if args.config else ""
         JOURNAL.write(f"Run started: gitlab-harvester {_get_version()}, mode={args.mode}{url}{config}, "
                       f"cwd={Path.cwd()}")
@@ -229,6 +239,8 @@ def run_mode(args: CliArgs) -> None:
                 _run_search(args)
             case "dump-index":
                 _run_dump_index(args)
+            case "find-limits":
+                _run_find_limits(args)
             case "dedup":
                 _run_dedup(args)
             case "convert":
@@ -280,6 +292,7 @@ def _mk_harvester(args: CliArgs) -> GitlabHarvester:
         "log_level": args.log_level,
         "log_file": args.log_file,
         "ssl_verify": False if args.insecure else (args.ca_bundle or True),
+        "adjustable_limits": args.auto_limits,
     }
     if args.proxy:
         kwargs["proxy"] = args.proxy
@@ -293,27 +306,151 @@ def _mk_harvester(args: CliArgs) -> GitlabHarvester:
 def _run_dump_index(args: CliArgs) -> None:
     """Rebuild the Instance Project Index and write to disk."""
     glh = _mk_harvester(args)
-
-    index_file = glh.build_project_index(
-        per_page=args.batch_size,
-        filename=args.index_file,
-        enforce_dump=True,
-        branches=args.index_branches,
-        branches_per_page=args.branches_per_page,
-        last_activity_after=args.index_active_after,
-        last_activity_before=args.index_active_before,
-    )
+    console = _start_auto_limits(args, glh, (limits.INDEX,)) if args.auto_limits else None
+    try:
+        index_file = glh.build_project_index(
+            per_page=args.batch_size,
+            filename=args.index_file,
+            enforce_dump=True,
+            branches=args.index_branches,
+            branches_per_page=args.branches_per_page,
+            last_activity_after=args.index_active_after,
+            last_activity_before=args.index_active_before,
+        )
+    finally:
+        _stop_auto_limits(console)
     _report(f"Project index saved to: {index_file}")
+# --------------------------------------------------------------------------- rate limits
+
+
+def _index_path(args: CliArgs, glh: GitlabHarvester) -> str:
+    """The index file a search would use (same default name as build_project_index)."""
+    return args.index_file or f"{glh.get_instance_id()}_project_index.jsonl"
+
+
+def _current_settings(args: CliArgs) -> limits.Settings:
+    return limits.Settings(workers=args.workers, index_rpm=args.index_rpm, search_rpm=args.search_rpm)
+
+
+def _measure(args: CliArgs, glh: GitlabHarvester, kinds: tuple[str, ...]
+             ) -> tuple[limits.LimitFinder, dict[str, limits.ProbeResult], limits.Recommendation]:
+    """Probe ``kinds``, print what was found and the recommended settings."""
+    terminal_utils.STATUS.write_line(limits.EXPERIMENTAL_NOTE)
+    finder = limits.LimitFinder(glh, max_requests=args.probe_max, margin=args.probe_margin)
+    project = finder.project_for_search(_index_path(args, glh)) if limits.SEARCH in kinds else None
+    terminal_utils.STATUS.write_line(
+        f"Measuring rate limits of {', '.join(limits.API_NAMES[k] for k in kinds)} "
+        f"(up to {args.probe_max:,} requests each; this provokes HTTP 429 on purpose)")
+    results = finder.find(kinds, project_id=project)
+    recommendation = finder.recommend(results, current=_current_settings(args), explicit=args.explicit_limits)
+
+    _report(f"Rate limits found at {args.url} (token #1):")
+    for kind in kinds:
+        _report(f"  {results[kind].describe()}")
+    if note := finder.token_note():
+        _report(f"  {note}")
+    _report(f"Suggested settings: {recommendation.describe()}")
+    for note in recommendation.notes:
+        _report(f"  - {note}")
+    return finder, results, recommendation
+
+
+def _confirm(question: str) -> bool:
+    """Ask a yes/no question on the terminal (Enter = yes)."""
+    sys.stderr.write(question)
+    sys.stderr.flush()
+    try:
+        answer = sys.stdin.readline()
+    except (OSError, ValueError):
+        return False
+    if not answer:
+        return False
+    return answer.strip().lower() in ("", "y", "yes", "д", "да", "н")
+
+
+def _start_auto_limits(args: CliArgs, glh: GitlabHarvester, kinds: tuple[str, ...]) -> LimiterConsole:
+    """
+    --auto-limits before a run: measure ``kinds`` (unless every option they
+    need was set explicitly), offer the settings, wait for the probed windows to
+    reset, then watch the run for HTTP 429 (returned console; stop it after the run).
+    """
+    kinds = tuple(k for k in kinds if k in (args.probe_apis or kinds))
+    needed = {"workers", *(f"{k}_rpm" for k in kinds)}
+    if not kinds or needed <= args.explicit_limits:
+        terminal_utils.STATUS.write_line(limits.EXPERIMENTAL_NOTE)
+        terminal_utils.STATUS.write_line(
+            "Auto limits: --workers and the rpm options are set, nothing to measure; "
+            "watching the run for HTTP 429.")
+    else:
+        finder, results, recommendation = _measure(args, glh, kinds)
+        current = _current_settings(args)
+        if recommendation.differs_from(current):
+            if not (sys.stdin.isatty() and sys.stderr.isatty()):
+                _report(f"Command: {recommendation.command(sys.argv[1:])}")
+                raise SystemExit("--auto-limits: no terminal to confirm the settings. "
+                                 "Run the command above (or add the suggested options) to start.")
+            if _confirm(f"Apply {recommendation.describe()} to this run? [Y/n] "):
+                glh.set_rate_limits(workers=recommendation.workers, index_rpm=recommendation.index_rpm,
+                                    search_rpm=recommendation.search_rpm)
+                terminal_utils.STATUS.write_line(f"Auto limits: applied {recommendation.describe()}")
+            else:
+                terminal_utils.STATUS.write_line(
+                    f"Auto limits: kept --workers {current.workers} --index-rpm {current.index_rpm} "
+                    f"--search-rpm {current.search_rpm}; next time: {' '.join(recommendation.flags())}")
+        finder.wait_cooldown(results.values())
+    advisor = LimitAdvisor(glh, margin=args.probe_margin).attach()
+    return LimiterConsole(advisor, logger=glh.logger).start()
+
+
+def _stop_auto_limits(console: LimiterConsole | None) -> None:
+    """End the run's limit watch and report what it did."""
+    if console is None:
+        return
+    console.stop()
+    advisor = console.advisor
+    advisor.detach()
+    harvester = advisor.harvester
+    if advisor.applied:
+        _report(f"Limiter: limits changed during the run; start the next run with --workers "
+                f"{harvester.workers} --index-rpm {harvester.index_rpm} --search-rpm {harvester.search_rpm}")
+    if (pending := advisor.pending) is not None:
+        _report(f"Limiter: proposal not applied: {pending.describe()} ({pending.flags()})")
+
+
+def _run_find_limits(args: CliArgs) -> None:
+    """Measure the rate limits (-m find-limits) and print the settings to use; no search."""
+    glh = _mk_harvester(args)
+    kinds = args.probe_apis or limits.KINDS
+    _, results, recommendation = _measure(args, glh, kinds)
+    _report(f"Command: {recommendation.command(sys.argv[1:])}")
+    _report("Config file:\n  " + recommendation.ini().replace("\n", "\n  "))
+    reset = max((r.finished_at + r.cooldown - time.monotonic() for r in results.values() if r.limited),
+                default=0.0)
+    if reset > 0:
+        _report(f"The probed rate-limit budget is back in about {format_duration(reset)}.")
 
 
 def _run_search(args: CliArgs) -> None:
     """Run term search workflow and write a session JSONL file."""
     glh = _mk_harvester(args)
-    stamp = _run_stamp()
-
     keywords = _load_keywords(search=args.search, terms_file=args.terms_file, terms=args.terms)
     if not keywords:
         raise SystemExit("Nothing to do: provide --search, --terms-file or `terms` in the config file.")
+
+    console = None
+    if args.auto_limits:
+        # The index API is measured only when the index is going to be built.
+        build_index = args.dump_projects or not os.path.exists(_index_path(args, glh))
+        console = _start_auto_limits(args, glh, limits.KINDS if build_index else (limits.SEARCH,))
+    try:
+        _search(args, glh, keywords)
+    finally:
+        _stop_auto_limits(console)
+
+
+def _search(args: CliArgs, glh: GitlabHarvester, keywords: list[str]) -> None:
+    """The search workflow proper (see _run_search)."""
+    stamp = _run_stamp()
     # The full supplied list (before --resume drops already-done terms): the
     # --output-separated split names and covers files for every term.
     all_keywords = list(keywords)
@@ -376,9 +513,10 @@ def _run_search(args: CliArgs) -> None:
                 index_file=str(index_file),
                 batch_size=args.batch_size,
                 tokens=len(glh.tokens),
-                workers=args.workers,
-                index_rpm=args.index_rpm,
-                search_rpm=args.search_rpm,
+                workers=glh.workers,
+                index_rpm=glh.index_rpm,
+                search_rpm=glh.search_rpm,
+                auto_limits=args.auto_limits,
                 jitter=list(args.jitter),
                 user_agent=args.user_agent,
                 user_agent_file=args.user_agent_file,

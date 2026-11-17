@@ -22,6 +22,8 @@ Diagnostics endpoints (not part of GitLab, prefixed with ``/__admin``):
 ``GET  /__admin/faults``   active fault rules with counters
 ``POST /__admin/faults``   add a fault rule (see :mod:`fakegitlab.faults`)
 ``DELETE /__admin/faults`` remove all fault rules
+``GET  /__admin/rate-limits`` active per-user rate limits
+``POST /__admin/rate-limits`` replace them (see :mod:`fakegitlab.ratelimits`)
 =========================  ==================================================
 """
 
@@ -167,6 +169,12 @@ class FakeGitLab:
     def add_fault(self, rule: Mapping[str, Any] | FaultRule) -> FaultRule:
         """Add a fault rule at runtime (see :mod:`fakegitlab.faults`)."""
         return self._faults.add(rule)
+
+    def set_rate_limits(self, spec: Mapping[str, Any] | None) -> None:
+        """Replace the per-user rate limits (counters start at zero); None/{} = no limits."""
+        from fakegitlab.ratelimits import RateLimits
+
+        self.api.rate_limits = RateLimits(spec)
 
     def clear_faults(self) -> None:
         """Remove all fault rules, including scenario-declared ones."""
@@ -332,5 +340,20 @@ class FakeGitLab:
                 self.clear_faults()
                 return json_response({"cleared": True})
             return json_response(self.faults)
+
+        if sub == "/rate-limits":
+            if method == "POST":
+                try:
+                    self.set_rate_limits(body)
+                except (KeyError, TypeError, ValueError) as e:
+                    return json_response({"error": f"invalid rate limits: {e}"}, status=400)
+            return json_response({
+                "throttles": [
+                    {"bucket": t.bucket, "limit": t.limit, "period": t.period, "headers": t.headers,
+                     "on_success": t.on_success}
+                    for t in self.api.rate_limits.throttles
+                ],
+                "throttled": self.api.rate_limits.throttled,
+            })
 
         return json_response({"error": f"unknown admin endpoint {sub}"}, status=404)

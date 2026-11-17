@@ -17,6 +17,9 @@ Endpoint                                                 Notes
 ``GET /api/v4/projects/:id/repository/files/:path/raw``  raw file content of a ref
 =======================================================  ========================================
 
+With ``rate_limits`` in the scenario, requests are counted per user and
+answered with HTTP 429 over the limit (see :mod:`fakegitlab.ratelimits`).
+
 Responses follow the documented GitLab shapes and pagination headers
 (``X-Page``, ``X-Per-Page``, ``X-Total``, ``X-Total-Pages``, ``X-Next-Page``,
 ``X-Prev-Page``, ``Link``). Only fields relevant for clients are produced.
@@ -110,8 +113,11 @@ class GitLabApi:
     ]
 
     def __init__(self, scenario: Scenario) -> None:
+        from fakegitlab.ratelimits import RateLimits
+
         self.scenario = scenario
         self._namespace_ids = self._assign_namespace_ids(scenario.projects)
+        self.rate_limits = RateLimits(scenario.rate_limits)
 
     # ------------------------------------------------------------------ routing
 
@@ -140,8 +146,14 @@ class GitLabApi:
                 return RouteResult(endpoint, error_response(405, "405 Method Not Allowed"))
             try:
                 user = self._authenticate(request)
+                limited, extra_headers = self.rate_limits.check(user.id, endpoint)
+                if limited is not None:
+                    return RouteResult(endpoint, limited)
                 handler = getattr(self, f"_ep_{endpoint}")
-                return RouteResult(endpoint, handler(request, base_url, user, **m.groupdict()))
+                response = handler(request, base_url, user, **m.groupdict())
+                if extra_headers:
+                    response.headers.update(extra_headers)
+                return RouteResult(endpoint, response)
             except ApiError as e:
                 return RouteResult(endpoint, e.response)
 

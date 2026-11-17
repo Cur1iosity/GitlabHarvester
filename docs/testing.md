@@ -95,6 +95,7 @@ no real token formats.
 | `empty` | valid token, no projects |
 | `large` | `default` + 250 generated projects with 3 branches each (pagination, performance) |
 | `flaky` | `default` + 429 with `Retry-After`, 503 on branches, a slow search, malformed JSON |
+| `ratelimited` | `default` + per-user rate limits: every API request 300/min (429 with `RateLimit-*`), search 20/min (429 with `Retry-After`) |
 
 ### Default scenario
 
@@ -224,6 +225,24 @@ Useful patterns:
 Delays are interruptible: `reset()`/`stop()` releases pending delayed requests
 immediately, so tests never wait out a long delay.
 
+## Rate limits
+
+A scenario's `rate_limits` (or `FakeGitLab.set_rate_limits(...)` in tests,
+`POST /__admin/rate-limits` standalone) limit the requests **per user** in fixed
+windows aligned to the clock, like GitLab (`fakegitlab/ratelimits.py`):
+
+```yaml
+rate_limits:
+  api:    {limit: 300, period: 60}   # every API request, search included
+  search: {limit: 20, period: 60}    # search API only
+  # headers: full (api default: RateLimit-* + Retry-After on 429)
+  #        | retry-after (search default) | none
+  # on_success: true  -> RateLimit-* on every response of that bucket
+```
+
+Over the limit the fake answers HTTP 429 like GitLab. Use short periods
+(`period: 2`) in tests: `-m find-limits` waits for a window to reset.
+
 ## Diagnostics: request journal & admin API
 
 `/__admin/*` endpoints are not part of GitLab and are not journaled.
@@ -237,6 +256,7 @@ immediately, so tests never wait out a long delay.
 | `GET /__admin/scenario` | Current scenario, token, available scenarios |
 | `POST /__admin/scenario` `{"name": "large"}` | Switch scenario (implies reset) |
 | `GET/POST/DELETE /__admin/faults` | List / add / clear fault rules |
+| `GET/POST /__admin/rate-limits` | Show / replace the per-user rate limits (`{"search": {"limit": 5, "period": 2}}`; `{}` = none) |
 
 ```bash
 curl -s localhost:8080/__admin/requests | python -m json.tool

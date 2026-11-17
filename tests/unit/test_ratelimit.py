@@ -180,3 +180,27 @@ def test_describe_with_jitter():
     assert describe(0, 0, (0.0, 0.03)) == "jitter 0-0.03s"
     assert describe(0, 30, (0.01, 0.05)) == "search 30/min per worker, jitter 0.01-0.05s"
     assert ratelimit.format_jitter((0.0, 0.0)) == ""
+
+
+# --------------------------------------------------------------------------- adjustable limits (--auto-limits)
+
+
+def test_set_limits_swaps_limiters_and_keeps_unchanged_ones():
+    adapter = ratelimit.ThrottledAdapter(index_rpm=100, search_rpm=0)
+    index_limiter = adapter.index_limiter
+    assert adapter.search_limiter is None
+    adapter.set_limits(index_rpm=100, search_rpm=20)
+    assert adapter.index_limiter is index_limiter  # same pace: its spacing carries on
+    assert adapter.search_limiter.rpm == 20
+    adapter.set_limits(index_rpm=0, search_rpm=20)
+    assert adapter.index_limiter is None
+
+
+def test_limit_session_always_mounts_an_adapter():
+    import requests
+
+    session = requests.Session()
+    assert ratelimit.limit_session(session) is None
+    adapter = ratelimit.limit_session(session, always=True)
+    assert adapter is not None and session.get_adapter("https://x") is adapter
+    assert adapter.index_limiter is None and adapter.search_limiter is None

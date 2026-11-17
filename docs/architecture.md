@@ -126,6 +126,16 @@ asserts this exact list):
 | 4 | `GET /api/v4/projects/:id/search` | `scan_branch` | `scope=blobs`, `search` (the term, plus `filename:<pattern>` / `extension:<ext>` with `--filename` / `--extension`), `ref`, `page`, `per_page=100` | `path`, `startline`, `data` |
 | 5 | `GET /api/v4/projects/:id/repository/commits` | `_file_changed_in_window` (only with `--file-changed-*`) | `ref_name`, `path`, `since`, `until`, `page=1`, `per_page=1` | non-empty list = changed in the window |
 | 6 | `GET /api/v4/projects/:id/repository/files/:file_path/raw` | `_open_raw_file` (only with `--download-files`), streamed | `ref` (the branch); `file_path` URL-encoded (`/` → `%2F`) | the body (streamed, stops past `--download-max-size`), `Content-Length` if sent |
+| 7 | `GET /api/v4/projects` | `first_project_id` (only `-m find-limits` / `--auto-limits` without an index, to pick a project for search probes) | `per_page=20`, `order_by=id`, `sort=desc` | `id`, `empty_repo` |
+| 8 | `GET /api/v4/projects` | `LimitFinder` probe of the other API (`-m find-limits`, `--auto-limits`), not paced, no 429 retries | `per_page=1`, `simple=true` | status, `RateLimit-*`, `Retry-After` |
+| 9 | `GET /api/v4/projects/:id/search` | `LimitFinder` probe of the search API, not paced, no 429 retries | `scope=blobs`, `search=glhprobe<random hex>`, `per_page=1` | status, `RateLimit-*`, `Retry-After` |
+
+`GET /user` (row 1) also gives the user `id` of every token: tokens of one user
+share its rate limits (`GitlabHarvester.token_users`, `tokens_per_user`).
+
+Rows 7-9 only run with `-m find-limits` or `--auto-limits`. Rate-limit headers
+read on any response with `--auto-limits` (`glh/autolimit.py`): `RateLimit-Limit`
+(requests per minute), `RateLimit-Name`, `Retry-After`, `RateLimit-Reset` (Unix time).
 
 No other requests are made. `projects.get(id, lazy=True)` doesn't hit the API,
 and there are no implicit `/version` or `/projects/:id` calls. The test suite fails

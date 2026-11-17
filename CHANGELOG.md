@@ -4,6 +4,37 @@ All notable changes to GitlabHarvester are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.0] - 2026-11-17
+
+### Added
+
+The rate-limit detection below (`-m find-limits`, `--auto-limits`, the `probe-*`
+options) is **experimental**: its behavior, output and options may change in a
+minor release. Runs that use it say so.
+
+- **Find the API rate limits** (experimental): `-m find-limits` measures the limits of the token
+  and prints the `--workers`, `--index-rpm` and `--search-rpm` to use, the command
+  line (the token shown as `<TOKEN>`) and the config file keys. It reads GitLab's
+  `RateLimit-*` headers when they are sent, else sends requests at a growing
+  parallelism until HTTP 429; without `RateLimit-Limit` it waits for the window to
+  reset and counts one full window from its start (the limit and the window
+  length). No 429 within the default budget (search 60, other API 300 requests): it
+  probes deeper, up to `--probe-max` (default 600), to find a higher limit or the
+  real throughput, and notices when more threads stop helping. The suggestion keeps
+  `--probe-margin` (default 0.85) below the limit, picks the workers from the
+  measured latency, and splits the budget over tokens of the same user (GitLab
+  counts most limits per user; tokens are grouped by their `GET /user` id).
+- **`--auto-limits`** (experimental) measures before a search — only the search API when the
+  project index exists, both when it has to be built — and asks on a terminal to
+  apply the settings (elsewhere it prints the command and exits). Options set
+  explicitly are kept; with all of them set nothing is measured. It then waits for
+  the probed windows to reset and **watches the search**: after HTTP 429 it proposes
+  a lower `--search-rpm`/`--index-rpm` per worker without stopping the scan — the
+  question replaces the status line for 20 seconds, `Y` applies the new pace to every
+  worker at once, `N` drops it, no answer leaves `[Limiter: L]` in the status line
+  and `L` shows the proposal again. Without a terminal proposals are logged. The run
+  ends with the limits to start the next run with.
+- `-m dump-index --auto-limits` measures the other API only.
 ## [1.3.0] - 2026-11-17
 
 ### Added

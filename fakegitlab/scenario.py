@@ -120,6 +120,8 @@ class Scenario:
     projects: tuple[Project, ...]
     faults: tuple[dict[str, Any], ...]
     source: str | None = None
+    # Per-user API rate limits (see fakegitlab.ratelimits); empty = none.
+    rate_limits: dict[str, Any] = field(default_factory=dict)
 
     def project_by_id(self, project_id: int) -> Project | None:
         """Return a project by numeric id."""
@@ -228,6 +230,7 @@ def _merge_documents(base: dict[str, Any], child: dict[str, Any]) -> dict[str, A
     - ``projects``: merged by ``id`` (child entries replace base entries,
       new ids are appended); ``remove_projects`` drops base ids.
     - ``generate`` and ``faults``: concatenated.
+    - ``rate_limits``: shallow dict merge (per bucket).
     """
     out = copy.deepcopy(base)
     for key in ("name", "description"):
@@ -253,6 +256,7 @@ def _merge_documents(base: dict[str, Any], child: dict[str, Any]) -> dict[str, A
 
     out["generate"] = list(base.get("generate") or []) + list(child.get("generate") or [])
     out["faults"] = list(base.get("faults") or []) + list(child.get("faults") or [])
+    out["rate_limits"] = {**(base.get("rate_limits") or {}), **(child.get("rate_limits") or {})}
     return out
 
 
@@ -482,6 +486,7 @@ def build_scenario(doc: dict[str, Any], *, source: str | None = None) -> Scenari
         projects=tuple(projects),
         faults=faults,
         source=source,
+        rate_limits=dict(doc.get("rate_limits") or {}),
     )
 
 

@@ -389,7 +389,9 @@ in the config file > `rpm` in the config file.
 
 - The limits are **per worker**: every worker has its own connection and budget, so
   `--workers 4 --search-rpm 20` sends up to 80 search requests a minute. For an
-  instance-wide limit of L requests a minute, use about L / workers.
+  instance-wide limit of L requests a minute, use about L / workers. Don't know L?
+  [`-m find-limits` or `--auto-limits`](#finding-the-rate-limits--m-find-limits---auto-limits-experimental)
+  measure it.
 - Requests are spaced evenly (one every 60/N seconds, counted from the start of the
   previous one), so there are no bursts at the start of a minute.
 - Retries after HTTP 429 go through the same limit.
@@ -419,6 +421,108 @@ request, so the requests don't come at a fixed rhythm:
   a limit. Without a limit it slows the scan by about the mean delay per request
   (`0.01-0.05`: about 30 ms each).
 - The search plan line shows it (`..., jitter 0.01-0.05s`), and so does the run journal.
+
+## Finding the rate limits: -m find-limits, --auto-limits (experimental)
+
+> **Experimental.** The probe, its suggestions and the limiter during a run are new:
+> their behavior, output and options may change in future releases. Check the
+> suggested values before relying on them, and please report results that look
+> wrong. Every run that uses them says so in its first lines and in the run journal.
+
+```bash
+# Measure only: print the settings, the command line and the config keys
+gitlab-harvester -m find-limits -u https://gitlab.example.com -t "$GITLAB_TOKEN"
+
+# Measure, offer the settings, then search (and watch the search for HTTP 429)
+gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -f words.txt --auto-limits
+```
+
+GitLab rate-limits the search API separately from the rest of the API, and most
+limits count **per user**: two tokens of one user share one budget. The limits are
+instance settings you usually can't see, so the harvester can measure them:
+
+1. **One request.** If GitLab announces the limit of the API in `RateLimit-*`
+   headers on a successful response, that is the answer, with no load at all
+   (the other API only: on a search response those headers describe the general
+   API throttle).
+2. **Requests at a growing parallelism** (1, 2, 4, … up to 16 threads, not paced
+   and not retried) until GitLab answers **HTTP 429**. Its `RateLimit-Limit`, if
+   sent, is the limit. Without it the probe waits for the window to reset
+   (`Retry-After`) and counts **one full window from its start**: the requests that
+   pass are the limit, and the time to the next 429 plus its `Retry-After` is the
+   window length. A long `Retry-After` (more than 1.5 minutes) means an hourly
+   window.
+3. **No 429 within the default budget** (search API: 60 requests, other API: 300):
+   the probe goes on deeper, up to `--probe-max` requests (default 600), to find a
+   higher limit or the throughput really available. It stops early when a whole
+   minute passed without a 429, and reports "no rate limit found up to ~N req/min"
+   — with "server throughput limit" when more threads stopped raising the rate.
+
+Then it suggests settings:
+
+- the target is `--probe-margin` (default 0.85) of the limit — or of the measured
+  throughput when there is no limit, to keep the load reasonable — for all threads
+  of one user together;
+- `--workers` is as many as needed to reach it at the measured latency (more only
+  waste the budget), and the rpm of each worker is the target split over
+  `workers x tokens of that user`;
+- options set explicitly (command line or config file) are kept, with a warning
+  when they exceed a found limit.
+
+```text
+Rate limits found at https://gitlab.example.com (token #1):
+  other API: ~2,000 requests per minute per user (GitLab headers, throttle_authenticated_api); ...
+  search API: ~30 requests per minute per user (HTTP 429, full window counted); 61 requests, ..., latency 0.42s
+Suggested settings: --workers 1 --index-rpm 1700 --search-rpm 25
+Command: gitlab-harvester -u https://gitlab.example.com -t '<TOKEN>' -f words.txt --auto-limits --workers 1 --index-rpm 1700 --search-rpm 25
+Config file:
+  workers = 1
+  index-rpm = 1700
+  search-rpm = 25
+```
+
+The printed command never shows the token (`<TOKEN>`); neither does the run journal.
+
+**`--auto-limits`** does the same before a search: only the search API when the
+project index already exists (given with `--index-file` or found under its default
+name), both APIs when it has to be built (`--dump-projects` or no index yet);
+`--probe-apis` picks them by hand. `-m dump-index --auto-limits` measures the other
+API only.
+
+- On a terminal it asks `Apply ... to this run? [Y/n]`; without one (CI, redirected
+  output) it prints the command and exits without searching.
+- With `--workers` and the rpm options of the measured APIs all set, nothing is
+  measured: the run is only watched (so the printed command, which has them all,
+  starts at once).
+- Before the search starts it waits for the rate-limit windows the probe used up to
+  reset, so the scan doesn't begin with 429s.
+
+**During the run**, every HTTP 429 is checked against the requests of that user
+that passed before it (or the `RateLimit-Limit` GitLab sent). When the run goes
+faster than the limit, the limiter proposes a lower `--search-rpm` / `--index-rpm`
+per worker **without stopping the scan**:
+
+```text
+[Limiter] HTTP 429 on search API: ~30 requests per minute passed before HTTP 429: --search-rpm no limit -> 6. Apply? [Y]es / [N]o / ignore: 17s
+```
+
+- `Y` (or Enter) applies the limits at once to every worker; `N` drops the proposal
+  (only a clearly lower one comes back).
+- No answer within 20 seconds: the scan goes on unchanged and the status line starts
+  with **`[Limiter: L]`**: there is a proposal; press **`L`** to see it again.
+- Less than a minute of history gives a *preliminary* proposal; a full minute later
+  a lower one may follow. Right after a change the limiter waits a minute before
+  proposing again (429s of requests sent before say nothing about the new pace).
+- Without a terminal the proposal is a warning in the log, and nothing changes.
+- At the end the run prints the limits to start the next run with, or the proposal
+  left unanswered; the run journal records every change.
+
+`Y`, `N` and `L` also work with a Russian keyboard layout (the same keys: `Н`, `Т`,
+`Д`). The number of workers of a running scan can't change, only their pace.
+
+> The probe provokes HTTP 429 on purpose and sends up to `--probe-max` requests per
+> API in a short time: on a monitored instance this is visible. Run it when that is
+> acceptable, or set `--workers` and the rpm options yourself.
 
 ## Sessions and resume
 
@@ -689,6 +793,10 @@ are URL-encoded. With `--download-files`, a hit whose file was saved also has
 | `--ca-bundle FILE` | system CAs | CA bundle (PEM) for the GitLab TLS certificate |
 | `--[no-]insecure` | off | disable TLS verification explicitly (never automatic) |
 | `-w, --workers N` | 1 | parallel API requests per token (1-64); only for instances without rate limits |
+| `--[no-]auto-limits` | off | *experimental*: measure the rate limits before the run, offer settings, propose lower limits after HTTP 429 during it |
+| `--probe-apis APIS` | auto | *experimental*: APIs to measure: `index`, `search`, `index,search` |
+| `--probe-max N` | 600 | *experimental*: most requests per measured API (default budget first, then deeper) |
+| `--probe-margin SHARE` | 0.85 | *experimental*: share of a found limit the suggested settings use (0.1-1 or `85%`) |
 | `--rpm N` | 0 | shortcut for `--index-rpm` and `--search-rpm` |
 | `--index-rpm N` | 0 | max non-search API requests per minute per worker, file downloads included (0 = no limit) |
 | `--search-rpm N` | 0 | max search API requests per minute per worker (0 = no limit) |
@@ -699,7 +807,7 @@ are URL-encoded. With `--download-files`, a hit whose file was saved also has
 | `--index-active-after/--index-active-before DATE` | — | index only projects active in the window (API filter) |
 | `--active-after DATE` (`--started-from`), `--active-before DATE` | — | search only indexed projects active in the window |
 | `--file-changed-after/--file-changed-before DATE` | — | keep hits only in files changed in the window (commits API) |
-| `-m, --mode` | `search` | `search`, `dump-index`, `dedup`, `convert` |
+| `-m, --mode` | `search` | `search`, `dump-index`, `find-limits` (experimental), `dedup`, `convert` |
 | `-s, --search TERM` | — | single term |
 | `-f, --terms-file FILE` | — | file with one term per line |
 | `--filename PATTERN` | — | search only files with this name: exact (`settings.py`, extension included) or a mask with `*` (`*.env`, `config*`) |

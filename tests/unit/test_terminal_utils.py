@@ -365,3 +365,37 @@ def test_broken_listener_does_not_break_output():
     status.add_listener(lambda text: 1 / 0)
     status.write_line("still printed")
     assert stream.getvalue() == "still printed\n"
+
+
+# --------------------------------------------------------------------------- overlay and badge
+
+
+def test_overlay_replaces_the_status_line_and_badge_prefixes_it():
+    from tests.helpers import FakeStream
+
+    stream = FakeStream(tty=True)
+    status = StatusLine(stream, interactive=True, ticker=False, columns=lambda: 200)
+    status.attach(lambda: "Searching")
+    status.set_badge("[Limiter: L]")
+    assert stream.getvalue().endswith("[Limiter: L] Searching")
+    status.set_overlay(lambda: "[Limiter] Apply? 20s")
+    assert stream.getvalue().rstrip().endswith("[Limiter] Apply? 20s")
+    status.write_line("a log line")
+    assert stream.getvalue().rstrip().endswith("[Limiter] Apply? 20s")  # redrawn after the line
+    status.detach()
+    assert stream.getvalue().rstrip().endswith("[Limiter] Apply? 20s")  # the overlay stays
+    status.set_overlay(None)
+    assert stream.getvalue().endswith("\r")  # erased: nothing left to show
+
+
+def test_overlay_is_never_drawn_off_a_terminal():
+    from tests.helpers import FakeStream
+
+    stream = FakeStream(tty=False)
+    status = StatusLine(stream, interactive=False, ticker=False)
+    status.set_overlay(lambda: "question")
+    status.set_badge("[Limiter]")
+    status.tick()
+    assert stream.getvalue() == ""
+
+

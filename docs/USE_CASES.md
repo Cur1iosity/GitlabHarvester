@@ -283,6 +283,19 @@ gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -f words.txt -
 gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -f words.txt --rpm 10 --jitter 0.5-3
 ```
 
+Don't know the limit? Measure it (experimental): `-m find-limits` prints the `--workers`,
+`--index-rpm` and `--search-rpm` to use, `--auto-limits` measures before the search,
+offers the settings and, during the scan, proposes lower limits after HTTP 429
+without stopping it (`[Limiter: L]` in the status line, `L` shows the proposal).
+The probe provokes 429 on purpose, so it is noisy:
+
+```bash
+gitlab-harvester -m find-limits -u https://gitlab.example.com -t "$GITLAB_TOKEN"
+gitlab-harvester -u https://gitlab.example.com -t "$GITLAB_TOKEN" -f words.txt -b all --auto-limits
+```
+
+Details: [usage.md](usage.md#finding-the-rate-limits--m-find-limits---auto-limits-experimental).
+
 `--jitter` draws a new delay for every request, so the traffic doesn't come at the
 fixed interval that `--rpm` alone produces (easy to spot in logs).
 

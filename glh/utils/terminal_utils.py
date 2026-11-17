@@ -16,6 +16,11 @@ There is one status line at a time, written to stderr:
 
 Console log records go through :meth:`StatusLine.write_line` (see
 ``logging_utils.ConsoleHandler``), so they never get mixed with the status line.
+
+On a terminal, an *overlay* (:meth:`StatusLine.set_overlay`) temporarily takes
+the place of the status line, e.g. a question with a countdown that must not
+stop the run (``--auto-limits``, see ``glh.autolimit``), and a *badge*
+(:meth:`StatusLine.set_badge`) is put in front of it, e.g. ``[Limiter]``.
 """
 
 from __future__ import annotations
@@ -153,6 +158,10 @@ class StatusLine:
 
         self._lock = threading.RLock()
         self._provider: Callable[[], str] | None = None
+        # Shown instead of the provider's text while set (terminal only).
+        self._overlay: Callable[[], str] | None = None
+        # Put in front of the provider's text, e.g. "[Limiter]".
+        self._badge = ""
         self._listeners: list[Callable[[str], None]] = []
         self._shown_width = 0
         self._last_refresh = 0.0
@@ -195,10 +204,20 @@ class StatusLine:
             self._write(self.stream, "\r" + " " * self._shown_width + "\r")
             self._shown_width = 0
 
-    def _draw(self) -> None:
+    def _text(self) -> str | None:
+        """What the line shows now: the overlay, else the badge and the provider's text."""
+        if self._overlay is not None:
+            return self._overlay()
         if self._provider is None:
+            return None
+        text = self._provider()
+        return f"{self._badge} {text}" if self._badge else text
+
+    def _draw(self) -> None:
+        raw = self._text()
+        if raw is None:
             return
-        text = fit_width(_single_line(self._provider()), self._width())
+        text = fit_width(_single_line(raw), self._width())
         width = display_width(text)
         # Pad with spaces to overwrite the remainder of a longer previous line.
         self._write(self.stream, "\r" + text + " " * max(self._shown_width - width, 0))
@@ -217,16 +236,49 @@ class StatusLine:
         self._ensure_ticker()
 
     def detach(self) -> None:
-        """Remove the status line."""
+        """Remove the status line (an overlay stays)."""
         with self._lock:
-            if self.interactive:
-                self._erase()
             self._provider = None
+            if self.interactive:
+                if self._overlay is not None:
+                    self._draw()
+                else:
+                    self._erase()
+
+    def set_overlay(self, provider: Callable[[], str] | None) -> None:
+        """
+        Show ``provider()`` instead of the status line until called with None.
+
+        Terminal only: elsewhere nothing is drawn. The ticker redraws it every
+        second, so a countdown in it keeps moving.
+        """
+        with self._lock:
+            self._overlay = provider
+            if self.interactive:
+                if provider is not None or self._provider is not None:
+                    self._draw()
+                else:
+                    self._erase()
+        if provider is not None:
+            self._ensure_ticker()
+
+    def set_badge(self, badge: str) -> None:
+        """Put ``badge`` in front of the status line ('' removes it)."""
+        with self._lock:
+            if badge == self._badge:
+                return
+            self._badge = badge
+            if self.interactive and (self._provider is not None or self._overlay is not None):
+                self._draw()
+
+    @property
+    def badge(self) -> str:
+        return self._badge
 
     def refresh(self, *, force: bool = False) -> None:
         """Redraw the status line (throttled unless ``force``)."""
         with self._lock:
-            if self._provider is None or not self.interactive:
+            if (self._provider is None and self._overlay is None) or not self.interactive:
                 return
             if force or self._clock() - self._last_refresh >= self._refresh_interval:
                 self._draw()
@@ -284,11 +336,13 @@ class StatusLine:
     def tick(self) -> None:
         """Periodic update: redraw on a terminal, heartbeat line otherwise."""
         with self._lock:
+            if self.interactive:
+                if self._provider is not None or self._overlay is not None:
+                    self._draw()
+                return
             if self._provider is None:
                 return
-            if self.interactive:
-                self._draw()
-            elif self._clock() - self._last_heartbeat >= self._heartbeat_interval:
+            if self._clock() - self._last_heartbeat >= self._heartbeat_interval:
                 self._last_heartbeat = self._clock()
                 self._write(self.stream, _single_line(self._provider()) + "\n")
 

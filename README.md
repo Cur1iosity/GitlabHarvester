@@ -78,6 +78,7 @@ config files:
 | `-t "tok1;tok2"`, `--token-file FILE` | several tokens run in parallel, each with its own workers and rate-limit budget |
 | `-w, --workers N` | parallel API requests per token, for instances without rate limits |
 | `--rpm N`, `--index-rpm N`, `--search-rpm N` | requests per minute per worker: all, non-search, search |
+| `-m find-limits`, `--auto-limits` | *experimental*: measure the API rate limits and get `--workers`/`--*-rpm` for them; during a search, propose lower limits after HTTP 429 |
 | `--jitter 0.01-0.05` | random delay before every request (seconds, or `10ms-50ms`) |
 | `-A STRING`, `--user-agent-file FILE` | fixed User-Agent, or a random one from the file for every request |
 | `-m dump-index`, `--dump-projects` | build or rebuild the project index |

@@ -316,3 +316,50 @@ def test_user_agent_from_config_file(tmp_path: Path, capsys):
     with pytest.raises(SystemExit):
         CliParser.parse(["-c", str(cfg)])
     assert "mutually exclusive" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- rate-limit detection
+
+
+def test_find_limits_mode_and_probe_defaults():
+    a = CliParser.parse(["-m", "find-limits"])
+    assert a.mode == "find-limits"
+    assert (a.auto_limits, a.probe_apis, a.probe_max, a.probe_margin) == (False, (), 600, 0.85)
+
+
+@pytest.mark.parametrize(("raw", "apis"), [("search", ("search",)), ("search,index", ("index", "search")),
+                                           (" INDEX ", ("index",))])
+def test_probe_apis(raw, apis):
+    assert CliParser.parse(["--probe-apis", raw]).probe_apis == apis
+
+
+@pytest.mark.parametrize("argv", [["--probe-apis", "branches"], ["--probe-apis", ","], ["--probe-max", "0"],
+                                  ["--probe-margin", "2"], ["--probe-margin", "5%"], ["--probe-margin", "x"]])
+def test_invalid_probe_options(argv):
+    with pytest.raises(SystemExit):
+        CliParser.parse(argv)
+
+
+def test_probe_margin_accepts_percent():
+    assert CliParser.parse(["--probe-margin", "70%"]).probe_margin == pytest.approx(0.7)
+
+
+@pytest.mark.parametrize(("argv", "explicit"), [
+    ([], set()),
+    (["-w", "1"], {"workers"}),
+    (["--rpm", "10"], {"index_rpm", "search_rpm"}),
+    (["--search-rpm", "0"], {"search_rpm"}),
+])
+def test_explicit_limits(argv, explicit):
+    a = CliParser.parse(argv)
+    assert a.explicit_limits == frozenset(explicit)
+    assert a.workers >= 1 and a.index_rpm >= 0 and a.search_rpm >= 0
+
+
+def test_explicit_limits_from_the_config_file(tmp_path):
+    cfg = tmp_path / "glh.ini"
+    cfg.write_text("[connection]\nworkers = 3\nsearch-rpm =\n[limits]\nauto-limits = true\n", encoding="utf-8")
+    a = CliParser.parse(["-c", str(cfg)])
+    assert a.auto_limits and a.workers == 3
+    assert a.explicit_limits == frozenset({"workers"})
+    assert not CliParser.parse(["-c", str(cfg), "--no-auto-limits"]).auto_limits
